@@ -1,0 +1,273 @@
+/*
+ * 반응형 규율: **좁은 폭이 기본**이다.
+ *
+ * 카톡처럼 아주 작은 창(폭 320px 안팎)으로 띄워 놓고 볼 가능성이 크다.
+ * 그래서 모바일 퍼스트로 짜고, 넓어지면 사이드바를 곁들인다.
+ *
+ *   ~ 719px : 한 번에 한 화면. body[data-view] 로 방목록 ↔ 대화를 전환한다.
+ *   720px ~ : 사이드바 + 대화 2단.
+ *
+ * 고정 픽셀 폭을 쓰지 않고, 가로 스크롤이 생기지 않도록 모든 텍스트에
+ * overflow-wrap 을 건다 (긴 URL 한 줄이 레이아웃을 깨는 것이 가장 흔한 사고다).
+ */
+
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --line: #e3e6ea;
+  --ink: #1b1f24;
+  --muted: #6b7280;
+  --accent: #2f6feb;
+  --accent-ink: #ffffff;
+  --mine: #dcf0d8;
+  --radius: 12px;
+  --gap: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --panel: #1c2024;
+    --line: #2b3138;
+    --ink: #e8eaed;
+    --muted: #9aa3ad;
+    --accent: #4d8dff;
+    --mine: #24402c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic",
+        "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.app {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------- 사이드바 */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { flex: 1; margin: 0; font-size: 15px; font-weight: 700; }
+
+.rooms { flex: 1; margin: 0; padding: 6px; list-style: none; overflow-y: auto; min-height: 0; }
+.room { margin-bottom: 4px; }
+.room-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.room-btn:hover { background: var(--bg); }
+.room.active .room-btn { background: var(--accent); color: var(--accent-ink); }
+.room-name { font-weight: 600; }
+.room-url { font-size: 11px; color: var(--muted); }
+.room.active .room-url { color: rgba(255, 255, 255, 0.8); }
+
+.empty, .hint { margin: 8px 12px; color: var(--muted); font-size: 12px; }
+
+.add-room { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.field { display: block; margin-bottom: 8px; }
+.field span { display: block; margin-bottom: 3px; font-size: 12px; color: var(--muted); }
+.field input { width: 100%; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* --------------------------------------------------------------- 대화 */
+
+.chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.titles { flex: 1; min-width: 0; }
+.titles h2 { margin: 0; font-size: 15px; }
+.sub { margin: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.timeline {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+  overflow-anchor: none;
+}
+
+.older-wrap { display: flex; justify-content: center; padding-bottom: 6px; }
+
+.messages { display: flex; flex-direction: column; gap: 6px; }
+
+.msg {
+  align-self: flex-start;
+  max-width: min(86%, 620px);
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.msg.mine { align-self: flex-end; background: var(--mine); }
+.msg.unknown { opacity: 0.7; border-style: dashed; }
+
+.msg-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--muted); }
+.msg-head .author { font-weight: 600; color: var(--ink); }
+.msg .body { white-space: pre-wrap; }
+.msg .quote {
+  margin: 3px 0;
+  padding: 3px 7px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.msg-actions { margin-top: 2px; }
+.link {
+  border: 0; background: none; padding: 0;
+  color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.link:hover { color: var(--accent); text-decoration: underline; }
+
+.jump {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 92px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------- 입력창 */
+
+.composer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: flex-end;
+  padding: 8px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+.composer .author { flex: 0 1 120px; min-width: 90px; }
+.composer textarea {
+  flex: 1 1 160px;
+  min-width: 0;
+  resize: none;
+  max-height: 160px;
+  font: inherit;
+}
+.reply-chip {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+.reply-chip button { border: 0; background: none; color: var(--muted); cursor: pointer; }
+
+.status { margin: 0; padding: 3px 10px 6px; font-size: 11px; color: var(--muted); min-height: 16px; }
+.status.error, .error { color: #c0392b; }
+
+/* -------------------------------------------------------------- 검색 */
+
+.search-bar { display: flex; gap: 6px; padding: 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.search-bar input { flex: 1; min-width: 0; }
+.search-results {
+  max-height: 45%;
+  overflow-y: auto;
+  padding: 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.search-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.hit { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.hit .author { font-weight: 600; font-size: 12px; }
+.hit .ts { margin-left: 6px; font-size: 11px; color: var(--muted); }
+.hit .body { white-space: pre-wrap; font-size: 13px; }
+
+/* -------------------------------------------------------------- 공통 */
+
+input, textarea, button {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: var(--bg);
+}
+button { cursor: pointer; background: var(--panel); }
+button:disabled { opacity: 0.6; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.icon-btn { padding: 4px 9px; line-height: 1.2; font-size: 16px; }
+
+[hidden] { display: none !important; }
+
+/* ------------------------------------------------------ 폭에 따른 배치 */
+
+/* 좁은 창: 한 번에 한 화면만 보여 준다. */
+@media (max-width: 719px) {
+  .sidebar { position: absolute; inset: 0; z-index: 5; border-right: 0; }
+  body[data-view="chat"] .sidebar { display: none; }
+  body[data-view="rooms"] .chat { display: none; }
+  .msg { max-width: 92%; }
+}
+
+/* 넓은 창: 2단. */
+@media (min-width: 720px) {
+  .sidebar { width: 260px; flex: 0 0 260px; }
+  .back { display: none; }
+}
+
+/* 아주 좁을 때 — 표시 이름 칸이 본문 줄을 잡아먹지 않게 위로 뺀다. */
+@media (max-width: 400px) {
+  .composer .author { flex: 1 1 100%; }
+}

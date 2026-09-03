@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>gitwire-chat</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-view="rooms" data-default-author="{{ default_author }}" data-recent-limit="{{ recent_limit }}">
+
+<div class="app">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <h1 class="brand">gitwire-chat</h1>
+      <button type="button" class="icon-btn" id="toggle-add" title="방 추가">＋</button>
+    </div>
+
+    <form class="add-room" id="add-room" hidden>
+      <label class="field">
+        <span>레포 주소</span>
+        <input type="text" id="repo-url" name="repo_url" required
+               placeholder="https://github.com/me/our-room.git" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>방 이름 (선택)</span>
+        <input type="text" id="room-name" name="name" placeholder="우리 방" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>토큰 환경변수 (선택)</span>
+        <input type="text" id="token-env" name="token_env" placeholder="GITWIRE_TOKEN" autocomplete="off">
+      </label>
+      <p class="hint">빈 레포를 넣으면 gitwire 가 방 규약을 심는다. 토큰 <b>값</b>은 저장하지 않는다 — 환경변수 이름만 기억한다.</p>
+      <div class="row">
+        <button type="submit" class="primary" id="add-room-submit">방 등록</button>
+        <button type="button" id="add-room-cancel">취소</button>
+      </div>
+      <p class="error" id="add-room-error" hidden></p>
+    </form>
+
+    <ul class="rooms" id="rooms"></ul>
+    <p class="empty" id="rooms-empty">등록된 방이 없다. ＋ 로 레포 주소를 넣어라.</p>
+  </aside>
+
+  <main class="chat" id="chat">
+    <header class="chat-head">
+      <button type="button" class="icon-btn back" id="back" title="방 목록">‹</button>
+      <div class="titles">
+        <h2 id="room-title">방을 고르자</h2>
+        <p class="sub" id="room-sub"></p>
+      </div>
+      <button type="button" class="icon-btn" id="refresh" title="지금 당겨오기">↻</button>
+      <button type="button" class="icon-btn" id="toggle-search" title="검색">⌕</button>
+    </header>
+
+    <form class="search-bar" id="search-bar" hidden>
+      <input type="search" id="search-q" placeholder="과거 대화까지 서버에서 찾는다" autocomplete="off">
+      <button type="submit" class="primary">검색</button>
+      <button type="button" id="search-close">닫기</button>
+    </form>
+
+    <section class="search-results" id="search-results" hidden>
+      <div class="search-head"><span id="search-summary"></span></div>
+      <div id="search-list"></div>
+    </section>
+
+    <div class="timeline" id="timeline">
+      <div class="older-wrap">
+        <button type="button" id="load-older" hidden>이전 대화 불러오기</button>
+      </div>
+      <div class="messages" id="messages" role="log" aria-live="polite"></div>
+    </div>
+
+    <button type="button" class="jump" id="jump-latest" hidden>새 메시지 ↓</button>
+
+    <form class="composer" id="composer">
+      <input type="text" class="author" id="author" placeholder="표시 이름" autocomplete="off">
+      <div class="reply-chip" id="reply-chip" hidden>
+        <span id="reply-label"></span>
+        <button type="button" id="reply-cancel" title="답장 취소">×</button>
+      </div>
+      <textarea id="text" rows="1" placeholder="메시지 (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+      <button type="submit" class="primary" id="send">보내기</button>
+    </form>
+
+    <p class="status" id="status"></p>
+  </main>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

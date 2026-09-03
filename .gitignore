@@ -1,0 +1,38 @@
+# gitwire-chat
+#
+# ⚠️ 규칙: 패턴 뒤에 인라인 주석을 붙이지 말 것.
+# gitignore 에서 '#' 는 **줄 첫 칸에서만** 주석이다.
+# 따라서 "chats/  # 방 클론" 은 패턴 전체를 무효화한다(실제 사고 사례).
+# 설명은 항상 패턴 위에 별도 줄로 쓴다.
+
+# 방 클론·커서·방 목록이 들어가는 로컬 상태 디렉토리.
+# ⚠️ 이 한 줄이 설계의 전제다 — 여기를 무시하지 않으면 클론이
+# embedded git repository 로 경고되고 gitlink 로 스테이징된다.
+chats/
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# 테스트·도구 캐시
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 자격증명 — 절대 커밋 금지
+.env
+*.token
+
+# 에디터
+.idea/
+.vscode/
+*.swp
+.DS_Store
