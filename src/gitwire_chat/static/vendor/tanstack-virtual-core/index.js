@@ -1,3 +1,6 @@
+/* @tanstack/virtual-core 3.17.8 (MIT) — npm 배포본 dist/esm/index.js 벤더링본.
+   ⚠️ 상류 원본에서 딱 한 가지를 바꿨다 (번들러가 했을 치환을 미리 해 둔 것).
+   무엇을·왜 바꿨는지와 상류 갱신 절차는 같은 디렉토리의 VENDORING.md 에 있다. */
 import { createLazyMeasurementsView } from "./lazy-measurements.js";
 import { memo, notUndefined, approxEqual, debounce } from "./utils.js";
 let _isIOSResult;
@@ -360,7 +363,7 @@ class Virtualizer {
         this.notify(isScrolling);
       },
       {
-        key: process.env.NODE_ENV !== "production" && "maybeNotify",
+        key: "production" !== "production" && "maybeNotify",
         debug: () => this.options.debug,
         initialDeps: [
           this.isScrolling,
@@ -714,7 +717,7 @@ class Virtualizer {
         return measurements;
       },
       {
-        key: process.env.NODE_ENV !== "production" && "getMeasurements",
+        key: "production" !== "production" && "getMeasurements",
         debug: () => this.options.debug
       }
     );
@@ -742,7 +745,7 @@ class Virtualizer {
         return this.range;
       },
       {
-        key: process.env.NODE_ENV !== "production" && "calculateRange",
+        key: "production" !== "production" && "calculateRange",
         debug: () => this.options.debug
       }
     );
@@ -773,7 +776,7 @@ class Virtualizer {
         });
       },
       {
-        key: process.env.NODE_ENV !== "production" && "getVirtualIndexes",
+        key: "production" !== "production" && "getVirtualIndexes",
         debug: () => this.options.debug
       }
     );
@@ -915,7 +918,7 @@ class Virtualizer {
         return virtualItems;
       },
       {
-        key: process.env.NODE_ENV !== "production" && "getVirtualItems",
+        key: "production" !== "production" && "getVirtualItems",
         debug: () => this.options.debug
       }
     );
@@ -1129,7 +1132,7 @@ class Virtualizer {
   // synchronous so the grown transforms commit in the same paint (#1227).
   applyScrollAdjustment(delta, behavior) {
     if (delta === 0) return false;
-    if (process.env.NODE_ENV !== "production" && this.options.debug) {
+    if ("production" !== "production" && this.options.debug) {
       console.info("correction", delta);
     }
     if (isIOSWebKit() && (this.isScrolling || this._iosTouching || this._iosJustTouchEnded)) {

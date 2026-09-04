@@ -155,6 +155,12 @@ html, body {
 .messages { position: relative; width: 100%; }
 .messages > .msg { position: absolute; top: 0; left: 0; right: 0; }
 
+/* 격하(degrade) 모드 — 가상 스크롤 엔진을 못 쓰는 환경에서 JS 가 이 클래스를
+   붙인다. 그때는 전부 그리므로 절대 위치가 아니라 평범한 흐름 배치여야 한다
+   (안 그러면 모든 메시지가 맨 위에 겹쳐 쌓인다). 느리지만 읽고 쓸 수 있다. */
+.messages.plain { height: auto; }
+.messages.plain > .msg { position: static; transform: none; margin-bottom: 6px; }
+
 .msg {
   /* 절대 위치(가상 스크롤) 안에서의 좌우 정렬은 margin 으로 한다. */
   margin-right: auto;

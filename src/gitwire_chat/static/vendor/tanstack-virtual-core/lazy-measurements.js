@@ -1,3 +1,5 @@
+/* @tanstack/virtual-core 3.17.8 (MIT) — npm 배포본 dist/esm/lazy-measurements.js
+   그대로. 바꾼 것 없음 (브라우저에 없는 전역을 참조하지 않는다). */
 function createLazyMeasurementsView(count, flat, getItemKey) {
   const cache = new Array(count);
   return new Proxy(cache, {
