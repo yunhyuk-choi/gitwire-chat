@@ -7,6 +7,7 @@
  *
  *   `message:new`  → 타임라인이 붙인다
  *   `rooms:list`   → 방 목록이 그린다 (그리고 현재 방의 상태를 다시 방송한다)
+ *   `outbox:state` → 아웃박스 표시 (아직 상대에게 못 간 말이 있나)
  *   `trouble`      → 상태줄
  */
 
@@ -49,6 +50,12 @@ export function createStream(env) {
       var data;
       try { data = JSON.parse(event.data); } catch (err) { return; }
       bus.emit('rooms:list', { rooms: data.rooms || [] });
+    });
+    /* 아직 원격에 못 나간 것이 있나. 서버가 **바뀔 때만** 민다. */
+    src.addEventListener('outbox', function (event) {
+      var data;
+      try { data = JSON.parse(event.data); } catch (err) { return; }
+      bus.emit('outbox:state', { roomId: data.room || id, state: data });
     });
     src.addEventListener('trouble', function (event) {
       try { status.set('폴링 경고: ' + JSON.parse(event.data).detail, true); }

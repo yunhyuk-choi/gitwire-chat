@@ -13,7 +13,8 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
-    POST /api/rooms/<id>/messages          보내기
+    POST /api/rooms/<id>/messages          보내기 (**원격 push 를 기다리지 않는다**)
+    POST /api/rooms/<id>/outbox            아직 못 나간 것을 지금 다시 밀기
     GET  /api/rooms/<id>/search?q=          서버측 레코드 검색
     POST /api/rooms/<id>/refresh           폴 주기를 기다리지 않고 즉시 당기기
     POST /api/rooms/<id>/visibility        이 탭이 방을 보고 있나 (알림 판정)
@@ -176,6 +177,24 @@ def create_app(
         return jsonify(
             {"messages": manager.messages_json(room_id, items), "query": query}
         )
+
+    @app.post("/api/rooms/<room_id>/outbox")
+    def flush_outbox(room_id: str):
+        """사용자가 누른 '다시 보내기'.
+
+        전송 응답이 push 를 기다리지 않게 되면서 "아직 상대에게 못 갔다"가 방
+        단위 상태가 됐다 (`rooms.outbox`). 그 상태에서 사람이 취할 수 있는 유일한
+        행동이 이것이라, 버튼도 엔드포인트도 하나면 된다.
+        """
+        try:
+            state = manager.flush_outbox(room_id)
+        except RoomNotReady as exc:
+            return jsonify(
+                {"error": str(exc), "status": manager.status(room_id).to_json()}
+            ), 409
+        except RoomError as exc:
+            return jsonify({"error": str(exc)}), 404
+        return jsonify({"outbox": state.to_json()})
 
     @app.post("/api/rooms/<room_id>/refresh")
     def refresh(room_id: str):

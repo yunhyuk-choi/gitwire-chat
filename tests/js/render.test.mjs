@@ -959,7 +959,7 @@ await test('⭐ 성공 시 진짜 봉투 ID 로 갈아끼우되 노드를 다시
   assert.equal(chat.state.oldest.indexOf('~'), -1, '임시 ID 가 페이징 커서가 됐다');
 });
 
-await test('⭐ 실패: 말풍선이 남고 "전송 실패" + 재시도가 붙는다 (입력 내용 안 잃음)', async () => {
+await test('⭐ 실패: 말풍선이 남고 "보내지 못했다" + 재시도가 붙는다 (입력 내용 안 잃음)', async () => {
   const { doc, chat, context, list, before, bubble, sending } =
     await startSending('실패할 말');
 
@@ -967,14 +967,17 @@ await test('⭐ 실패: 말풍선이 남고 "전송 실패" + 재시도가 붙�
   await sending;
 
   assert.ok(String(bubble.className).includes('failed'));
-  assert.ok(bubble.textContent.includes('전송 실패'));
+  /* ⚠️ 문구가 '전송 실패' 에서 바뀌었다. 전송 응답이 원격 push 를 기다리지 않게
+     되면서 이 실패는 **앱이 이 말을 받지 못했다**(어디에도 기록되지 않았다)를
+     뜻하게 됐다. "상대에게 못 갔다"는 방 단위 사실이고 아웃박스 띠가 그린다. */
+  assert.ok(bubble.textContent.includes('보내지 못했다'));
   assert.ok(bubble.textContent.includes('재시도'));
   // 글은 말풍선 안에 그대로 있다 — 입력칸으로 되돌리지 않는다(같은 글이 두 곳에
   // 생기는 것을 막는다).
   assert.ok(bubble.textContent.includes('실패할 말'));
   assert.equal(doc.getElementById('text').value, '');
   assert.equal(list.children.length, before + 1);
-  assert.ok(doc.getElementById('status').textContent.includes('전송 실패'));
+  assert.ok(doc.getElementById('status').textContent.includes('보내지 못했다'));
 
   // 재시도 — 사용자가 그 버튼을 누른다.
   const createdBefore = chat.stats.created;
@@ -1014,6 +1017,81 @@ await test('⭐ SSE 가 응답보다 먼저 와도 같은 말이 두 번 뜨지 
   assert.equal(chat.stats.rebuiltInView, 0);
   assert.equal(chat.pendings().size, 0);
   assert.equal(chat.items().filter((m) => m.text === '겹치는 말').length, 1);
+});
+
+/* ------------------------------------------- 아웃박스 (아직 못 나간 말) */
+
+await test('⭐ 정상(synced/sending)에는 아웃박스 띠가 뜨지 않는다', async () => {
+  const { doc, chat } = await boot();
+  const box = doc.getElementById('outbox');
+  assert.equal(box.hidden, true, '아무 일도 없는데 띠가 떴다');
+
+  StubEventSource.current.emit('outbox',
+    { room: 'r1', state: 'sending', pending: 2, detail: '' });
+  assert.equal(box.hidden, true, '정상 경로(sending)인데 띠가 떴다');
+  assert.equal(chat.outbox().state, 'sending');
+
+  StubEventSource.current.emit('outbox',
+    { room: 'r1', state: 'synced', pending: 0, detail: '' });
+  assert.equal(box.hidden, true);
+});
+
+await test('⭐ stuck 이면 띠가 뜨고, 낫는 순간 사라진다 (조용한 실패 금지)', async () => {
+  const { doc } = await boot();
+  const box = doc.getElementById('outbox');
+
+  StubEventSource.current.emit('outbox', {
+    room: 'r1', state: 'stuck', pending: 3,
+    detail: '인증에 실패했다 (토큰이 없거나 권한이 없다)'
+  });
+  assert.equal(box.hidden, false, '못 나갔는데 아무것도 안 보인다');
+  const text = doc.getElementById('outbox-text').textContent;
+  assert.ok(text.includes('3건'), text);
+  assert.ok(text.includes('아직 상대에게 못 간'), text);
+  assert.ok(text.includes('인증에 실패'), text);
+  /* 로컬에는 남아 있다는 사실이 함께 보여야 한다 — 안 그러면 사용자가 다시 쓴다. */
+  assert.ok(text.includes('내 기기에는 남아 있'), text);
+
+  StubEventSource.current.emit('outbox',
+    { room: 'r1', state: 'synced', pending: 0, detail: '' });
+  assert.equal(box.hidden, true, '나갔는데 경고가 남았다');
+});
+
+await test('⭐ 아웃박스 띠의 "다시 보내기"가 서버를 부른다', async () => {
+  const { doc, fetchStub } = await boot({
+    routes: { '/api/rooms/r1/outbox': { outbox: { state: 'sending', pending: 1, detail: '' } } }
+  });
+  StubEventSource.current.emit('outbox',
+    { room: 'r1', state: 'stuck', pending: 1, detail: '네트워크에 연결하지 못했다' });
+  assert.equal(doc.getElementById('outbox').hidden, false);
+
+  doc.getElementById('outbox-retry').dispatch('click');
+  await settle();
+  const calls = fetchStub.calls.filter((c) => c.path === '/api/rooms/r1/outbox');
+  assert.equal(calls.length, 1, '다시 보내기가 서버를 부르지 않았다');
+  assert.equal(calls[0].init.method, 'POST');
+  /* 서버가 준 그 순간의 상태를 그대로 반영한다 (낙관적으로 지우지 않는다). */
+  assert.equal(doc.getElementById('outbox').hidden, true);
+});
+
+await test('방을 막 열었을 때 이미 못 나간 말이 있으면 바로 보인다', async () => {
+  const { doc } = await boot({
+    rooms: [
+      { id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방',
+        outbox: { state: 'stuck', pending: 2, detail: '네트워크에 연결하지 못했다' } },
+      { id: 'r2', repo_url: 'https://example.invalid/two.git', name: '둘째 방' }
+    ]
+  });
+  assert.equal(doc.getElementById('outbox').hidden, false,
+    '최초 그리기에서 못 나간 말을 놓쳤다');
+  assert.ok(doc.getElementById('outbox-text').textContent.includes('2건'));
+});
+
+await test('다른 방의 아웃박스 상태가 지금 방에 새지 않는다', async () => {
+  const { doc } = await boot();
+  StubEventSource.current.emit('outbox',
+    { room: 'r2', state: 'stuck', pending: 9, detail: '남의 방 사고' });
+  assert.equal(doc.getElementById('outbox').hidden, true);
 });
 
 await test('보류 중에 방을 바꾸면 그 방의 말이 새 방에 새지 않는다', async () => {

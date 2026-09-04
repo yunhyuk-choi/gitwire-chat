@@ -456,7 +456,7 @@ export function createTimeline(env) {
     draft.pending = false;
     draft.failed = true;
     paintState(dom, nodes.get(tempId), draft, hooks);
-    status.set('전송 실패: ' + errText(error), true);
+    status.set('보내지 못했다 (앱에 기록되지 않았다): ' + errText(error), true);
   }
 
   function retry(draft) {

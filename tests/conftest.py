@@ -14,6 +14,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -71,6 +72,12 @@ class FakeChannel:
         # 읽기가 원격을 봤는지(=fresh) 그대로 기록한다. 테스트가 이 값을 본다.
         self.read_fresh: list[bool] = []
         self.polls = 0
+        # 밀어내기(= 커밋·push) 대역. 앱이 **응답 밖에서** 미는지 보려면 이 호출이
+        # 언제·몇 번 났는지가 필요하다.
+        self.flushes = 0
+        self.pushed = 0             # 원격에 갔다고 친 레코드 수
+        self.flush_error: BaseException | None = None
+        self.flush_delay = 0.0      # 느린 push 흉내 (응답이 이걸 기다리면 안 된다)
         self._cursor = 0
         self._clock = datetime(2026, 9, 3, 1, 0, 0, tzinfo=timezone.utc)
         self._n = 0
@@ -89,6 +96,27 @@ class FakeChannel:
         for callback in list(self.subscribers):
             callback(record)
         return record
+
+    def flush(self, push_attempts: int = 5) -> int:
+        """대기 중인 레코드를 원격까지 민다 (기반 `Channel.flush` 자리).
+
+        ⚠️ 실패는 `flushed` 를 전진시키지 않는다 — 그래야 '아직 안 나갔다' 가
+        대역에서도 진짜 사실이 된다.
+        """
+        self.flushes += 1
+        if self.flush_delay:
+            time.sleep(self.flush_delay)
+        if self.flush_error is not None:
+            raise self.flush_error
+        with self._lock:
+            n = len(self.records) - self.pushed
+            self.pushed = len(self.records)
+        return n
+
+    def unpushed(self) -> list[gitwire.Record]:
+        """아직 원격에 못 간 레코드 (지상 검증용)."""
+        with self._lock:
+            return self.records[self.pushed:]
 
     def inject(self, payload, sender="other.host") -> gitwire.Record:
         """다른 참가자가 보낸 것처럼 레코드를 밀어 넣는다 (구독 전달까지)."""

@@ -258,7 +258,8 @@ export const ELEMENT_IDS = [
   'room-trouble', 'room-trouble-text', 'room-trouble-hint', 'room-retry',
   'new-repo-toggle', 'new-repo-form', 'new-repo-owner', 'new-repo-name',
   'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
-  'new-repo-use', 'new-repo-error'
+  'new-repo-use', 'new-repo-error',
+  'outbox', 'outbox-text', 'outbox-retry'
 ];
 
 /* IntersectionObserver 대역.
