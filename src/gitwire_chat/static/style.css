@@ -134,10 +134,21 @@ html, body {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px;
+  /* 브라우저 자체 스크롤 앵커링을 끈다. 구현이 브라우저마다 달라 믿을 수 없고,
+     우리가 직접 하는 보정(app.js prependMessages)과 겹치면 두 번 밀린다. */
   overflow-anchor: none;
 }
 
-.older-wrap { display: flex; justify-content: center; padding-bottom: 6px; }
+/* 위로 스크롤하면 보이는 표식. 이게 보이면 과거가 자동으로 이어 붙는다.
+   버튼이 아니다 — 상태 문구만 바뀐다. */
+.older-sentinel {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0 8px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-anchor: none;
+}
 
 .messages { display: flex; flex-direction: column; gap: 6px; }
 

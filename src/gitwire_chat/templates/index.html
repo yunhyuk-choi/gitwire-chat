@@ -65,8 +65,10 @@
     </section>
 
     <div class="timeline" id="timeline">
-      <div class="older-wrap">
-        <button type="button" id="load-older" hidden>이전 대화 불러오기</button>
+      <!-- 위로 스크롤하면 이 표식이 보이고, 그때 과거가 자동으로 이어 붙는다.
+           페이지 버튼이 아니다 — 카톡에서 "2페이지"를 누르지 않는 것과 같다. -->
+      <div class="older-sentinel" id="older-sentinel" aria-live="polite">
+        <span id="older-note">이전 대화를 불러오는 중…</span>
       </div>
       <div class="messages" id="messages" role="log" aria-live="polite"></div>
     </div>

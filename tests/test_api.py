@@ -74,7 +74,7 @@ def test_이전_불러오기_페이징(client, manager):
         manager.send(room.id, f"메시지 {i}")
 
     first = client.get(f"/api/rooms/{room.id}/messages").get_json()
-    assert len(first["messages"]) == 5 and first["maybe_more"] is True
+    assert len(first["messages"]) == 5 and first["has_more"] is True
 
     oldest = first["messages"][0]["id"]
     page = client.get(

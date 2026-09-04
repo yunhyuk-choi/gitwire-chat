@@ -9,6 +9,9 @@
 * 상시 구독 → 새 메시지를 이벤트 버스로, 그리고 조건이 맞으면 OS 알림으로
 
 전송 계층은 **전부 gitwire 에 위탁한다.** 여기에 git 명령이 단 한 줄도 없다.
+전송 수준 식별자(``sender``)도 마찬가지다 — 예전에는 이 앱이 ``instance.txt`` 로
+직접 난수를 붙였지만, 지금은 gitwire 가 ``<home>/installation.txt`` 에 설치본
+식별자를 만들어 준다. **기반이 보장하는 것을 소비자가 다시 풀지 않는다.**
 
 주입 가능성
 ----------
@@ -21,14 +24,26 @@ from __future__ import annotations
 import logging
 import threading
 from collections import OrderedDict
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import gitwire
 
+# 이 앱은 기반의 **새 표면**에 의존한다: 설치본 식별자(installation_id)와
+# keyset 역방향 페이징(Channel.history_page). 낮은 gitwire 로 돌면 한참 뒤에
+# 엉뚱한 곳에서 터지므로, 여기서 즉시 분명하게 실패한다 (조용한 실패 금지).
+if not hasattr(gitwire, "installation_id") or not hasattr(
+    gitwire.Channel, "history_page"
+):  # pragma: no cover - 설치 환경 문제
+    raise ImportError(
+        "gitwire 가 너무 낮다 — gitwire 0.2.0+ 가 필요하다 "
+        "(pip install --force-reinstall "
+        '"gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git")'
+    )
+
 from . import schema
-from .config import Room, RoomStore, Settings, instance_id, with_defaults
+from .config import Room, RoomStore, Settings, with_defaults
 from .events import EventBus
 from .notify import Notifier
 
@@ -42,6 +57,29 @@ class RoomError(Exception):
     """방 등록·조회 실패 (사용자에게 그대로 보여줘도 되는 메시지)."""
 
 
+@dataclass(frozen=True)
+class MessagePage:
+    """타임라인 한 쪽 + "더 있는가".
+
+    ``has_more`` 를 추측(``len(items) == limit``)하지 않고 **기반에서 그대로
+    받아** 싣는다. 추측은 마지막 쪽 크기가 우연히 limit 과 같을 때 틀리고,
+    그러면 브라우저가 헛요청을 한 번 더 보낸다.
+    """
+
+    messages: list[schema.Message] = field(default_factory=list)
+    has_more: bool = False
+
+    @property
+    def oldest(self) -> str | None:
+        return self.messages[0].id if self.messages else None
+
+    def __len__(self) -> int:
+        return len(self.messages)
+
+    def __iter__(self):
+        return iter(self.messages)
+
+
 def room_id_for(repo_url: str) -> str:
     """레포 URL → 방 ID. gitwire 의 정규화·해시 규약을 그대로 쓴다.
 
@@ -53,17 +91,6 @@ def room_id_for(repo_url: str) -> str:
 def _display_name(repo_url: str) -> str:
     norm = gitwire.normalize_repo_url(repo_url)
     return norm.rstrip("/").rsplit("/", 1)[-1] or norm
-
-
-def _ts_from_record_id(record_id: str) -> datetime:
-    """레코드 ID 앞머리의 고정폭 타임스탬프를 되읽는다 (로컬 에코용)."""
-    try:
-        from gitwire.records import parse_ts
-
-        stamp = record_id.rsplit("/", 1)[-1].split("-", 1)[0]
-        return parse_ts(stamp)
-    except Exception:  # noqa: BLE001
-        return datetime.now(timezone.utc)
 
 
 class _Seen:
@@ -113,8 +140,10 @@ class RoomManager:
         self._subs: dict[str, Any] = {}
         self._seen: dict[str, _Seen] = {}
         self._started = False
-        self.instance = instance_id(settings.home)
-        """이 설치의 전송 수준 식별자 (gitwire sender). 표시 이름이 아니다."""
+        self.instance = gitwire.installation_id(settings.home)
+        """이 설치의 전송 수준 식별자. **gitwire 가 만들고 영속시킨다** — 같은
+        머신의 두 인스턴스가 갈리고 재시작해도 유지된다. 표시 이름이 아니다
+        (그건 payload 의 ``author``)."""
 
         for room in self.store.load():
             self._rooms[room.id] = with_defaults(room, settings)
@@ -156,7 +185,8 @@ class RoomManager:
         kwargs: dict[str, Any] = {
             "home": self.home,
             "consumer": "chat",
-            "sender": self.instance,
+            # sender 를 넘기지 않는다 — 같은 home 이므로 gitwire 가 이 앱과
+            # 똑같은 설치본 식별자(= self.instance)를 쓴다.
             "name": room.name or None,
             "poll_interval": room.poll_interval or self.settings.poll_interval,
         }
@@ -250,6 +280,7 @@ class RoomManager:
     # ----------------------------------------------------------- 타임라인
 
     def _messages(self, room_id: str, limit: int | None = None) -> list[schema.Message]:
+        """전량(또는 최근 N건) — 검색처럼 정말 전부 훑어야 하는 곳 전용."""
         channel = self.channel(room_id)
         try:
             records = channel.history(limit)
@@ -257,33 +288,44 @@ class RoomManager:
             raise RoomError(f"기록을 읽을 수 없다: {exc}") from exc
         return [schema.parse_record(r) for r in records]
 
-    def timeline(self, room_id: str, limit: int | None = None) -> list[schema.Message]:
-        """최근 N건 (시간순). v1 은 가상 스크롤 없이 이만큼만 그린다."""
-        return self._messages(room_id, limit or self.settings.recent_limit)
+    def page(
+        self, room_id: str, *, before: str | None = None, limit: int | None = None
+    ) -> MessagePage:
+        """타임라인 한 쪽. ``before`` 가 없으면 최신 쪽.
+
+        기반의 keyset 페이징(``history_page``)에 그대로 얹는다 — **요청한 만큼의
+        레코드만 열린다.** 예전에는 '이전 불러오기'가 매번 대화 전체를 읽었다.
+        """
+        channel = self.channel(room_id)
+        size = limit or (
+            self.settings.page_limit if before else self.settings.recent_limit
+        )
+        try:
+            page = channel.history_page(before=before, limit=size)
+        except Exception as exc:  # noqa: BLE001
+            raise RoomError(f"기록을 읽을 수 없다: {exc}") from exc
+        return MessagePage(
+            [schema.parse_record(r) for r in page.records], bool(page.has_more)
+        )
+
+    def timeline(self, room_id: str, limit: int | None = None) -> MessagePage:
+        """최근 N건 (시간순) + 더 있는지."""
+        return self.page(room_id, limit=limit)
 
     def older(
         self, room_id: str, before_id: str, limit: int | None = None
-    ) -> list[schema.Message]:
-        """`before_id` 보다 앞선 메시지 최대 N건 ('이전 불러오기').
-
-        ⚠️ gitwire 의 ``history()`` 는 "최근 N건"만 지원하고 커서 기준 역방향
-        페이징이 없다. 그래서 지금은 전체를 읽어 잘라낸다 — 대화가 아주 길면
-        비싸다. (기반 API 피드백으로 남겼다.)
-        """
-        limit = limit or self.settings.page_limit
-        everything = self._messages(room_id, None)
-        cut = len(everything)
-        for index, message in enumerate(everything):
-            if message.id == before_id:
-                cut = index
-                break
-        start = max(0, cut - limit)
-        return everything[start:cut]
+    ) -> MessagePage:
+        """``before_id`` 보다 앞선 메시지 최대 N건 (위로 스크롤하면 이어 붙일 것)."""
+        return self.page(room_id, before=before_id, limit=limit)
 
     def search(
         self, room_id: str, query: str, limit: int = 50
     ) -> list[schema.Message]:
-        """서버에서 **레코드를 뒤진다** — DOM 에 없는 과거 메시지도 찾는다."""
+        """서버에서 **레코드를 뒤진다** — DOM 에 없는 과거 메시지도 찾는다.
+
+        ⚠️ 이건 여전히 전량 스캔이다. 역방향 페이징과 달리 "본문으로 찾기"는
+        레코드를 열어봐야 하는데 기반에 인덱스가 없다 (README 「정직한 한계」).
+        """
         query = (query or "").strip()
         if not query:
             return []
@@ -317,16 +359,12 @@ class RoomManager:
         )
         channel = self.channel(room_id)
         try:
-            record_id = channel.append(payload, flush=True)
+            record = channel.append(payload, flush=True)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"메시지를 보낼 수 없다: {exc}") from exc
 
-        record = gitwire.Record(
-            id=record_id,
-            sender=getattr(channel, "sender", "local"),
-            timestamp=_ts_from_record_id(record_id),
-            payload=payload,
-        )
+        # 기반이 방금 만든 Record 를 그대로 준다 — 에코를 그리려고 ID 에서 시각을
+        # 되파싱하지 않는다(그 경로에서 마이크로초가 깎였다).
         message = schema.parse_record(record)
         self._deliver(room_id, message, own=True)
         return message

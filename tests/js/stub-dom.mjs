@@ -185,12 +185,49 @@ export class StubDocument {
    여기가 먼저 깨지므로 템플릿↔스크립트 계약 검사도 된다. */
 export const ELEMENT_IDS = [
   'rooms', 'rooms-empty', 'messages', 'timeline', 'room-title', 'room-sub',
-  'status', 'composer', 'text', 'author', 'send', 'load-older', 'jump-latest',
+  'status', 'composer', 'text', 'author', 'send', 'older-sentinel', 'older-note',
+  'jump-latest',
   'reply-chip', 'reply-label', 'reply-cancel', 'add-room', 'add-room-submit',
   'add-room-error', 'repo-url', 'room-name', 'token-env', 'toggle-add',
   'add-room-cancel', 'back', 'refresh', 'toggle-search', 'search-bar',
   'search-q', 'search-close', 'search-results', 'search-list', 'search-summary'
 ];
+
+/* IntersectionObserver 대역.
+ *
+ * 진짜 관찰자는 "표식이 화면에 들어오면" 알아서 발화한다. 여기서는 그 순간을
+ * 테스트가 `trigger()` 로 만든다 — 발화 시점을 손에 쥐어야 "연속 발화해도 요청은
+ * 한 번인가", "맨 위에 닿으면 조용히 멈추는가"를 셀 수 있다.
+ *
+ * `observe`/`unobserve`/`disconnect` 를 진짜처럼 지키는 것이 요점이다:
+ * 앱이 로딩 중에 관찰을 끊었다면 `trigger()` 를 해도 콜백이 오면 안 된다.
+ */
+export class StubIntersectionObserver {
+  constructor(callback, options) {
+    this.callback = callback;
+    this.options = options || {};
+    this.observing = new Set();
+    this.disconnected = false;
+    StubIntersectionObserver.created.push(this);
+  }
+  observe(node) { this.observing.add(node); this.disconnected = false; }
+  unobserve(node) { this.observing.delete(node); }
+  disconnect() { this.observing.clear(); this.disconnected = true; }
+  /* 관찰 중인 표식이 화면에 들어왔다고 알린다. 관찰이 끊겼으면 아무 일도 없다. */
+  trigger() {
+    const entries = [...this.observing].map((node) => ({
+      target: node, isIntersecting: true, intersectionRatio: 1
+    }));
+    if (!entries.length) { return 0; }
+    this.callback(entries, this);
+    return entries.length;
+  }
+  static reset() { StubIntersectionObserver.created = []; }
+  static get current() {
+    return StubIntersectionObserver.created[StubIntersectionObserver.created.length - 1];
+  }
+}
+StubIntersectionObserver.created = [];
 
 export class StubEventSource {
   constructor(url) {

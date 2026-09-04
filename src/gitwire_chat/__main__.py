@@ -2,6 +2,12 @@
 
 OS 중립을 위해 셸 스크립트·서비스 등록에 기대지 않는다. 파이썬 하나로 3 OS 를
 덮는다. 자동 시작(로그인 시 기동)은 v1 범위 밖이며 README 에 OS 별 안내만 있다.
+
+⚠️ **바인드 주소는 루프백 고정이고 바꿀 수 없다.** 이 앱은 인증을 하지 않는데,
+그건 결함이 아니라 "내 컴퓨터에서 나만 쓴다"는 설계다. 외부로 여는 스위치를
+두면 그 설계 전제가 옵션 하나로 무너지고, 남는 건 경고문뿐이다. 그래서 옵션
+자체를 두지 않는다. 밖에서 접근해야 한다면 그건 이 앱이 아니라 앞단(SSH 터널·
+리버스 프록시)이 인증과 함께 책임질 일이다.
 """
 
 from __future__ import annotations
@@ -14,7 +20,8 @@ import webbrowser
 from .app import create_app
 from .config import load_settings
 
-DEFAULT_HOST = "127.0.0.1"
+#: 루프백 고정 — 옵션이 아니다 (모듈 도크 참조).
+HOST = "127.0.0.1"
 DEFAULT_PORT = 8770
 
 
@@ -23,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gitwire-chat",
         description="git 레포를 메시지 저장소로 쓰는 로컬-퍼스트 채팅",
     )
-    parser.add_argument("--host", default=DEFAULT_HOST, help="바인드 주소")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="포트")
     parser.add_argument(
         "--home",
@@ -71,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         notifications=not args.no_notify,
     )
     app = create_app(settings)
-    url = f"http://{args.host}:{args.port}/"
+    url = f"http://{HOST}:{args.port}/"
     print(f"gitwire-chat — {url}", file=sys.stderr)
     print(f"로컬 상태: {settings.home}", file=sys.stderr)
     if args.open:
@@ -80,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 — 브라우저가 없어도 서버는 돈다
             pass
     try:
-        app.run(host=args.host, port=args.port, threaded=True, debug=False)
+        app.run(host=HOST, port=args.port, threaded=True, debug=False)
     except KeyboardInterrupt:
         pass
     finally:
