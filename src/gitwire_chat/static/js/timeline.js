@@ -70,7 +70,7 @@ export function createTimeline(env) {
   };
 
   var stats = {
-    created: 0, appended: 0, inserted: 0, prepended: 0, duplicates: 0,
+    created: 0, appended: 0, prepended: 0, duplicates: 0,
     recycled: 0, rebuiltInView: 0, measured: 0, cleared: 0,
     olderRequests: 0, anchored: 0, lastAnchor: 0, innerHTML: 0
   };
