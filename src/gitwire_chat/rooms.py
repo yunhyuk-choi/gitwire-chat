@@ -9,7 +9,10 @@
   대화가 쌓인 방이나 느린 네트워크에서 버튼이 수십 초 멈춰 있고 화면에는 아무
   설명이 없다 — 사용자는 앱이 죽은 줄 안다.
 * 타임라인 조회 (최근 N + 이전 불러오기) · 검색
-* 메시지 전송 (+ **로컬 에코**)
+* 메시지 전송 (+ **로컬 에코**). ⭐ 전송 응답은 **원격 push 를 기다리지 않는다** —
+  레코드 파일을 디스크에 남기는 즉시 돌아오고, 커밋·push 는 `outbox.Outbox` 가
+  백그라운드로 민다. 왜 그래도 유실이 없는지·상태를 무엇으로 말하는지는
+  `outbox` 모듈 도크 하나에 모여 있다.
 * 상시 구독 → 새 메시지를 이벤트 버스로, 그리고 조건이 맞으면 OS 알림으로
 
 전송 계층은 **전부 gitwire 에 위탁한다.** 여기에 git 명령이 단 한 줄도 없다.
@@ -61,6 +64,7 @@ from . import schema
 from .config import Room, RoomStore, Settings, with_defaults
 from .events import EventBus
 from .notify import Notifier
+from .outbox import Outbox, OutboxState
 
 log = logging.getLogger(__name__)
 
@@ -257,6 +261,9 @@ class RoomManager:
         self._subs: dict[str, Any] = {}
         self._seen: dict[str, _Seen] = {}
         self._status: dict[str, RoomStatus] = {}
+        # 방당 밀어내기 워커 하나 (`outbox.py`). 전송 응답이 push 를 기다리지
+        # 않게 하는 장치이자, "아직 안 나갔다"를 말하는 단일 원천이다.
+        self._outboxes: dict[str, Outbox] = {}
         # 방 하나의 클론이 **동시에 두 번** 시작되지 않게 한다 (같은 디렉토리다).
         self._connecting: dict[str, threading.Lock] = {}
         self._workers: dict[str, threading.Thread] = {}
@@ -299,7 +306,11 @@ class RoomManager:
             status = dict(self._status)
         return [
             {**room.to_json(),
-             "status": status.get(room.id, RoomStatus(CONNECTING)).to_json()}
+             "status": status.get(room.id, RoomStatus(CONNECTING)).to_json(),
+             # 아웃박스는 **변할 때** 자기 이벤트로 따로 흐른다. 여기에도 싣는 것은
+             # *최초 그리기* 때문이다 — 방을 막 열었을 때 이미 stuck 이면 다음
+             # 변화를 기다리지 말고 바로 보여야 한다. 값의 원천은 한 함수다.
+             "outbox": self.outbox_state(room.id).to_json()}
             for room in rooms
         ]
 
@@ -414,6 +425,9 @@ class RoomManager:
             self._set_status(room_id, status)
             return False
         self._set_status(room_id, RoomStatus(READY))
+        # 붙자마자 한 번 — 지난 실행이 커밋·push 하지 못하고 남긴 레코드가 여기서
+        # 나간다 (강제 종료 후 유실 방지의 본체 — `_drain_outbox` 도크).
+        self._drain_outbox(room_id)
         if self._started:
             self._start_room(room_id)
             self._publish_rooms()       # 구독까지 붙은 상태를 한 번 더 알린다
@@ -495,10 +509,17 @@ class RoomManager:
             self._rooms.pop(room_id, None)
             sub = self._subs.pop(room_id, None)
             channel = self._channels.pop(room_id, None)
+            box = self._outboxes.pop(room_id, None)
             self._seen.pop(room_id, None)
             self._status.pop(room_id, None)
             self._connecting.pop(room_id, None)
             self._workers.pop(room_id, None)
+        if box is not None:
+            # 목록에서 빼도 **아직 안 나간 말은 밀어내고** 접는다.
+            try:
+                box.close()
+            except Exception:  # noqa: BLE001
+                log.debug("아웃박스 정리 실패", exc_info=True)
         if sub is not None:
             try:
                 sub.stop()
@@ -625,15 +646,79 @@ class RoomManager:
         )
         channel = self._ready_channel(room_id)
         try:
-            record = channel.append(payload, flush=True)
+            # ⭐ `flush=True` 를 뗐다. 기반은 이 호출에서 **파일을 디스크에 쓴다** —
+            # 거기까지가 내구성이고, `flush=True` 가 더 얹던 것은 *동기 push* 뿐이다.
+            # 그 push 가 응답에 2.7~3.4초를 붙이고 있었다 (`outbox` 모듈 도크).
+            record = channel.append(payload)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"메시지를 보낼 수 없다: {exc}") from exc
+        # 파일이 생긴 **뒤에** 센다. 순서가 반대면 append 가 실패한 건까지 세어
+        # "안 나간 것이 있다"고 거짓말한다.
+        self.outbox(room_id).add()
 
         # 기반이 방금 만든 Record 를 그대로 준다 — 에코를 그리려고 ID 에서 시각을
         # 되파싱하지 않는다(그 경로에서 마이크로초가 깎였다).
         message = schema.parse_record(record)
         self._deliver(room_id, message, own=True)
         return message
+
+    # -------------------------------------------------------------- 아웃박스
+
+    def outbox(self, room_id: str) -> Outbox:
+        """방의 아웃박스 (없으면 만든다). 방당 워커 **하나** — 순서가 여기서 난다."""
+        with self._lock:
+            box = self._outboxes.get(room_id)
+            if box is not None:
+                return box
+        channel = self._ready_channel(room_id)      # 락 밖에서 (오래 걸릴 수 있다)
+        with self._lock:
+            box = self._outboxes.get(room_id)
+            if box is not None:
+                return box
+            box = Outbox(
+                channel.flush,
+                on_state=lambda state, _rid=room_id: self._publish_outbox(_rid, state),
+                describe=lambda exc, _rid=room_id: self._push_reason(_rid, exc),
+                name=f"outbox-{room_id[:8]}",
+            )
+            self._outboxes[room_id] = box
+        return box
+
+    def outbox_state(self, room_id: str) -> OutboxState:
+        """지금 상태. 아직 아웃박스가 없으면 '밀 것이 없다'가 정답이다."""
+        with self._lock:
+            box = self._outboxes.get(room_id)
+        return box.state if box is not None else OutboxState()
+
+    def flush_outbox(self, room_id: str) -> OutboxState:
+        """사용자가 누른 '다시 보내기' — 지금 한 번 밀어라."""
+        self.outbox(room_id).kick()
+        return self.outbox_state(room_id)
+
+    def _push_reason(self, room_id: str, exc: BaseException) -> str:
+        """push 실패를 사람이 읽는 한 줄로. 클론 실패와 **같은 분류기**를 쓴다.
+
+        인증 만료·네트워크 끊김·거부는 붙을 때나 밀 때나 같은 사고다 — 사유를
+        두 벌 쓰면 하나는 반드시 낡는다.
+        """
+        room = self._rooms.get(room_id)
+        return classify(exc, room).detail
+
+    def _publish_outbox(self, room_id: str, state: OutboxState) -> None:
+        self.bus.publish(room_id, "outbox", {"room": room_id, **state.to_json()})
+
+    def _drain_outbox(self, room_id: str) -> None:
+        """기동·재연결 직후 한 번 — 지난 실행이 남긴 미푸시 레코드를 밀어낸다.
+
+        ⭐ **유실 방지의 본체가 여기다.** 앱이 강제 종료되면 레코드 파일은 커밋도
+        push 도 되지 않은 채 작업 사본에 남는데, 기반의 `flush()` 가 그것을
+        먼저 커밋(`_absorb_worktree`)한 뒤 밀어낸다. 그래서 "보내고 바로 죽여도
+        다음 기동이 밀어낸다"가 성립한다.
+        """
+        try:
+            self.outbox(room_id).kick()
+        except (RoomError, RoomNotReady) as exc:
+            log.debug("방 %s 아웃박스 기동 실패: %s", room_id, exc)
 
     # -------------------------------------------------------------- 구독
 
@@ -734,6 +819,9 @@ class RoomManager:
             return
         with self._lock:
             self._subs[room_id] = sub
+        # `start()` 가 **이미 열려 있는** 채널을 바로 여기로 보내는 길도 있다
+        # (`_connect` 를 안 탄다). 그 길에서도 지난 실행의 잔여분이 나가야 한다.
+        self._drain_outbox(room_id)
 
     def start(self) -> None:
         """등록된 모든 방을 연결·구독한다. 한 방이 실패해도 나머지는 돈다.
@@ -758,6 +846,16 @@ class RoomManager:
             self._refreshers.clear()
         for thread in refreshers:            # 채널을 닫기 전에 당기기를 거둔다
             thread.join(timeout=5.0)
+        with self._lock:
+            boxes = list(self._outboxes.values())
+            self._outboxes.clear()
+        # ⭐ 채널을 닫기 **전에** 밀어낸다. 정상 종료라면 다음 기동까지 미룰 이유가
+        # 없다 (강제 종료는 이 경로를 못 타지만, 그때는 다음 기동이 밀어낸다).
+        for box in boxes:
+            try:
+                box.close()
+            except Exception:  # noqa: BLE001
+                log.debug("아웃박스 정리 실패", exc_info=True)
         with self._lock:
             subs = list(self._subs.values())
             self._subs.clear()
@@ -834,11 +932,12 @@ class RoomManager:
 
     def info(self, room_id: str) -> dict:
         status = self.status(room_id).to_json()
+        outbox = self.outbox_state(room_id).to_json()
         try:
             channel = self._ready_channel(room_id)
         except RoomNotReady as exc:
-            return {"status": status, "error": str(exc)}
+            return {"status": status, "outbox": outbox, "error": str(exc)}
         try:
-            return {"status": status, **channel.info()}
+            return {"status": status, "outbox": outbox, **channel.info()}
         except Exception as exc:  # noqa: BLE001
-            return {"status": status, "error": str(exc)}
+            return {"status": status, "outbox": outbox, "error": str(exc)}

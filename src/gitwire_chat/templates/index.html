@@ -108,6 +108,13 @@
       <button type="button" id="room-retry">재시도</button>
     </div>
 
+    <!-- 아직 내 기기를 떠나지 못한 말이 있을 때만 뜬다 (static/js/outbox.js).
+         말풍선의 '보내지 못했다'와 **다른 사고**라 자리도 문구도 따로 둔다. -->
+    <div class="outbox" id="outbox" hidden>
+      <span id="outbox-text"></span>
+      <button type="button" class="link" id="outbox-retry">다시 보내기</button>
+    </div>
+
     <form class="composer" id="composer">
       <input type="text" class="author" id="author" placeholder="표시 이름" autocomplete="off">
       <div class="reply-chip" id="reply-chip" hidden>

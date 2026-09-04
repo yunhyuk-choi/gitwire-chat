@@ -5,8 +5,13 @@
  * 변환만 한다. 그래서 "무엇이 노드를 다시 만들 수 있나"가 한 함수로 좁혀지고,
  * 리렌더 국소성이 감시가 아니라 **구조**에서 나온다.
  *
- * 상태 변화(보내는 중 / 전송 실패)는 노드를 다시 만들지 않고 `paintState` 가
+ * 상태 변화(보내는 중 / 보내지 못했다)는 노드를 다시 만들지 않고 `paintState` 가
  * 같은 노드 위에 덧입힌다.
+ *
+ * ⚠️ 여기 두 상태는 **"앱이 이 말을 받았나"** 까지만 말한다 (POST 한 번).
+ * 그 뒤 "내 기기를 떠나 상대에게 갔나"는 방 단위 사실이라 `outbox.js` 가 그린다.
+ * 전송 응답이 원격 push 를 기다리지 않게 된 순간부터 이 둘은 다른 사건이다 —
+ * 한 자리에 섞으면 "전송 실패"가 두 가지 전혀 다른 사고를 가리키게 된다.
  */
 
 import { timeLabel } from './dom.js';
@@ -61,7 +66,7 @@ export function paintState(dom, node, msg, hooks) {
   if (!slot) { return; }
   slot.replaceChildren();
   if (msg.failed) {
-    slot.appendChild(dom.make('span', 'state-text', '전송 실패'));
+    slot.appendChild(dom.make('span', 'state-text', '보내지 못했다'));
     var again = dom.make('button', 'link retry', '재시도');
     again.setAttribute('type', 'button');
     again.addEventListener('click', function () { hooks.onRetry(msg); });

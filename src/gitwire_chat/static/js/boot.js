@@ -31,6 +31,7 @@ import { createRoomList } from './roomlist.js';
 import { createAddRoom } from './addroom.js';
 import { createNewRepo } from './newrepo.js';
 import { createComposer } from './composer.js';
+import { createOutbox } from './outbox.js';
 import { createTimeline } from './timeline.js';
 import { createSearch } from './search.js';
 import { createStream } from './stream.js';
@@ -123,6 +124,7 @@ export function createApp(runtime) {
     };
     modules.newrepo = setup('레포 만들기', createNewRepo);
     modules.composer = setup('보내기', createComposer);
+    modules.outbox = setup('아웃박스', createOutbox);
     modules.search = setup('검색', createSearch);
     modules.stream = setup('받기', createStream);
     modules.presence = setup('알림·가시성', createPresence);
@@ -170,6 +172,8 @@ export function createApp(runtime) {
     planNewRepo: function () { return modules.newrepo ? modules.newrepo.plan() : undefined; },
     createNewRepo: function () { return modules.newrepo ? modules.newrepo.create() : undefined; },
     send: function () { return modules.composer ? modules.composer.send() : undefined; },
+    outbox: function () { return modules.outbox ? modules.outbox.state() : null; },
+    retryOutbox: function () { return modules.outbox ? modules.outbox.retry() : undefined; },
     runSearch: function () { return modules.search ? modules.search.run() : undefined; },
     connect: function (id) { if (modules.stream) { modules.stream.connect(id); } },
     disconnect: function () { if (modules.stream) { modules.stream.disconnect(); } }

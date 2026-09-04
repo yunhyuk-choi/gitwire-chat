@@ -16,6 +16,11 @@
 4. 반대 방향(B → A)도 성립한다.
 5. 두 인스턴스는 상대 메시지를 **자기 에코로 오인하지 않는다.**
 6. 보고 있는 탭이 없으면 **OS 알림 경로**를 탄다.
+
+⚠️ **전송 응답은 더 이상 push 를 기다리지 않는다** (`gitwire_chat.outbox`). 그래서
+"원격에 도달했나"는 POST 가 돌아온 시점의 사실이 아니라 *조금 뒤*의 사실이다 —
+아래 검증은 전부 그 지점을 `_wait` 로 기다린다. 기다리는 것과 흉내 내는 것은
+다르다: 여기서 보는 것은 여전히 **bare 레포 안의 진짜 파일**이다.
 """
 
 from __future__ import annotations
@@ -87,6 +92,16 @@ class Instance:
         )
         assert res.status_code == 201, res.get_data(as_text=True)
         return res.get_json()["message"]
+
+    def settle(self, timeout: float = DEADLINE) -> None:
+        """아직 원격에 못 간 것이 없어질 때까지 기다린다.
+
+        전송이 비동기가 된 뒤 "지금 원격에 있나"를 묻는 검증은 이 지점 뒤에
+        서야 한다. 앱의 자기 보고를 믿는 것이 아니라, *언제 봐도 되는지*를
+        아는 것이다 — 실제 확인은 여전히 bare 레포를 직접 연다.
+        """
+        for room in self.manager.rooms():
+            self.manager.outbox(room.id).wait_idle(timeout)
 
     def timeline(self) -> list[dict]:
         res = self.client.get(f"/api/rooms/{self.room_id}/messages")
@@ -167,7 +182,10 @@ def test_두_인스턴스가_실제_git_으로_대화한다(pair, bare_repo):
     said = a.say("안녕 B, 나 A야")
 
     # (5) 지상 검증 — 앱의 보고가 아니라 **bare 레포 안의 파일**을 직접 본다.
-    paths = _wait(lambda: _records_in_bare(bare_repo))
+    #     ⚠️ '레코드가 하나라도 있나'로 기다리면 안 된다 — 방 규약을 심을 때
+    #     들어간 `records/.gitkeep` 이 그 조건을 이미 만족시킨다(그래서 push 를
+    #     기다리지 않게 된 순간 이 검증이 헛통과했다). **그 레코드**를 기다린다.
+    paths = _wait(lambda: said["id"] in _records_in_bare(bare_repo)) and         _records_in_bare(bare_repo)
     assert paths, "레코드가 원격 레포에 도달하지 않았다"
     assert said["id"] in paths
     envelope = _record_payload(bare_repo, said["id"])
@@ -326,6 +344,9 @@ def test_내_것과_남의_것이_봉투로_갈린다(pair):
     assert said["mine"] is True, "전송 응답부터 내 것이 아니다"
 
     # (1) A 가 다시 읽는다 — 새로고침이 하는 그 요청이다.
+    #     ⚠️ 조회는 **커밋된 것**을 읽는다(기반의 읽기 API 가 커밋 기준이다).
+    #     커밋이 아웃박스로 넘어갔으므로 여기는 '보낸 직후'가 아니라 '한 바퀴 뒤'다.
+    a.settle()
     reread = [m for m in a.timeline() if m["id"] == said["id"]]
     assert reread and reread[0]["mine"] is True, "다시 읽으니 내 것이 아니게 됐다"
 
