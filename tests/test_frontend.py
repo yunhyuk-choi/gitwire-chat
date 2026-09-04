@@ -1,7 +1,14 @@
-"""프런트엔드 검증 — 브라우저가 없으니 `node --check` + stub DOM 으로 본다.
+"""프런트엔드 검증 — 빠르고 세밀한 층: `node --check` + stub DOM.
 
 ⭐ "전체 리렌더가 없다"의 증명은 `tests/js/render.test.mjs` 가 한다. 여기서는
 그것을 pytest 안으로 끌어와 같은 한 번의 `pytest -q` 로 돌게 만든다.
+
+⚠️ **이 층만으로는 부족하다.** stub DOM 은 Node 안에서 돌고(브라우저에만 없는
+전역을 못 잡는다), `window.TanStackVirtual` 을 직접 세팅한 뒤 `boot()` 을 부르므로
+**스크립트 로딩 순서**라는 실제 실패 지점을 건너뛴다. 실제로 이 스위트가 22/22 로
+통과하는 동안 앱은 브라우저에서 완전히 죽어 있었다. 그 위에 얹은 연기 감지기가
+`tests/test_browser_smoke.py`(진짜 브라우저)이고, 벤더 파일의 Node 전용 전역을
+원문에서 훑는 것이 `tests/test_vendor_assets.py` 다. 셋은 서로를 대체하지 않는다.
 """
 
 from __future__ import annotations
