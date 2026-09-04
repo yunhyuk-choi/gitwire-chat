@@ -32,6 +32,19 @@ python -m gitwire_chat
 옆에 나란히 두지 않아도 설치된다(`pyproject.toml` 의 `dependencies` 가 그 레포를
 직접 가리킨다). 기반을 함께 고칠 때의 개발용 설치는 아래 「개발」 참조.
 
+클론 없이 바로 설치해 쓸 수도 있고, 그때 **갱신**은 이렇게 한다:
+
+```bash
+pip install "gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git"
+
+# 갱신 — 돌고 있으면 먼저 Ctrl+C 로 끈다
+pip install --force-reinstall --no-deps   "gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git"
+python -m gitwire_chat
+```
+
+`--no-deps` 는 바뀌지 않은 전송 계층(gitwire)까지 다시 받지 않게 한다. 갱신 뒤
+브라우저는 **강력 새로고침**(Ctrl+Shift+R)한다 — 정적 파일이 캐시돼 있을 수 있다.
+
 옵션:
 
 | 옵션 | 뜻 |
@@ -187,6 +200,13 @@ gitwire 봉투와 이 앱의 payload 는 **역할이 겹치지 않게** 나눠 �
     테스트에는 일부러 사고를 내는 **대조군**이 있어 이 구분이 살아 있음을 확인한다.
   * 검색은 영향을 받지 않는다 — 서버가 **레코드 파일**을 뒤지므로 DOM 에 없는
     과거도 그대로 찾는다.
+  * **가상화가 실패해도 채팅은 돈다.** 그건 성능 최적화지 대화의 전제가 아니다.
+    엔진을 못 쓰면 전부 그리기로 **격하(degrade)** 하고 그 사실을 상태줄에 남긴다.
+    (예전에는 이것이 전면 마비였다 — 아래 「조용한 실패는 금지」 참조.)
+* **조용한 실패는 금지다.** 스크립트에서 처리되지 않은 예외가 나면 상태줄에 뜬다
+  (`error` · `unhandledrejection`). 이 앱을 쓰는 사람은 개발자 콘솔을 열지 않는다 —
+  콘솔에만 남는 예외는 "아무 일도 안 일어나는 앱"과 구분되지 않는다.
+  그 안내는 일상적인 상태 갱신으로 지워지지 않는다.
 * **방 상태가 화면에 있다.** 받는 중·실패(사유)·재시도가 방 목록과 대화 자리에
   같이 보인다. 상태는 방 목록을 미는 기존 SSE 이벤트에 얹혀 온다(새 배관 없음).
 * **위로 스크롤하면 과거가 이어 붙는다.** 페이지 버튼이 아니다. 위 끝에 가까워지면
@@ -218,14 +238,41 @@ python -m pytest -q
 clone·push·커서 영속은 흉내내면 아무것도 증명하지 못한다. 나머지 테스트는
 gitwire 채널을 주입 가능한 대역으로 갈아끼워 네트워크 없이 돈다.
 
-프런트엔드는 브라우저 없이 검증한다: `node --check` 로 문법을 보고,
-stub DOM(`tests/js/`) 위에서 `app.js` 를 실제로 구동해 **DOM 조작 횟수와 노드
-동일성**을 센다 — "리렌더가 없다"를 주장이 아니라 수로 확인한다. 가상 스크롤
-엔진은 대역이 아니라 **벤더링된 진짜**(`static/vendor/tanstack-virtual-core/`,
-MIT 라이선스 파일 포함)를 그대로 구동한다.
+### 프런트엔드는 세 층으로 검증한다
 
-라이브러리를 올릴 때는 npm 배포본의 `dist/esm/*` 와 `LICENSE` 를 그 디렉토리에
-그대로 복사하면 된다(빌드 단계 없음).
+한 층으로는 부족하다는 것을 **비싸게 배웠다.** stub DOM 테스트가 22/22 로 통과하는
+동안 앱은 브라우저에서 완전히 죽어 있었다(모든 버튼 무반응). 그래서 층을 나눈다 —
+서로를 대체하지 않는다.
+
+| 층 | 무엇을 본다 | 못 보는 것 |
+|---|---|---|
+| `node --check` + stub DOM (`tests/js/`, `tests/test_frontend.py`) | `app.js` 를 실제로 구동해 **DOM 조작 횟수와 노드 동일성**을 센다 — "리렌더가 없다"를 주장이 아니라 수로 확인한다. 가상 스크롤 엔진은 대역이 아니라 **벤더링된 진짜**를 구동한다 | Node 안에서 돈다(브라우저에만 없는 전역), 로딩 순서를 건너뛴다, `index.html` 을 안 읽는다 |
+| 벤더 원문 검사 (`tests/test_vendor_assets.py`) | 브라우저로 가는 JS 에 **Node 전용 전역**(`process` · `require()` · `module.exports` · `__dirname` …)이 하나도 없다. 출처·LICENSE·버전 표기도 본다 | 실행하지 않는다 — 문법·동작은 안 본다 |
+| **브라우저 연기 테스트** (`tests/test_browser_smoke.py`) | 진짜 헤드리스 브라우저로 페이지를 연다. **콘솔에 `Uncaught` 가 하나라도 있으면 실패**, 그리고 브라우저가 **`/api/rooms` 를 실제로 불렀나**(= 배선까지 갔나) | 느리다. 세밀한 카운팅은 못 한다 |
+
+브라우저 연기 테스트가 상태코드를 근거로 쓰지 않는 이유: 앱이 완전히 죽어 있던
+그때도 페이지 응답은 **200 이었다.** 200 은 아무것도 증명하지 않는다.
+
+크로미움 계열 브라우저(Edge·Chrome·Chromium)를 PATH 와 각 OS 의 관례적 설치
+위치에서 찾는다. **없으면 SKIP** 한다 — 리눅스 CI·맥에서 스위트가 깨지지 않는다.
+SKIP 사유는 `-ra`(기본 `addopts`)로 매 실행 요약에 뜬다. 경로를 직접 주려면
+`GITWIRE_CHAT_BROWSER=/path/to/msedge`.
+
+손으로 같은 것을 보고 싶으면 (앱이 `<포트>` 에 떠 있을 때):
+
+```bash
+EDGE="/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+"$EDGE" --headless=new --disable-gpu --no-sandbox --user-data-dir=/tmp/edge-smoke   --enable-logging=stderr --log-level=0 --virtual-time-budget=8000   --dump-dom "http://127.0.0.1:<포트>/" > dom.html 2> console.txt
+grep -iE 'CONSOLE|Uncaught' console.txt      # 여기에 Uncaught 가 있으면 앱은 죽은 것이다
+```
+
+### 가상 스크롤 엔진을 올릴 때
+
+`static/vendor/tanstack-virtual-core/` 에 npm 배포본의 `dist/esm/*` 와 `LICENSE` 를
+복사한다(빌드 단계 없음). ⚠️ **그대로 복사하면 안 된다** — 상류는 번들러가 있다는
+전제로 `NODE_ENV` 환경변수 참조를 남겨 두고, 브라우저에는 그 전역이 없다. 절차와
+경위는 `static/vendor/tanstack-virtual-core/VENDORING.md` 에 있고,
+`tests/test_vendor_assets.py` 가 빠뜨림을 잡는다.
 
 파일은 UTF-8(BOM 없음)·LF 로 쓴다. 코드·주석·UI 문구는 한국어다.
 
@@ -282,3 +329,7 @@ MIT 라이선스 파일 포함)를 그대로 구동한다.
 * **아주 오래된 대화로 계속 거슬러 올라가면 모델이 커진다.** DOM 노드 수는
   상수로 유지되지만(가상 스크롤), 불러온 메시지 자체는 메모리에 쌓인다.
   방을 바꾸거나 새로고침하면 비워진다.
+* **브라우저 검증은 연기 감지기지 E2E 가 아니다.** 크로미움 계열 한 종류를
+  헤드리스로 열어 **처리되지 않은 예외**와 **첫 배선**(`/api/rooms` 호출)만 본다.
+  사람이 클릭·입력하는 흐름 전체, 그리고 Firefox·Safari 는 자동 검증 범위 밖이다.
+  이 정도로도 "앱이 통째로 죽었는데 테스트는 전부 통과"는 다시 일어나지 않는다.
