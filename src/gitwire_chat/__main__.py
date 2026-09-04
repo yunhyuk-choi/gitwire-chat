@@ -1,7 +1,8 @@
 """실행 진입점 — `python -m gitwire_chat`.
 
-OS 중립을 위해 셸 스크립트·서비스 등록에 기대지 않는다. 파이썬 하나로 3 OS 를
-덮는다. 자동 시작(로그인 시 기동)은 v1 범위 밖이며 README 에 OS 별 안내만 있다.
+OS 중립을 위해 셸 스크립트에 기대지 않는다. 파이썬 하나로 3 OS 를 덮는다.
+서브커맨드가 하나 있다 — ``autostart``(로그인 시 자동 시작 등록·해제·상태).
+인자 없이 부르면 서버를 띄운다(기존 그대로).
 
 ⚠️ **바인드 주소는 루프백 고정이고 바꿀 수 없다.** 이 앱은 인증을 하지 않는데,
 그건 결함이 아니라 "내 컴퓨터에서 나만 쓴다"는 설계다. 외부로 여는 스위치를
@@ -18,17 +19,23 @@ import sys
 import webbrowser
 
 from .app import create_app
-from .config import load_settings
+from .config import DEFAULT_PORT, load_settings
 
 #: 루프백 고정 — 옵션이 아니다 (모듈 도크 참조).
 HOST = "127.0.0.1"
-DEFAULT_PORT = 8770
+
+#: 서브커맨드 이름. 이 토큰이 첫 인자로 오면 서버를 띄우지 않고 그쪽으로 넘긴다.
+AUTOSTART = "autostart"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gitwire-chat",
         description="git 레포를 메시지 저장소로 쓰는 로컬-퍼스트 채팅",
+        epilog=(
+            "서브커맨드: autostart (로그인 시 자동 시작 등록·해제·상태). "
+            "자세히는 `gitwire-chat autostart --help`."
+        ),
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="포트")
     parser.add_argument(
@@ -65,6 +72,12 @@ def _force_utf8_console() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _force_utf8_console()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == AUTOSTART:
+        # 서브커맨드는 서버를 띄우지 않는다. 무거운 임포트를 피하려고 여기서 import 한다.
+        from ._autostart_cli import run as run_autostart
+
+        return run_autostart(argv[1:])
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
