@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from collections import OrderedDict
@@ -34,15 +35,25 @@ from typing import Any, Callable, Iterable
 
 import gitwire
 
-# 이 앱은 기반의 **새 표면**에 의존한다: 설치본 식별자(installation_id)와
-# keyset 역방향 페이징(Channel.history_page). 낮은 gitwire 로 돌면 한참 뒤에
-# 엉뚱한 곳에서 터지므로, 여기서 즉시 분명하게 실패한다 (조용한 실패 금지).
-if not hasattr(gitwire, "installation_id") or not hasattr(
-    gitwire.Channel, "history_page"
+# 이 앱은 기반의 **새 표면**에 의존한다: 설치본 식별자(installation_id),
+# keyset 역방향 페이징(Channel.history_page), 그리고 **로컬 전용 읽기**
+# (`fresh=`). 낮은 gitwire 로 돌면 한참 뒤에 엉뚱한 곳에서 터지므로, 여기서
+# 즉시 분명하게 실패한다 (조용한 실패 금지).
+def _has_local_read_mode() -> bool:
+    try:
+        return "fresh" in inspect.signature(gitwire.Channel.history_page).parameters
+    except (TypeError, ValueError):  # pragma: no cover - 서명을 읽을 수 없는 구현
+        return False
+
+
+if (
+    not hasattr(gitwire, "installation_id")
+    or not hasattr(gitwire.Channel, "history_page")
+    or not _has_local_read_mode()
 ):  # pragma: no cover - 설치 환경 문제
     raise ImportError(
-        "gitwire 가 너무 낮다 — gitwire 0.2.0+ 가 필요하다 "
-        "(pip install --force-reinstall "
+        "gitwire 가 너무 낮다 — 로컬 전용 읽기(history_page(fresh=...))를 주는 "
+        "gitwire 가 필요하다 (pip install --force-reinstall "
         '"gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git")'
     )
 
@@ -249,6 +260,8 @@ class RoomManager:
         # 방 하나의 클론이 **동시에 두 번** 시작되지 않게 한다 (같은 디렉토리다).
         self._connecting: dict[str, threading.Lock] = {}
         self._workers: dict[str, threading.Thread] = {}
+        # 화면을 막지 않는 '지금 당기기' 스레드 (방당 최대 1개 — `refresh_async`).
+        self._refreshers: dict[str, threading.Thread] = {}
         self._started = False
         self.instance = gitwire.installation_id(settings.home)
         """이 설치의 전송 수준 식별자. **gitwire 가 만들고 영속시킨다** — 같은
@@ -343,6 +356,12 @@ class RoomManager:
         credential = self._credential(room)
         if credential is not None:
             kwargs["credential"] = credential
+        # 자격증명 캐시는 **옵트인**이다 (기본 0 = 끔). 무엇을 사고 무엇을 파는지는
+        # config.Settings.credential_cache 와 gitwire README 「자격증명 조회 비용」.
+        if self.settings.credential_cache > 0:
+            kwargs["credential_helpers"] = gitwire.credential_cache(
+                self.settings.credential_cache
+            )
         kwargs.update(self.settings.extra.get("channel_kwargs", {}))
         try:
             channel = self._opener(room.repo_url, **kwargs)
@@ -502,10 +521,14 @@ class RoomManager:
     # ----------------------------------------------------------- 타임라인
 
     def _messages(self, room_id: str, limit: int | None = None) -> list[schema.Message]:
-        """전량(또는 최근 N건) — 검색처럼 정말 전부 훑어야 하는 곳 전용."""
+        """전량(또는 최근 N건) — 검색처럼 정말 전부 훑어야 하는 곳 전용.
+
+        읽기는 **로컬 클론만** 본다 (`fresh=False`) — 신선도는 폴러가 맡는다.
+        `page()` 의 주석 참조.
+        """
         channel = self._ready_channel(room_id)
         try:
-            records = channel.history(limit)
+            records = channel.history(limit, fresh=False)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"기록을 읽을 수 없다: {exc}") from exc
         return [schema.parse_record(r) for r in records]
@@ -517,15 +540,35 @@ class RoomManager:
 
         기반의 keyset 페이징(``history_page``)에 그대로 얹는다 — **요청한 만큼의
         레코드만 열린다.** 예전에는 '이전 불러오기'가 매번 대화 전체를 읽었다.
+
+        ⭐ **읽기는 원격을 보지 않는다** (``fresh=False``).
+
+        예전에는 이 경로가 매 호출 ``sync()`` 를 타서 ``git ls-remote`` 왕복이
+        한 번씩 붙었다. 실측(이 머신·GitHub private repo): ``ls-remote`` **1.3초**,
+        같은 데이터를 로컬 클론에서 읽기 **40~110ms**. 그래서 ``GET
+        /api/rooms/<id>/messages`` 한 번이 1.4~2.9초였다.
+
+        그럴 이유가 없다 — 레코드는 이미 로컬 클론에 있고, 신선도는 **폴러**
+        (``subscribe``, 기본 15초)가 이미 맡고 있다. 특히 ``before`` 가 있는
+        '위로 거슬러 올라가기'는 이미 받은 커밋 안에서 뒤로 가는 것이라 원격을
+        확인할 이유가 **아예** 없다.
+
+        그럼 "지금 최신을 봐야 하는" 순간(방을 막 열었다)은? 화면을 막아서
+        해결하지 않는다 — **로컬로 먼저 그리고**, 최신 쪽을 요청받은 김에
+        ``refresh_async()`` 로 한 번 당긴다. 새 것이 있으면 이미 있는 SSE
+        배관으로 뒤따라 붙는다.
         """
         channel = self._ready_channel(room_id)
         size = limit or (
             self.settings.page_limit if before else self.settings.recent_limit
         )
         try:
-            page = channel.history_page(before=before, limit=size)
+            page = channel.history_page(before=before, limit=size, fresh=False)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"기록을 읽을 수 없다: {exc}") from exc
+        if before is None:
+            # 최신 쪽을 보고 있다 = 신선도가 의미 있는 유일한 순간. 막지 않는다.
+            self.refresh_async(room_id)
         return MessagePage(
             [schema.parse_record(r) for r in page.records], bool(page.has_more)
         )
@@ -547,6 +590,7 @@ class RoomManager:
 
         ⚠️ 이건 여전히 전량 스캔이다. 역방향 페이징과 달리 "본문으로 찾기"는
         레코드를 열어봐야 하는데 기반에 인덱스가 없다 (README 「정직한 한계」).
+        다만 **로컬 클론만** 뒤진다 — 원격 왕복은 없다.
         """
         query = (query or "").strip()
         if not query:
@@ -676,6 +720,11 @@ class RoomManager:
         self._started = False
         self.wait_for_connect(timeout=5.0)   # 진행 중인 클론을 먼저 정리한다
         with self._lock:
+            refreshers = list(self._refreshers.values())
+            self._refreshers.clear()
+        for thread in refreshers:            # 채널을 닫기 전에 당기기를 거둔다
+            thread.join(timeout=5.0)
+        with self._lock:
             subs = list(self._subs.values())
             self._subs.clear()
             channels = list(self._channels.values())
@@ -693,8 +742,48 @@ class RoomManager:
         self.notifier.close()
         self.bus.close_all()
 
+    def refresh_async(self, room_id: str) -> threading.Thread | None:
+        """폴 주기를 기다리지 않고 **백그라운드로** 한 번 당긴다 (화면을 막지 않는다).
+
+        읽기 경로에서 원격 왕복을 뗐으므로(`page()` 참조), 방을 지금 막 열었다면
+        마지막 폴 이후의 몇 초가 비어 있을 수 있다. 그 순간을 **기다림으로**
+        메우지 않는다 — 로컬로 먼저 그린 뒤 여기서 당기고, 새 레코드는 이미 있는
+        SSE 배관(`_deliver`)으로 뒤따라 붙는다.
+
+        방당 최대 1개. 사용자가 방을 빠르게 오가도 `ls-remote` 스레드를 쌓지 않는다.
+        """
+        if not self._started:
+            return None                 # 구독도 안 붙은 상태 — 당길 곳이 없다
+        with self._lock:
+            if room_id not in self._rooms:
+                return None
+            running = self._refreshers.get(room_id)
+            if running is not None and running.is_alive():
+                return running          # 이미 당기는 중이다
+            thread = threading.Thread(
+                target=self._refresh, args=(room_id,),
+                name=f"gitwire-chat-refresh-{room_id[:8]}", daemon=True,
+            )
+            self._refreshers[room_id] = thread
+        thread.start()
+        return thread
+
+    def _refresh(self, room_id: str) -> None:
+        """`refresh_async` 의 몸통. 실패해도 조용히 넘긴다 — 폴러가 다음 주기에 또 본다."""
+        try:
+            self.poll_now(room_id)
+        except (RoomError, RoomNotReady) as exc:
+            log.debug("방 %s 즉시 당기기 실패: %s", room_id, exc)
+        except Exception:  # noqa: BLE001
+            log.debug("방 %s 즉시 당기기 실패", room_id, exc_info=True)
+
     def poll_now(self, room_id: str) -> int:
-        """폴 주기를 기다리지 않고 즉시 한 번 당겨온다 (수동 새로고침)."""
+        """폴 주기를 기다리지 않고 즉시 한 번 당겨온다 (수동 새로고침).
+
+        ⚠️ 원격 왕복(`ls-remote`)이 들어 있다 — 실측 1.3초. HTTP 요청 스레드에서
+        직접 부르는 곳은 사용자가 **명시적으로** 누른 `POST .../refresh` 뿐이고,
+        타임라인 조회는 `refresh_async()` 로 비동기로 부른다.
+        """
         channel = self._ready_channel(room_id)
         delivered = 0
 

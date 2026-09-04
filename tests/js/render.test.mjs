@@ -1,9 +1,15 @@
 /*
  * ⭐ "전체 리렌더가 없다"를 **세어서** 증명한다.
  *
- * 브라우저가 없으니 stub DOM 위에서 app.js 를 실제로 구동하고, DOM 조작 횟수와
+ * 브라우저가 없으니 stub DOM 위에서 **진짜 모듈**을 구동하고, DOM 조작 횟수와
  * **노드의 동일성(===)** 을 확인한다. 노드가 같은 객체로 남아 있다는 것이
  * "다시 그리지 않았다"의 가장 강한 증거다 — 다시 그렸다면 새 객체일 수밖에 없다.
+ *
+ * ⭐ 앱이 ES 모듈로 갈라진 뒤로는 `vm` 으로 통짜 스크립트를 평가하지 않는다.
+ * `createApp(runtime)` 을 **그대로 import** 해서 stub 런타임(document·fetch·
+ * EventSource…)을 주입한다. 프로덕션이 실제로 하는 일과 같은 모양이라
+ * (`static/app.js` 가 진짜 전역으로 같은 함수를 부른다) 하네스와 실물이 어긋나지
+ * 않는다.
  *
  * 실행: node tests/js/render.test.mjs
  * 실패하면 종료코드가 0 이 아니다 (pytest 가 그걸 본다).
@@ -13,7 +19,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
-import vm from 'node:vm';
 
 import {
   ELEMENT_IDS, StubDocument, StubEventSource, StubIntersectionObserver, makeFetch
@@ -21,18 +26,26 @@ import {
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..', '..');
-const APP_JS = path.join(ROOT, 'src', 'gitwire_chat', 'static', 'app.js');
+const STATIC = path.join(ROOT, 'src', 'gitwire_chat', 'static');
 const INDEX_HTML = path.join(ROOT, 'src', 'gitwire_chat', 'templates', 'index.html');
 
-const source = fs.readFileSync(APP_JS, 'utf8');
 const indexHtml = fs.readFileSync(INDEX_HTML, 'utf8');
+
+/* 우리 소스 전부 (벤더 제외) — 정적 검사가 이 목록을 훑는다. */
+const OUR_JS = [path.join(STATIC, 'app.js')].concat(
+  fs.readdirSync(path.join(STATIC, 'js')).sort()
+    .map((name) => path.join(STATIC, 'js', name))
+);
 
 /* ⭐ 가상 스크롤 엔진은 **진짜**를 쓴다 (벤더링된 그 파일 그대로).
    대역으로 바꾸면 "가상화가 실제로 도는가"를 아무것도 증명하지 못한다. */
 const virtual = await import(
-  url.pathToFileURL(path.join(
-    ROOT, 'src', 'gitwire_chat', 'static', 'vendor', 'tanstack-virtual-core', 'index.js'
-  )).href
+  url.pathToFileURL(path.join(STATIC, 'vendor', 'tanstack-virtual-core', 'index.js')).href
+);
+
+/* 진짜 조립소. 프로덕션 진입점(static/app.js)이 부르는 그 함수다. */
+const { createApp } = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'boot.js')).href
 );
 
 const results = [];
@@ -65,6 +78,22 @@ function msg(n, text, author) {
     kind: 'msg',
     reply_to: null,
     unknown: false
+  };
+}
+
+/* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다. */
+function stubWindow() {
+  return {
+    listeners: {},
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const list = this.listeners[type] || [];
+      const i = list.indexOf(fn);
+      if (i >= 0) { list.splice(i, 1); }
+    },
+    dispatch(type, event) {
+      for (const fn of (this.listeners[type] || []).slice()) { fn(event || { type }); }
+    }
   };
 }
 
@@ -109,29 +138,42 @@ function boot(options) {
   Object.assign(routes, opts.routes || {});
   const fetchStub = makeFetch(routes);
 
-  const context = {
-    document: doc,
-    /* 기본은 **진짜** 엔진. 격하 경로를 보는 테스트만 여기에 다른 것을 넣는다. */
-    TanStackVirtual: ('virtual' in opts) ? opts.virtual : virtual,
+  /* 콘솔을 기록한다 — "실패가 드러나는가"의 한 축이다. */
+  const consoleErrors = [];
+  const runtime = {
+    doc: doc,
+    win: stubWindow(),
+    /* 대역을 나중에 갈아끼울 수 있게 런타임을 통해 늦게 부른다 (boot.js 도 그렇다). */
     fetch: fetchStub,
     EventSource: StubEventSource,
     IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
-    console: console,
     localStorage: {
       _v: {},
       getItem(k) { return this._v[k] || null; },
       setItem(k, v) { this._v[k] = v; }
     },
-    addEventListener() {},
-    setTimeout: setTimeout,
-    clearTimeout: clearTimeout
+    console: {
+      log: console.log.bind(console),
+      warn: console.warn.bind(console),
+      error: (...args) => { consoleErrors.push(args.map(String).join(' ')); }
+    },
+    /* 기본은 **진짜** 엔진. 실패 경로를 보는 테스트만 여기에 다른 것을 넣는다. */
+    virtual: ('virtual' in opts) ? opts.virtual : virtual
   };
-  vm.createContext(context);
-  vm.runInContext(source, context, { filename: 'app.js' });
 
-  const chat = context.__chat;
-  assert.ok(chat, 'app.js 가 __chat 을 노출하지 않았다');
-  return Promise.resolve(chat.boot()).then(() => ({ doc, chat, fetchStub, context }));
+  const chat = createApp(runtime);
+  /* ⭐ 초기화 단위 하나를 **실제로 터뜨린다.** 격리는 "그렇게 짰다"가 아니라
+     터뜨려 보고 나머지가 살아 있는지로만 증명된다. */
+  if (opts.sabotage) { opts.sabotage(doc, runtime); }
+  return Promise.resolve(chat.boot())
+    .then(() => ({ doc, chat, fetchStub, context: runtime, consoleErrors }));
+}
+
+/* 특정 요소의 배선을 터뜨린다 (그 모듈의 mount 가 던지게 만든다). */
+function breakWiring(doc, id, message) {
+  const node = doc.getElementById(id);
+  node.addEventListener = () => { throw new Error(message || ('배선 실패: ' + id)); };
+  return node;
 }
 
 /* ------------------------------------------------------------- 테스트 */
@@ -142,12 +184,32 @@ await test('템플릿의 id 와 스크립트가 찾는 id 가 어긋나지 않�
   }
 });
 
-await test('app.js 어디에도 innerHTML 대입이 없다 (정적 검사)', () => {
-  const hits = source.split('\n')
-    .map((line, i) => [i + 1, line])
-    .filter(([, line]) => /\.innerHTML\s*=/.test(line) ||
-      /insertAdjacentHTML|outerHTML\s*=|document\.write/.test(line));
+await test('우리 소스 어디에도 innerHTML 대입이 없다 (정적 검사 · 전 모듈)', () => {
+  const hits = [];
+  for (const file of OUR_JS) {
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      if (/\.innerHTML\s*=/.test(line) ||
+        /insertAdjacentHTML|outerHTML\s*=|document\.write/.test(line)) {
+        hits.push(path.basename(file) + ':' + (i + 1));
+      }
+    });
+  }
   assert.deepEqual(hits, [], 'HTML 문자열 주입 흔적: ' + JSON.stringify(hits));
+});
+
+await test('모듈이 브라우저 전역을 직접 집어오지 않는다 (진입점만 예외)', () => {
+  /* 전역을 직접 만지면 주입이 무의미해지고 테스트가 실물과 어긋난다. */
+  const hits = [];
+  for (const file of OUR_JS) {
+    if (path.basename(file) === 'app.js') { continue; }   // 진입점이 그 일을 한다
+    fs.readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      if (/^\s*\*/.test(line) || /^\s*\/\*/.test(line)) { return; }  // 주석
+      if (/\b(window|globalThis)\b/.test(line) || /(^|[^.\w])document\./.test(line)) {
+        hits.push(path.basename(file) + ':' + (i + 1) + ' ' + line.trim());
+      }
+    });
+  }
+  assert.deepEqual(hits, [], '모듈이 전역을 직접 집어온다: ' + JSON.stringify(hits));
 });
 
 await test('부팅: 최근 메시지가 노드로 딱 한 번씩 만들어진다', async () => {
@@ -668,69 +730,290 @@ await test('레포 만들기(링크): 프리필 링크를 주고, 만들고 오�
     'https://github.com/yunhyuk-choi/our-room.git');
 });
 
-/* ------------------------------------------- 가상화가 없거나 못 돌 때 */
+/* ------------------------- 모듈 격리 · 가상화 실패는 결함이다 (주입 실증) */
 
 /* ⭐ 실제로 당한 사고의 축소판.
    벤더 번들이 브라우저에 없는 Node 전역을 참조해 **`Virtualizer` 생성자에서**
-   터졌다. 모듈 평가는 성공했으므로 `window.TanStackVirtual` 은 멀쩡해 보였고,
-   "라이브러리가 없으면 알린다"는 방어는 그대로 통과했다. 그 예외가 boot() 을
-   끊어 `wire()` 에 도달하지 못했고 — 화면의 모든 버튼이 죽었다.
-   요구는 하나다: **가상화가 실패해도 채팅은 돌아야 한다.** */
+   터졌다. 모듈 평가는 성공했으므로 라이브러리는 멀쩡해 보였고, "없으면 알린다"는
+   방어는 그대로 통과했다. 그 예외가 통짜 `boot()` 을 끊어 배선에 도달하지
+   못했고 — 화면의 **모든** 버튼이 죽었다.
+
+   ⚠️ 한때 그 답이 '격하(degrade)' — 가상화 없이 전부 그리기 — 였다. 걷어냈다.
+   가상 스크롤은 성능 때문에 붙인 기능이고, 폴백은 그 기능이 **조용히 빠진 채로**
+   앱이 돌게 만든다. 지금 요구는 둘이다:
+
+     (1) 가상화가 안 되면 **결함으로 드러난다** (조용히 느려지지 않는다).
+     (2) 그 실패는 **타임라인 모듈에만 갇힌다** — 가상화는 메시지 리스트 하나에만
+         거는 것이므로 `+` 버튼·방 목록·검색이 같이 죽을 이유가 없다.
+
+   그리고 (2) 는 "그렇게 짰다"가 아니라 **터뜨려 보고** 확인한다. */
 const brokenVirtual = Object.assign({}, virtual, {
   Virtualizer: function () { throw new ReferenceError('process is not defined'); }
 });
 
-async function assertChatStillWorks(what, injected) {
-  const { doc, chat, context } = await boot({ virtual: injected });
-
-  /* 1. 배선이 살아 있다 — 이것이 '버튼이 죽었다'의 반대말이다. */
+/* 타임라인이 죽어도 살아 있어야 하는 것들 — 하나하나 **눌러서** 확인한다. */
+function assertRestOfAppWorks(what, doc, chat, context) {
   assert.ok(context.fetch.calls.some((c) => c.path === '/api/rooms'),
-    what + ': /api/rooms 를 부르지 않았다 = wire() 에 도달하지 못했다');
+    what + ': /api/rooms 를 부르지 않았다 = 배선에 도달하지 못했다');
+  assert.ok(doc.getElementById('rooms').children.length > 0,
+    what + ': 방 목록이 그려지지 않았다');
+
   const addRoom = doc.getElementById('add-room');
   const wasHidden = addRoom.hidden;
   doc.getElementById('toggle-add').dispatch('click');   /* 사용자가 누른 그 ＋ */
   assert.notEqual(addRoom.hidden, wasHidden,
     what + ': ＋ 버튼에 핸들러가 안 붙었다 (이번 사고의 증상 그 자체)');
 
-  /* 2. 격하됐고, 그 사실이 **조용하지 않다.** */
-  assert.equal(chat.state.degraded, true, what + ': 격하되지 않았다');
-  const status = doc.getElementById('status');
-  assert.ok(status.textContent.indexOf('가상 스크롤 없이') >= 0,
-    what + ': 상태줄에 격하 사실이 안 남았다 — ' + JSON.stringify(status.textContent));
-  assert.ok(doc.getElementById('messages').classList.contains('plain'),
-    what + ': 타임라인이 격하 배치로 바뀌지 않았다 (메시지가 겹쳐 쌓인다)');
+  const searchBar = doc.getElementById('search-bar');
+  const searchHidden = searchBar.hidden;
+  doc.getElementById('toggle-search').dispatch('click');
+  assert.notEqual(searchBar.hidden, searchHidden, what + ': 검색 토글이 죽었다');
 
-  /* 3. 채팅이 실제로 그려진다 — 가상화가 아니라 전부 그리기로. */
-  const list = doc.getElementById('messages');
-  assert.equal(list.children.length, 3, what + ': 메시지가 안 그려졌다');
-  const before = list.children.slice();
-
-  StubEventSource.current.emit('message', msg(4));
-  assert.equal(list.children.length, 4, what + ': 새 메시지가 안 붙었다');
-  /* 4. 격하돼도 리렌더 규율은 그대로다 — 기존 노드는 같은 객체로 남는다. */
-  for (let i = 0; i < before.length; i++) {
-    assert.equal(list.children[i], before[i], what + ': ' + i + '번 노드가 교체됐다');
-  }
-  assert.equal(chat.stats.rebuiltInView, 0, what + ': 창 안 노드를 다시 만들었다');
-  assert.equal(chat.stats.innerHTML, 0);
-  return { doc, chat };
+  doc.getElementById('back').dispatch('click');
+  assert.equal(doc.body.dataset.view, 'rooms', what + ': 뒤로 가기가 죽었다');
 }
 
-await test('⭐ 가상화 엔진이 못 돌아도(생성자 예외) 채팅은 계속된다 — 실사고 재현', async () => {
-  await assertChatStillWorks('생성자 예외', brokenVirtual);
+/* 실패가 **드러나는가** — 상태줄·메시지 영역·콘솔 세 곳. */
+function assertTimelineBroken(what, doc, chat, consoleErrors) {
+  assert.ok(chat.state.broken, what + ': 결함으로 표시되지 않았다');
+  const status = doc.getElementById('status');
+  assert.ok(status.textContent.indexOf('메시지 영역') >= 0,
+    what + ': 상태줄에 안 남았다 — ' + JSON.stringify(status.textContent));
+  const list = doc.getElementById('messages');
+  assert.ok(list.children.some((c) => String(c.className).indexOf('broken') >= 0),
+    what + ': 대화 자리에 결함 표시가 없다');
+  assert.ok(consoleErrors.some((line) => line.indexOf('gitwire-chat') >= 0),
+    what + ': 콘솔에 안 남았다');
+  /* ⭐ 그리고 **느린 대체 경로로 계속 가지 않는다.** */
+  assert.equal(list.children.filter((c) => String(c.className).indexOf('msg') === 0).length, 0,
+    what + ': 가상화 없이 메시지를 그리고 있다 (조용히 느려지는 경로가 남았다)');
+  assert.equal(chat.stats.innerHTML, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+}
+
+await test('⭐ 가상화 엔진이 못 돌면(생성자 예외) 결함으로 드러나고, 나머지는 산다', async () => {
+  const { doc, chat, context, consoleErrors } = await boot({ virtual: brokenVirtual });
+  assertTimelineBroken('생성자 예외', doc, chat, consoleErrors);
+  assertRestOfAppWorks('생성자 예외', doc, chat, context);
 });
 
-await test('⭐ 가상화 라이브러리가 아예 없어도 채팅은 계속된다', async () => {
-  await assertChatStillWorks('라이브러리 없음', null);
+await test('⭐ 가상화 라이브러리가 아예 없어도 같다 — 드러나고, 나머지는 산다', async () => {
+  const { doc, chat, context, consoleErrors } = await boot({ virtual: null });
+  assertTimelineBroken('라이브러리 없음', doc, chat, consoleErrors);
+  assertRestOfAppWorks('라이브러리 없음', doc, chat, context);
 });
 
-await test('격하 안내는 일상적인 빈 status 로 지워지지 않는다', async () => {
+await test('⭐ 타임라인 모듈이 던져도 그 모듈만 실패한다 (주입 실패로 실증)', async () => {
+  const { doc, chat, context, consoleErrors } = await boot({
+    sabotage: (d) => breakWiring(d, 'timeline', '타임라인 배선을 일부러 터뜨렸다')
+  });
+
+  const units = chat.failures().map((f) => f.unit);
+  assert.deepEqual(units, ['타임라인'], '다른 모듈까지 실패했다: ' + units.join(','));
+  assertTimelineBroken('타임라인 주입 실패', doc, chat, consoleErrors);
+  assertRestOfAppWorks('타임라인 주입 실패', doc, chat, context);
+});
+
+await test('⭐ 반대로 다른 모듈이 던져도 타임라인은 정상이다 (주입 실패로 실증)', async () => {
+  const { doc, chat, consoleErrors } = await boot({
+    sabotage: (d) => breakWiring(d, 'toggle-add', '방 추가 배선을 일부러 터뜨렸다')
+  });
+
+  const units = chat.failures().map((f) => f.unit);
+  assert.deepEqual(units, ['방 추가'], '엉뚱한 모듈이 함께 죽었다: ' + units.join(','));
+
+  /* 타임라인은 **완전히 정상**이다 — 가상화도, 불변식도. */
+  assert.equal(chat.state.broken, '', '타임라인이 덩달아 결함이 됐다');
+  const list = doc.getElementById('messages');
+  assert.equal(list.children.length, 3, '메시지가 안 그려졌다');
+  StubEventSource.current.emit('message', msg(4));
+  assert.equal(list.children.length, 4, '새 메시지가 안 붙었다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(chat.stats.innerHTML, 0);
+
+  /* 실패는 드러난다. 그리고 다른 모듈(검색)은 그대로 동작한다. */
+  assert.ok(doc.getElementById('status').textContent.indexOf('방 추가') >= 0,
+    '상태줄에 실패한 모듈이 안 남았다');
+  assert.ok(consoleErrors.some((line) => line.indexOf('방 추가') >= 0), '콘솔에 안 남았다');
+  const searchBar = doc.getElementById('search-bar');
+  const searchHidden = searchBar.hidden;
+  doc.getElementById('toggle-search').dispatch('click');
+  assert.notEqual(searchBar.hidden, searchHidden, '검색까지 죽었다');
+});
+
+await test('결함 안내는 일상적인 빈 status 로 지워지지 않는다', async () => {
   const { doc, chat } = await boot({ virtual: null, rooms: [] });
-  /* 방이 0개면 boot 이 마지막에 status('') 로 상태줄을 비운다.
-     그때 격하 사실까지 지워지면 그 순간부터 다시 조용한 실패가 된다. */
-  assert.equal(chat.state.degraded, true);
-  assert.ok(doc.getElementById('status').textContent.indexOf('가상 스크롤 없이') >= 0,
-    '격하 안내가 지워졌다 — ' + JSON.stringify(doc.getElementById('status').textContent));
+  /* 방이 0개면 부트가 마지막에 status('') 로 상태줄을 비운다.
+     그때 결함까지 지워지면 그 순간부터 다시 조용한 실패가 된다. */
+  assert.ok(chat.state.broken);
+  assert.ok(doc.getElementById('status').textContent.indexOf('메시지 영역') >= 0,
+    '결함 안내가 지워졌다 — ' + JSON.stringify(doc.getElementById('status').textContent));
+});
+
+/* ------------------------------------------------- 낙관적 전송 (즉시 렌더) */
+
+/* 응답을 **내가 원할 때** 주는 fetch 대역.
+   즉시 resolve 되는 대역으로는 "기다리는 동안"이 존재하지 않아 낙관적
+   업데이트를 아무것도 증명하지 못한다. */
+function deferredFetch(extra) {
+  const routes = Object.assign({ '/api/rooms': { rooms: [] } }, extra || {});
+  const waiting = [];
+  const fetch = function (path, init) {
+    const opts = init || {};
+    fetch.calls.push({ path, init: opts });
+    if (path.indexOf('/messages') >= 0 && opts.method === 'POST') {
+      return new Promise((resolve) => { waiting.push(resolve); });
+    }
+    const key = Object.keys(routes).find((k) => path.indexOf(k) === 0);
+    const body = key ? routes[key] : { error: 'stub 라우트 없음: ' + path };
+    return Promise.resolve({
+      ok: !!key, status: key ? 200 : 404, json: () => Promise.resolve(body)
+    });
+  };
+  fetch.calls = [];
+  fetch.waiting = waiting;
+  fetch.answer = function (body, code) {
+    const resolve = waiting.shift();
+    assert.ok(resolve, '기다리는 POST 가 없다');
+    resolve({ ok: code === undefined || code < 300, status: code || 201,
+      json: () => Promise.resolve(body) });
+    return settle();
+  };
+  return fetch;
+}
+
+/* 서브트리에서 클래스로 노드 찾기 (재시도 버튼처럼 안쪽에 있는 것들). */
+function findByClass(node, cls) {
+  for (const child of node.children) {
+    if (String(child.className).split(' ').indexOf(cls) >= 0) { return child; }
+    const found = findByClass(child, cls);
+    if (found) { return found; }
+  }
+  return null;
+}
+
+async function startSending(text) {
+  const booted = await boot();
+  const { doc, chat, context } = booted;
+  const list = doc.getElementById('messages');
+  const before = list.children.length;
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = text;
+  const sending = chat.send();
+  await settle();
+  return Object.assign(booted, {
+    list, before, sending, bubble: list.children[before]
+  });
+}
+
+await test('⭐ 낙관적 전송: 응답을 기다리지 않고 지금 뜬다', async () => {
+  const { doc, chat, list, before, bubble } = await startSending('지금 바로 떠야 한다');
+
+  // 서버는 아직 아무 말도 하지 않았다.
+  assert.equal(chat.pendings().size, 1);
+  assert.equal(list.children.length, before + 1);
+  assert.ok(bubble.textContent.includes('지금 바로 떠야 한다'));
+  assert.ok(String(bubble.className).includes('pending'), '보내는 중 표시가 없다');
+  assert.ok(bubble.textContent.includes('보내는 중'));
+  assert.equal(doc.getElementById('text').value, '', '입력칸이 비워지지 않았다');
+  assert.equal(chat.stats.innerHTML, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 성공 시 진짜 봉투 ID 로 갈아끼우되 노드를 다시 만들지 않는다', async () => {
+  const { chat, context, list, before, bubble, sending } =
+    await startSending('갈아끼울 말');
+  const createdBefore = chat.stats.created;
+
+  const real = msg(30, '갈아끼울 말', '기본이름');
+  await context.fetch.answer({ message: real });
+  await sending;
+
+  assert.equal(list.children.length, before + 1);
+  assert.equal(list.children[before], bubble, '노드가 교체됐다');
+  assert.equal(chat.stats.created, createdBefore, '노드를 새로 만들었다');
+  assert.equal(chat.stats.rebuiltInView, 0);          // ⭐ 불변식
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(bubble.getAttribute('data-id'), real.id);
+  assert.equal(String(bubble.className).includes('pending'), false);
+  assert.equal(bubble.textContent.includes('보내는 중'), false);
+  assert.equal(chat.pendings().size, 0);
+
+  // 모델은 여전히 시간순이고, 임시 ID 는 흔적도 없다.
+  const ids = chat.items().map((m) => m.id);
+  assert.deepEqual(ids, ids.slice().sort());
+  assert.equal(ids.filter((id) => id.indexOf('~') === 0).length, 0);
+  assert.equal(chat.state.oldest.indexOf('~'), -1, '임시 ID 가 페이징 커서가 됐다');
+});
+
+await test('⭐ 실패: 말풍선이 남고 "전송 실패" + 재시도가 붙는다 (입력 내용 안 잃음)', async () => {
+  const { doc, chat, context, list, before, bubble, sending } =
+    await startSending('실패할 말');
+
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+
+  assert.ok(String(bubble.className).includes('failed'));
+  assert.ok(bubble.textContent.includes('전송 실패'));
+  assert.ok(bubble.textContent.includes('재시도'));
+  // 글은 말풍선 안에 그대로 있다 — 입력칸으로 되돌리지 않는다(같은 글이 두 곳에
+  // 생기는 것을 막는다).
+  assert.ok(bubble.textContent.includes('실패할 말'));
+  assert.equal(doc.getElementById('text').value, '');
+  assert.equal(list.children.length, before + 1);
+  assert.ok(doc.getElementById('status').textContent.includes('전송 실패'));
+
+  // 재시도 — 사용자가 그 버튼을 누른다.
+  const createdBefore = chat.stats.created;
+  const button = findByClass(bubble, 'retry');
+  assert.ok(button, '재시도 버튼이 없다');
+  button.dispatch('click');
+  await settle();
+  assert.ok(String(bubble.className).includes('pending'), '다시 보내는 중이 아니다');
+
+  const real = msg(31, '실패할 말', '기본이름');
+  await context.fetch.answer({ message: real });
+  assert.equal(list.children[before], bubble, '재시도가 노드를 갈아치웠다');
+  assert.equal(chat.stats.created, createdBefore);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(chat.pendings().size, 0);
+});
+
+await test('⭐ SSE 가 응답보다 먼저 와도 같은 말이 두 번 뜨지 않는다', async () => {
+  const { chat, context, list, before, bubble, sending } =
+    await startSending('겹치는 말');
+  const createdBefore = chat.stats.created;
+  const real = msg(32, '겹치는 말', '기본이름');
+
+  // 서버 응답보다 폴링(SSE)이 먼저 도착하는 실제 순서.
+  StubEventSource.current.emit('message', real);
+  assert.equal(list.children.length, before + 1, '같은 말이 두 줄로 떴다');
+  assert.equal(list.children[before], bubble);
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(chat.stats.created, createdBefore);
+
+  // 뒤늦게 온 응답도 아무것도 어지르지 않는다.
+  await context.fetch.answer({ message: real });
+  await sending;
+  assert.equal(list.children.length, before + 1);
+  assert.equal(list.children[before], bubble);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(chat.pendings().size, 0);
+  assert.equal(chat.items().filter((m) => m.text === '겹치는 말').length, 1);
+});
+
+await test('보류 중에 방을 바꾸면 그 방의 말이 새 방에 새지 않는다', async () => {
+  const { chat, context, list, sending } = await startSending('첫 방에서 쓴 말');
+  const real = msg(33, '첫 방에서 쓴 말', '기본이름');
+
+  await chat.switchRoom('r2');
+  assert.equal(chat.pendings().size, 0, '방을 바꿨는데 보류가 남았다');
+  const after = list.children.length;
+
+  await context.fetch.answer({ message: real });
+  await sending;
+  assert.equal(list.children.length, after, '다른 방 메시지가 새어 들어왔다');
 });
 
 /* -------------------------------------------------------------- 보고 */

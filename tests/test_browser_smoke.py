@@ -29,7 +29,6 @@ stub 하네스가 못 잡는 구간이 정확히 셋이다:
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -218,28 +217,34 @@ def test_브라우저가_실제로_서버를_부른다_배선까지_갔다는_�
 
 
 @needs_browser
-def test_정상_설치에서는_가상_스크롤이_격하되지_않는다(served, tmp_path):
-    """격하는 안전망이지 평상시 상태가 아니다.
+def test_정상_설치에서는_가상_스크롤이_결함으로_뜨지_않는다(served, tmp_path):
+    """가상 스크롤은 이 앱이 대화를 그리는 방식 그 자체다.
 
-    벤더 파일이 브라우저에서 못 돌면 앱은 (죽는 대신) 격하되어 계속 도는데,
-    그러면 이 사실이 상태줄과 `.messages` 의 `plain` 클래스로 드러난다.
-    정상 설치에서 그것이 보이면 벤더 번들이 또 깨진 것이다.
+    한때 여기에 '격하(degrade)' 가 있었다 — 엔진을 못 쓰면 전부 그리기로 계속
+    가는 폴백이다. 걷어냈다: 성능 때문에 붙인 기능이 **조용히 빠진 채로** 앱이
+    돌면, 다음에 벤더를 갱신하다 또 깨져도 아무도 모른다.
+
+    지금은 못 쓰면 **결함으로 드러난다.** 그 지문이 정상 설치에서 보이면
+    벤더 번들이 또 깨진 것이다. 초기화 단위 중 하나라도 못 서면 그것도 뜬다.
     """
     dom, _ = open_headless(served.url, tmp_path / "profile")
-    # ⚠️ "가상 스크롤" 이라는 말 자체는 index.html 주석에도 있다. 격하의 지문은
-    #    상태줄에 남는 이 문구와 `.messages` 에 붙는 `plain` 클래스다.
-    assert "가상 스크롤 없이(전부 그리기) 계속한다" not in dom, (
-        "가상 스크롤 격하 안내가 떴다 — 벤더 번들이 브라우저에서 못 돌고 있다"
+    assert "메시지를 그릴 수 없다" not in dom, (
+        "가상 스크롤 결함 표시가 떴다 — 벤더 번들이 브라우저에서 못 돌고 있다"
     )
-    assert "plain" not in _messages_class(dom), "타임라인이 격하 배치로 그려졌다"
+    assert "메시지 영역이 동작하지 않는다" not in dom
+    assert "초기화 실패" not in dom, "초기화 단위 중 하나가 서지 못했다"
 
 
-def _messages_class(dom: str) -> str:
-    """`<div ... id="messages" ...>` 의 class 속성만 뽑아 본다."""
-    for tag in re.findall(r"<div[^>]*id=\"messages\"[^>]*>", dom):
-        found = re.search(r'class="([^"]*)"', tag)
-        return found.group(1) if found else ""
-    return ""
+@needs_browser
+def test_진입점이_ES_모듈로_실린다(served, tmp_path):
+    """진입점이 `type="module"` 이라야 import 로 의존이 명시된다.
+
+    예전에는 인라인 모듈이 엔진을 `window` 에 담아 두고 classic 스크립트가
+    그것을 집어갔다 — "실렸나 / 그때 실렸나"가 실제 사고 지점이었다.
+    """
+    dom, _ = open_headless(served.url, tmp_path / "profile")
+    assert 'type="module"' in dom
+    assert "/static/app.js" in dom
 
 
 def test_브라우저가_없으면_건너뛴다는_사실이_드러난다():
