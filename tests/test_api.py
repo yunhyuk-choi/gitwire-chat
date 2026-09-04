@@ -307,3 +307,100 @@ def test_레포_생성_성공은_주소를_돌려준다(client, monkeypatch):
     res = client.post("/api/repos", json={"host": "github.com", "name": "our-room"})
     assert res.status_code == 201
     assert res.get_json()["repo"]["clone_url"] == "https://github.com/me/our-room.git"
+
+
+# ------------------------------------------------------- H. '내 것' 판정
+
+"""⭐ `mine` — 봉투(`sender`)와 이 설치본의 식별자를 비교한 결과다.
+
+이 묶음이 지키는 것은 하나다: **판정이 경로에 따라 달라지지 않는다.**
+예전에는 '내 것'이 전송 직후의 화면 특례로만 존재해서, 같은 메시지를 다시
+읽어오면 통째로 남의 것이 됐다.
+"""
+
+
+def _mine_by_text(payload) -> dict:
+    return {m["text"]: m["mine"] for m in payload}
+
+
+def test_내_메시지는_다시_읽어도_내_것이다(client, manager):
+    """⭐ 회귀: 보내고 → **다시 읽었을 때** (= 새로고침) 판정이 살아 있나."""
+    room = manager.register(REPO)
+
+    sent = client.post(
+        f"/api/rooms/{room.id}/messages", json={"text": "내가 쓴 말"}
+    ).get_json()["message"]
+    assert sent["mine"] is True                      # 전송 응답
+
+    again = client.get(f"/api/rooms/{room.id}/messages").get_json()["messages"]
+    assert _mine_by_text(again) == {"내가 쓴 말": True}   # 다시 읽어도 내 것
+
+
+def test_남의_메시지는_내_것이_아니다(client, manager):
+    room = manager.register(REPO)
+    channel = manager.channel(room.id)
+    manager.send(room.id, "내 말")
+    channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "남의 말"},
+                   sender="other.host.999")
+
+    got = client.get(f"/api/rooms/{room.id}/messages").get_json()["messages"]
+    assert _mine_by_text(got) == {"내 말": True, "남의 말": False}
+
+
+def test_모든_조회_경로가_같은_판정을_준다(client, manager):
+    """최초 로드 · 위로 페이징 · 검색 — 어느 문으로 들어와도 같은 값."""
+    room = manager.register(REPO)
+    channel = manager.channel(room.id)
+    for i in range(6):
+        manager.send(room.id, f"내 말 {i}")
+        channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": f"남의 말 {i}"},
+                       sender="other.host.999")
+
+    def expected(texts):
+        return {t: t.startswith("내 말") for t in texts}
+
+    recent = client.get(f"/api/rooms/{room.id}/messages").get_json()["messages"]
+    assert _mine_by_text(recent) == expected([m["text"] for m in recent])
+    assert set(_mine_by_text(recent).values()) == {True, False}   # 둘 다 섞여 있다
+
+    older = client.get(
+        f"/api/rooms/{room.id}/messages?before={recent[0]['id']}"
+    ).get_json()["messages"]
+    assert older, "위로 페이징이 비었다 — 이 테스트가 아무것도 보지 못한다"
+    assert _mine_by_text(older) == expected([m["text"] for m in older])
+
+    for query, mine in (("내 말", True), ("남의 말", False)):
+        hits = client.get(
+            f"/api/rooms/{room.id}/search?q={query}"
+        ).get_json()["messages"]
+        assert hits and all(m["mine"] is mine for m in hits), query
+
+
+def test_SSE_도_같은_판정을_싣는다(client, manager):
+    room = manager.register(REPO)
+    channel = manager.channel(room.id)
+    res = client.get(f"/api/rooms/{room.id}/stream?client=tab1", buffered=False)
+    chunks = res.response
+    next(chunks)
+    next(chunks)
+
+    def later():
+        manager.send(room.id, "내가 스트림으로")
+        # 구독 콜백을 그대로 탄다 — 폴러가 남의 레코드를 물어 온 그 경로다.
+        manager.on_record(room.id, channel.inject(
+            {"kind": "msg", "v": 1, "author": "밥", "text": "남이 스트림으로"},
+            sender="other.host.999",
+        ))
+
+    threading.Timer(0.05, later).start()
+
+    seen = {}
+    for _ in range(80):
+        chunk = next(chunks).decode("utf-8")
+        if chunk.startswith("event: message"):
+            body = json.loads(chunk.split("data: ", 1)[1])
+            seen[body["text"]] = body["mine"]
+            if len(seen) == 2:
+                break
+    res.close()
+    assert seen == {"내가 스트림으로": True, "남이 스트림으로": False}

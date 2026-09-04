@@ -646,7 +646,7 @@ class RoomManager:
         seen = self._seen.setdefault(room_id, _Seen())
         if not seen.add(message.id):
             return False
-        self.bus.publish(room_id, "message", message.to_json())
+        self.bus.publish(room_id, "message", self.message_json(room_id, message))
         if not own and self.bus.viewers(room_id) == 0:
             try:
                 room = self.get(room_id)
@@ -658,14 +658,48 @@ class RoomManager:
         return True
 
     def _own_sender(self, room_id: str) -> str:
+        """이 앱이 그 방에 **발행할 때 쓰는** 봉투 sender.
+
+        채널이 열려 있으면 그 값이 정본이다(방마다 다를 수 있다 — `channel_kwargs`
+        로 갈아끼울 수 있는 표면이다). 아직 안 열렸으면 설치본 식별자로 답한다 —
+        같은 home 이므로 gitwire 가 채널에 줄 값이 바로 그것이다.
+        """
         channel = self._channels.get(room_id)
-        return getattr(channel, "sender", "") if channel else ""
+        return getattr(channel, "sender", "") if channel else self.instance
+
+    def is_mine(self, room_id: str, message: schema.Message) -> bool:
+        """이 메시지가 **이 설치본에서 나갔나** — 봉투만 보고 판정한다.
+
+        ⭐ "내 것"의 정의는 이 함수 **하나뿐**이다. 화면의 좌우 배치도, 로컬
+        에코 판정(알림을 띄울지)도 전부 여기를 지난다. 예전에는 좌우 배치가
+        *보내는 순간의 특례*로만 세워져서, 새로고침하면 내가 쓴 말이 전부
+        남의 것으로 넘어갔다 — 봉투에 답이 있는데 아무도 비교를 안 했다.
+
+        ⚠️ 판정 대상은 **사람이 아니라 설치본**이다. 같은 사람이 다른 머신에서
+        보낸 말은 여기서 '남의 것'이다 (봉투 `sender` 는 참가자 프로세스
+        식별자다 — `schema` 모듈 도크). 사람 단위로 묶으려면 신원을 증명할
+        수단이 있어야 하는데 봉투에 서명이 없다. 그래서 묶지 않는다.
+        """
+        return bool(message.sender) and message.sender == self._own_sender(room_id)
+
+    def message_json(self, room_id: str, message: schema.Message) -> dict:
+        """메시지 1건의 JSON. **서버가 직렬화할 때 `mine` 을 넣는다.**
+
+        여기가 유일한 직렬화 지점이라, 최초 로드·위로 페이징·검색·SSE·전송
+        응답이 전부 같은 판정을 지난다. 브라우저에 맡기면 자기 sender 를
+        내려보내는 배관이 하나 더 늘고, 그 배관이 빠진 경로가 곧 버그가 된다.
+        """
+        return {**message.to_json(), "mine": self.is_mine(room_id, message)}
+
+    def messages_json(
+        self, room_id: str, messages: Iterable[schema.Message]
+    ) -> list[dict]:
+        return [self.message_json(room_id, m) for m in messages]
 
     def on_record(self, room_id: str, record: Any) -> bool:
         """구독 콜백 (테스트에서 직접 부를 수 있게 공개해 둔다)."""
         message = schema.parse_record(record)
-        own = bool(message.sender) and message.sender == self._own_sender(room_id)
-        return self._deliver(room_id, message, own=own)
+        return self._deliver(room_id, message, own=self.is_mine(room_id, message))
 
     def _start_room(self, room_id: str) -> None:
         with self._lock:
@@ -808,7 +842,3 @@ class RoomManager:
             return {"status": status, **channel.info()}
         except Exception as exc:  # noqa: BLE001
             return {"status": status, "error": str(exc)}
-
-
-def messages_json(messages: Iterable[schema.Message]) -> list[dict]:
-    return [m.to_json() for m in messages]

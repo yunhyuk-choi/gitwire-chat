@@ -29,7 +29,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from . import events, forges
 from .config import Settings, load_settings
-from .rooms import RoomError, RoomManager, RoomNotReady, messages_json
+from .rooms import RoomError, RoomManager, RoomNotReady
 
 log = logging.getLogger(__name__)
 
@@ -140,7 +140,10 @@ def create_app(
         # `has_more` 는 기반(gitwire)이 직접 판정한 값이다 — 쪽 크기로 추측하지
         # 않는다. 추측이 틀리면 브라우저가 맨 위에서 헛요청을 한 번 더 보낸다.
         return jsonify(
-            {"messages": messages_json(page.messages), "has_more": page.has_more}
+            {
+                "messages": manager.messages_json(room_id, page.messages),
+                "has_more": page.has_more,
+            }
         )
 
     @app.post("/api/rooms/<room_id>/messages")
@@ -161,7 +164,7 @@ def create_app(
             return jsonify({"error": str(exc)}), 400
         except ValueError as exc:  # schema.InvalidMessage
             return jsonify({"error": str(exc)}), 400
-        return jsonify({"message": message.to_json()}), 201
+        return jsonify({"message": manager.message_json(room_id, message)}), 201
 
     @app.get("/api/rooms/<room_id>/search")
     def search(room_id: str):
@@ -170,7 +173,9 @@ def create_app(
             items = manager.search(room_id, query)
         except RoomError as exc:
             return jsonify({"error": str(exc)}), 400
-        return jsonify({"messages": messages_json(items), "query": query})
+        return jsonify(
+            {"messages": manager.messages_json(room_id, items), "query": query}
+        )
 
     @app.post("/api/rooms/<room_id>/refresh")
     def refresh(room_id: str):

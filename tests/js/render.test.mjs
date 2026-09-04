@@ -77,8 +77,21 @@ function msg(n, text, author) {
     sender: 'a.host',
     kind: 'msg',
     reply_to: null,
-    unknown: false
+    unknown: false,
+    /* 서버가 봉투를 보고 판정해서 실어 보내는 값. 기본은 '남의 것'이고,
+       내 것을 만들려면 `mineMsg()` 를 쓴다 — 화면은 이 값만 본다. */
+    mine: false
   };
+}
+
+/* 서버가 '내 것'이라고 판정해서 보낸 레코드. */
+function mineMsg(n, text) {
+  return Object.assign(msg(n, text, '기본이름'), { sender: 'me.host', mine: true });
+}
+
+/* 말풍선이 오른쪽(내 것)에 있나 — CSS 는 `.msg.mine` 하나로 그걸 정한다. */
+function isMine(node) {
+  return String(node.className).split(' ').indexOf('mine') >= 0;
 }
 
 /* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다. */
@@ -1014,6 +1027,98 @@ await test('보류 중에 방을 바꾸면 그 방의 말이 새 방에 새지 �
   await context.fetch.answer({ message: real });
   await sending;
   assert.equal(list.children.length, after, '다른 방 메시지가 새어 들어왔다');
+});
+
+/* -------------------------------------------- '내 것' 판정 (좌우 배치) */
+
+/*
+ * ⭐ `mine` 은 **서버가 봉투를 보고 판정해서 실어 보낸 값**이다. 화면은 그 값만
+ * 본다 — 여기 테스트가 지키는 것은 "화면이 스스로 다시 판정하지 않는다"이다.
+ * 예전에는 전송 직후에만 손으로 참을 박아서, 새로고침하면 내가 쓴 말이 전부
+ * 남의 것으로 넘어갔다.
+ */
+
+await test("⭐ 최초 로드: 서버 판정대로 좌우가 갈린다", async () => {
+  const { doc, chat } = await boot({
+    messages: [mineMsg(1, '내가 쓴 말'), msg(2, '남이 쓴 말'), mineMsg(3, '또 내 말')]
+  });
+  const list = doc.getElementById('messages');
+  assert.deepEqual(list.children.map(isMine), [true, false, true]);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test("위로 페이징으로 올라온 과거도 같은 판정을 지킨다", async () => {
+  const past = [mineMsg(1, '오래된 내 말'), msg(2, '오래된 남의 말')];
+  const { doc, chat } = await boot({
+    past: past, pageSize: 2, hasMore: true, messages: [msg(9, '최근')]
+  });
+  await chat.loadOlder();
+  await settle();
+  const list = doc.getElementById('messages');
+  const mineNode = list.children.find((n) => n.textContent.includes('오래된 내 말'));
+  const otherNode = list.children.find((n) => n.textContent.includes('오래된 남의 말'));
+  assert.ok(mineNode && otherNode, '과거가 올라오지 않았다');
+  assert.equal(isMine(mineNode), true, '위로 올린 내 말이 남의 것이 됐다');
+  assert.equal(isMine(otherNode), false);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test("SSE: 남의 말은 왼쪽, 내 다른 탭이 보낸 말은 오른쪽", async () => {
+  const { doc, chat } = await boot();
+  const list = doc.getElementById('messages');
+  const before = list.children.length;
+
+  StubEventSource.current.emit('message', msg(20, '남이 보낸 말'));
+  StubEventSource.current.emit('message', mineMsg(21, '내 다른 탭이 보낸 말'));
+  await settle();
+
+  const other = list.children.find((n) => n.textContent.includes('남이 보낸 말'));
+  const own = list.children.find((n) => n.textContent.includes('내 다른 탭이 보낸 말'));
+  assert.ok(other && own, 'SSE 메시지가 붙지 않았다');
+  assert.equal(isMine(other), false);
+  assert.equal(isMine(own), true);
+  assert.equal(list.children.length, before + 2);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test("⭐ 낙관적 항목은 봉투가 없어도 내 것이다", async () => {
+  const { bubble } = await startSending('아직 봉투가 없는 말');
+  assert.ok(String(bubble.className).includes('pending'));
+  assert.equal(isMine(bubble), true, '내가 방금 쓴 말이 내 것이 아니다');
+});
+
+await test("⭐ 봉투가 도착하면 서버 판정이 그 자리를 대신한다", async () => {
+  /* 화면이 '보내는 중이던 것 = 무조건 내 것'으로 박아 두면, 봉투가 온 뒤에도
+     화면의 판정과 서버의 판정이 갈린다. 그 하드코딩이 없다는 것을 **서버가
+     반대로 말하게 해서** 증명한다 (실제로는 일어나지 않는 상황이다). */
+  const first = await startSending('서버가 아니라고 말할 말');
+  await first.context.fetch.answer({ message: msg(40, '서버가 아니라고 말할 말') });
+  await first.sending;
+  assert.equal(isMine(first.bubble), false, '화면이 서버 판정을 무시했다');
+  assert.equal(first.chat.stats.rebuiltInView, 0);
+
+  /* 정상적인 경우 — 서버도 내 것이라고 말하고, 말풍선은 오른쪽에 그대로 있다. */
+  const second = await startSending('서버도 내 것이라 할 말');
+  await second.context.fetch.answer({ message: mineMsg(41, '서버도 내 것이라 할 말') });
+  await second.sending;
+  assert.equal(isMine(second.bubble), true);
+  assert.equal(second.chat.stats.rebuiltInView, 0);
+});
+
+await test("검색 결과도 같은 표식을 단다", async () => {
+  const { doc, chat } = await boot({
+    routes: {
+      '/api/rooms/r1/search': {
+        messages: [mineMsg(5, '검색된 내 말'), msg(6, '검색된 남의 말')], query: '검색'
+      }
+    }
+  });
+  doc.getElementById('search-q').value = '검색';
+  await chat.runSearch();
+  await settle();
+  const hits = doc.getElementById('search-list').children;
+  assert.equal(hits.length, 2);
+  assert.deepEqual(hits.map((h) => String(h.className)), ['hit mine', 'hit']);
 });
 
 /* -------------------------------------------------------------- 보고 */

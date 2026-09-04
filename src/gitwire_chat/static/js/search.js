@@ -37,7 +37,9 @@ export function createSearch(env) {
       el.list.replaceChildren();
       dom.setText(el.summary, '"' + q + '" — ' + list.length + '건 (서버가 레코드를 뒤졌다)');
       for (var i = 0; i < list.length; i++) {
-        var hit = dom.make('div', 'hit');
+        /* 검색 결과도 대화와 **같은 판정**을 쓴다 — 서버가 봉투를 보고 붙여 준
+           `mine` 그대로다. 여기서 따로 계산하지 않는다. */
+        var hit = dom.make('div', list[i].mine ? 'hit mine' : 'hit');
         hit.appendChild(dom.make('span', 'author', list[i].author));
         hit.appendChild(dom.make('time', 'ts', timeLabel(list[i].ts)));
         hit.appendChild(dom.make('div', 'body', list[i].text));
