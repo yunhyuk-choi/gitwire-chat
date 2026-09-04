@@ -15,7 +15,9 @@ import path from 'node:path';
 import url from 'node:url';
 import vm from 'node:vm';
 
-import { ELEMENT_IDS, StubDocument, StubEventSource, makeFetch } from './stub-dom.mjs';
+import {
+  ELEMENT_IDS, StubDocument, StubEventSource, StubIntersectionObserver, makeFetch
+} from './stub-dom.mjs';
 
 const here = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..', '..');
@@ -57,6 +59,7 @@ function boot(options) {
   doc.getElementById('timeline').appendChild(doc.getElementById('messages'));
   doc.body.setAttribute('data-default-author', '기본이름');
   StubEventSource.reset();
+  StubIntersectionObserver.reset();
 
   const rooms = opts.rooms || [
     { id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방' },
@@ -64,10 +67,20 @@ function boot(options) {
   ];
   const messages = opts.messages || [msg(1), msg(2), msg(3)];
 
+  /* 서버 대역: `before=` 커서로 과거를 한 쪽씩 준다 (진짜 keyset 페이징처럼). */
+  const past = opts.past || [];
+  const pageSize = opts.pageSize || 2;
+  function olderPage(path) {
+    const before = decodeURIComponent((path.split('before=')[1] || '').split('&')[0]);
+    const upto = past.filter((m) => m.id < before);
+    const slice = upto.slice(Math.max(0, upto.length - pageSize));
+    return { messages: slice, has_more: upto.length > slice.length };
+  }
+
   const fetchStub = makeFetch({
-    '/api/rooms/r1/messages?before=': () => ({ messages: opts.older || [], maybe_more: false }),
-    '/api/rooms/r2/messages': { messages: opts.room2 || [msg(50, '둘째 방 메시지')], maybe_more: false },
-    '/api/rooms/r1/messages': { messages: messages, maybe_more: !!opts.maybeMore },
+    '/api/rooms/r1/messages?before=': olderPage,
+    '/api/rooms/r2/messages': { messages: opts.room2 || [msg(50, '둘째 방 메시지')], has_more: false },
+    '/api/rooms/r1/messages': { messages: messages, has_more: !!opts.hasMore },
     '/api/rooms/r1/visibility': { ok: true },
     '/api/rooms/r2/visibility': { ok: true },
     '/api/rooms': { rooms: rooms }
@@ -77,6 +90,7 @@ function boot(options) {
     document: doc,
     fetch: fetchStub,
     EventSource: StubEventSource,
+    IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
     console: console,
     localStorage: {
       _v: {},
@@ -183,27 +197,135 @@ await test('순서가 뒤집혀 와도 제자리에 끼우고 남은 노드는 �
   }
 });
 
-await test('이전 불러오기는 앞에 붙이기만 하고 스크롤을 유지한다', async () => {
-  const older = [msg(0, '아주 예전 1'), msg(1, '아주 예전 2')].map((m, i) => {
-    m.id = 'records/20260902/2026090' + '2T0100' + String(i).padStart(2, '0') + '000Z-a-x.json';
-    return m;
-  });
-  const { doc, chat } = await boot({ maybeMore: true, older: older });
-  const list = doc.getElementById('messages');
-  const timeline = doc.getElementById('timeline');
-  const before = list.children.slice();
-  timeline.scrollTop = 0;
-
-  await chat.loadOlder();
-
-  assert.equal(list.children.length, 5);
-  assert.equal(chat.stats.prepended, 2);
-  // 원래 3개는 그대로, 순서만 뒤로 밀렸다.
-  for (let i = 0; i < before.length; i++) {
-    assert.equal(list.children[i + 2], before[i]);
+/* 과거 메시지 6건 (어제 것 — ID 가 오늘 것보다 사전식으로 앞선다). */
+function pastMessages(count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const m = msg(i, '아주 예전 ' + i);
+    m.id = 'records/20260902/20260902T0100' + String(i).padStart(2, '0') + '000Z-a-x.json';
+    out.push(m);
   }
-  assert.ok(timeline.scrollTop > 0, '스크롤 앵커링이 안 됐다 (읽던 자리가 튄다)');
+  return out;
+}
+
+/* 마이크로태스크 큐를 비운다 (fetch 대역 → prepend 까지 흘려보낸다). */
+function settle() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/* 위로 올라간 상태를 만든다 (부팅 직후엔 맨 아래에 붙어 있다). */
+function scrollUp(doc) {
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 0;
+  timeline.dispatch('scroll');
+  return timeline;
+}
+
+await test('⭐ 위로 로드: 스크롤 위치가 보존된다 (보정 전후 수치)', async () => {
+  const { doc, chat } = await boot({ hasMore: true, past: pastMessages(6) });
+  const list = doc.getElementById('messages');
+  const timeline = scrollUp(doc);
+  const before = list.children.slice();
+
+  const heightBefore = timeline.scrollHeight;
+  const topBefore = timeline.scrollTop;
+
+  StubIntersectionObserver.current.trigger();   // 표식이 보였다 = 위 끝에 닿았다
+  await settle();                                // 진행 중 요청이 끝나기를 기다린다
+
+  const heightAfter = timeline.scrollHeight;
+  const grew = heightAfter - heightBefore;
+  console.log('      스크롤 보정: height ' + heightBefore + ' → ' + heightAfter +
+    ' (+' + grew + '), scrollTop ' + topBefore + ' → ' + timeline.scrollTop);
+
+  assert.ok(grew > 0, '위쪽 콘텐츠가 늘지 않았다 (테스트 전제가 깨졌다)');
+  assert.equal(timeline.scrollTop, topBefore + grew, '보던 자리가 아래로 튀었다');
+  assert.equal(chat.stats.lastAnchor, grew);
+  assert.equal(chat.stats.prepended, 2);
+
+  // 앞에 끼웠을 뿐 기존 노드는 **같은 객체**로 그대로다 (전체 리렌더 0).
+  assert.equal(list.children.length, 5);
+  for (let i = 0; i < before.length; i++) {
+    assert.equal(list.children[i + 2], before[i], i + '번 노드가 교체됐다');
+  }
+  assert.equal(doc.counts.removeChild, 0);
+  assert.equal(list.removedByReplace, 0);
   assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 트리거가 연속 발화해도 요청은 한 번이다 (중복 로드 방지)', async () => {
+  const { doc, chat, context } = await boot({ hasMore: true, past: pastMessages(6) });
+  scrollUp(doc);
+  const observer = StubIntersectionObserver.current;
+
+  observer.trigger();
+  observer.trigger();          // 로딩 중 재발화 — 무시돼야 한다
+  observer.trigger();
+  const pending = chat.loadOlder();   // 로딩 중이면 아무것도 하지 않는다
+  await pending;
+  await settle();
+
+  const olderCalls = context.fetch.calls.filter((c) => c.path.indexOf('before=') >= 0);
+  console.log('      before= 요청 수: ' + olderCalls.length +
+    ', stats.olderRequests: ' + chat.stats.olderRequests);
+  assert.equal(olderCalls.length, 1, '중복 요청이 나갔다');
+  assert.equal(chat.stats.olderRequests, 1);
+  assert.equal(chat.stats.prepended, 2);
+});
+
+await test('⭐ 맨 위에 닿으면 조용히 멈춘다 (더 요청하지 않는다)', async () => {
+  const { doc, chat, context } = await boot({ hasMore: true, past: pastMessages(3) });
+  scrollUp(doc);
+
+  // 2건 → 1건 → 끝. 세 번째 발화에서는 요청 자체가 나가지 않아야 한다.
+  for (let i = 0; i < 4; i++) {
+    const observer = StubIntersectionObserver.current;
+    if (observer) { observer.trigger(); }
+    await chat.loadOlder();
+    await settle();
+  }
+
+  const olderCalls = context.fetch.calls.filter((c) => c.path.indexOf('before=') >= 0);
+  console.log('      before= 요청 수: ' + olderCalls.length +
+    ' (과거 3건 / 쪽 크기 2 → 2회면 끝)');
+  assert.equal(olderCalls.length, 2, '끝에 닿고도 계속 물었다');
+  assert.equal(chat.state.hasMore, false);
+  assert.equal(chat.stats.prepended, 3);
+  assert.equal(doc.getElementById('older-note').textContent, '대화의 시작');
+  assert.equal(StubIntersectionObserver.current.observing.size, 0, '관찰을 안 끊었다');
+});
+
+await test('⭐ 위로 읽는 중에 온 새 메시지가 읽던 자리를 뺏지 않는다', async () => {
+  const { doc, chat } = await boot({ hasMore: true, past: pastMessages(6) });
+  const timeline = scrollUp(doc);
+  StubIntersectionObserver.current.trigger();
+  await settle();
+
+  const topBefore = timeline.scrollTop;
+  StubEventSource.current.emit('message', msg(9, '새로 온 말'));   // 아래쪽 SSE
+
+  assert.equal(timeline.scrollTop, topBefore, '새 메시지가 화면을 아래로 끌고 갔다');
+  assert.equal(doc.getElementById('jump-latest').hidden, false, '새 메시지 표시가 없다');
+  assert.ok(doc.getElementById('jump-latest').textContent.indexOf('새 메시지') >= 0);
+
+  // 맨 아래로 내려가면 따라가기가 다시 켜진다.
+  chat.state.atBottom = true;
+  StubEventSource.current.emit('message', msg(10, '또 하나'));
+  assert.equal(timeline.scrollTop, timeline.scrollHeight);
+});
+
+await test('IntersectionObserver 가 없으면 스크롤 폴백으로 이어 붙인다', async () => {
+  const { doc, chat, context } = await boot({
+    hasMore: true, past: pastMessages(6), noObserver: true
+  });
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 10;          // 위 끝 근처
+  timeline.dispatch('scroll');
+  await settle();
+
+  const olderCalls = context.fetch.calls.filter((c) => c.path.indexOf('before=') >= 0);
+  assert.equal(olderCalls.length, 1);
+  assert.equal(chat.stats.prepended, 2);
 });
 
 await test('방을 바꿀 때만 타임라인을 비운다', async () => {

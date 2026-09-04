@@ -8,7 +8,8 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     GET  /api/rooms                        방 목록
     POST /api/rooms                        방 등록 (레포 주소 → 방)
     DEL  /api/rooms/<id>                   방 목록에서 제거
-    GET  /api/rooms/<id>/messages          최근 N건 / before= 로 이전 불러오기
+    GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
+                                           (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기
     GET  /api/rooms/<id>/search?q=          서버측 레코드 검색
     POST /api/rooms/<id>/refresh           폴 주기를 기다리지 않고 즉시 당기기
@@ -113,15 +114,14 @@ def create_app(
         except ValueError:
             limit = None
         try:
-            if before:
-                items = manager.older(room_id, before, limit)
-                more = len(items) == (limit or settings.page_limit)
-            else:
-                items = manager.timeline(room_id, limit)
-                more = len(items) == (limit or settings.recent_limit)
+            page = manager.page(room_id, before=before or None, limit=limit)
         except RoomError as exc:
             return jsonify({"error": str(exc)}), 400
-        return jsonify({"messages": messages_json(items), "maybe_more": more})
+        # `has_more` 는 기반(gitwire)이 직접 판정한 값이다 — 쪽 크기로 추측하지
+        # 않는다. 추측이 틀리면 브라우저가 맨 위에서 헛요청을 한 번 더 보낸다.
+        return jsonify(
+            {"messages": messages_json(page.messages), "has_more": page.has_more}
+        )
 
     @app.post("/api/rooms/<room_id>/messages")
     def post_message(room_id: str):

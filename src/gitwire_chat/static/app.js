@@ -15,6 +15,10 @@
  *   3. 타임라인 컨테이너를 비우는 곳은 **방을 바꿀 때 딱 한 곳**뿐이다
  *      (`switchRoom`). 그건 같은 대화의 리렌더가 아니라 다른 대화로의 전환이다.
  *
+ * 과거는 **위로 스크롤하면 자동으로 이어 붙는다**(페이지 버튼이 아니다). 그때
+ * 지켜야 하는 세 가지는 `prependMessages`(스크롤 보정) · `onNewRendered`
+ * (아래쪽 SSE 와 자리 다툼 금지) · `loadOlder`(중복 로드 차단)에 각각 있다.
+ *
  * 이 세 가지를 눈으로 믿지 않고 **세어서** 확인한다 — `__chat.stats` 가 노드
  * 생성/붙이기/비우기 횟수를 기록하고, stub DOM 테스트가 그 수를 검증한다.
  */
@@ -34,7 +38,8 @@
     replyTo: null,
     atBottom: true,
     unseen: 0,
-    maybeMore: false,
+    hasMore: false,      /* 위쪽에 더 남았나 (서버가 알려준 값) */
+    loadingOlder: false, /* 위로 불러오는 중 — 중복 요청 차단 */
     booted: false
   };
 
@@ -47,8 +52,13 @@
     prepended: 0,   /* 앞에 붙인 수 (이전 불러오기) */
     duplicates: 0,  /* ID 중복으로 걸러낸 수 */
     cleared: 0,     /* 타임라인을 비운 횟수 = 방 전환 횟수 */
+    olderRequests: 0, /* 위로 불러오기 요청 수 (중복 발화 감시) */
+    anchored: 0,    /* 스크롤 보정 횟수 */
+    lastAnchor: 0,  /* 마지막 보정량(px) — 0 이면 보정이 안 된 것이다 */
     innerHTML: 0    /* 항상 0 이어야 한다 */
   };
+
+  var olderObserver = null;
 
   var el = {};
 
@@ -199,13 +209,22 @@
       if (!state.oldest || msg.id < state.oldest) { state.oldest = msg.id; }
     }
     if (!added) { return 0; }
-    var before = el.timeline ? el.timeline.scrollHeight : 0;
+    /* ⭐ 스크롤 점프 방지.
+       위에 노드를 끼우면 `scrollTop` 은 그대로인데 위쪽 콘텐츠가 늘어나므로
+       **보던 화면이 아래로 튄다.** 그래서 삽입 전 높이를 재고, 삽입 직후
+       늘어난 만큼 `scrollTop` 을 내려 화면상의 위치를 그대로 유지한다.
+       (CSS `overflow-anchor` 는 브라우저마다 동작이 달라 믿지 않는다 —
+       오히려 우리 보정과 겹치지 않게 CSS 에서 꺼 둔다.) */
+    var heightBefore = el.timeline ? el.timeline.scrollHeight : 0;
+    var topBefore = el.timeline ? el.timeline.scrollTop : 0;
     var first = el.messages.children.length ? el.messages.children[0] : null;
     el.messages.insertBefore(frag, first);
     stats.prepended += added;
     if (el.timeline) {
-      /* 스크롤 점프 방지 — 늘어난 높이만큼 내려 읽던 자리를 유지한다. */
-      el.timeline.scrollTop = el.timeline.scrollTop + (el.timeline.scrollHeight - before);
+      var grew = el.timeline.scrollHeight - heightBefore;
+      el.timeline.scrollTop = topBefore + grew;
+      stats.anchored += 1;
+      stats.lastAnchor = grew;
     }
     return added;
   }
@@ -216,6 +235,8 @@
     state.seen = new global.Set();
     state.oldest = null;
     state.unseen = 0;
+    state.hasMore = false;
+    state.loadingOlder = false;
     el.messages.replaceChildren();
   }
 
@@ -341,6 +362,7 @@
     if (!roomId) { return; }
     if (state.roomId && state.roomId !== roomId) { reportVisibility(false); }
     state.roomId = roomId;
+    unwatchOlder();
     clearTimeline();
     renderRooms(state.rooms);
     var room = currentRoom();
@@ -360,26 +382,76 @@
         if (state.roomId !== roomId) { return; }
         var list = data.messages || [];
         for (var i = 0; i < list.length; i++) { appendMessage(list[i]); }
-        state.maybeMore = !!data.maybe_more;
-        if (state.maybeMore) { show(el.loadOlder); } else { hide(el.loadOlder); }
+        state.hasMore = !!data.has_more;
         scrollToBottom();
+        showOlderState();
+        watchOlder();     /* 위로 올리면 그때부터 과거가 이어 붙는다 */
         status('');
       })['catch'](function (err) { status(String(err.message || err), true); });
   }
 
+  /* ------------------------------------------- 위로 무한 스크롤 (과거) */
+
+  /* 표식 하나의 문구만 바꾼다 — 버튼이 아니다. 사용자는 스크롤만 한다. */
+  function showOlderState() {
+    if (!el.olderSentinel) { return; }
+    if (state.loadingOlder) {
+      setText(el.olderNote, '이전 대화를 불러오는 중…');
+    } else if (state.hasMore) {
+      setText(el.olderNote, '위로 올리면 이전 대화가 이어진다');
+    } else {
+      setText(el.olderNote, '대화의 시작');
+    }
+  }
+
+  /* 트리거는 IntersectionObserver 다 — 스크롤 이벤트마다 계산하지 않는다.
+     표식이 화면에 들어오는 순간(=위 끝에 가까워진 순간) 한 번 발화한다. */
+  function watchOlder() {
+    if (!state.hasMore) { unwatchOlder(); return; }
+    if (!el.olderSentinel) { return; }
+    if (!global.IntersectionObserver) { return; }   /* 없으면 스크롤 폴백 */
+    if (!olderObserver) {
+      olderObserver = new global.IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i].isIntersecting) { loadOlder(); return; }
+        }
+      }, { root: el.timeline || null, rootMargin: '200px 0px 0px 0px', threshold: 0 });
+    }
+    olderObserver.observe(el.olderSentinel);
+  }
+
+  function unwatchOlder() {
+    if (olderObserver) { olderObserver.disconnect(); }
+  }
+
+  /* '이전 불러오기' — 위로 스크롤하면 자동으로 불린다.
+     중복 방지 3중: (1) 로딩 플래그 (2) 관찰 일시 해제 (3) 더 없으면 아예 멈춤. */
   function loadOlder() {
     if (!state.roomId || !state.oldest) { return; }
+    if (state.loadingOlder || !state.hasMore) { return; }
     var roomId = state.roomId;
+    state.loadingOlder = true;
+    stats.olderRequests += 1;
+    /* 관찰을 잠시 끊는다. 응답이 오기 전에 표식이 계속 보여도 다시 발화하지 않는다. */
+    if (olderObserver) { olderObserver.unobserve(el.olderSentinel); }
+    showOlderState();
     var url = '/api/rooms/' + encodeURIComponent(roomId) +
       '/messages?before=' + encodeURIComponent(state.oldest);
-    status('이전 대화를 불러오는 중…');
     return api(url).then(function (data) {
       if (state.roomId !== roomId) { return; }
       var added = prependMessages(data.messages || []);
-      state.maybeMore = !!data.maybe_more && added > 0;
-      if (state.maybeMore) { show(el.loadOlder); } else { hide(el.loadOlder); }
-      status(added ? '' : '더 이전 대화가 없다');
-    })['catch'](function (err) { status(String(err.message || err), true); });
+      /* 서버가 '더 있다'고 해도 실제로 붙은 게 없으면 멈춘다 (무한 루프 방지). */
+      state.hasMore = !!data.has_more && added > 0;
+      status('');
+    })['catch'](function (err) {
+      status(String(err.message || err), true);
+    }).then(function () {
+      state.loadingOlder = false;
+      showOlderState();
+      /* 다시 관찰 — 한 쪽으로 화면이 안 찼으면 곧바로 또 발화해서 이어 붙고,
+         맨 위에 닿았으면(hasMore=false) 조용히 멈춘다. */
+      if (state.roomId === roomId) { watchOlder(); }
+    });
   }
 
   /* ---------------------------------------------------------- 보내기 */
@@ -507,7 +579,8 @@
     el.text = $('text');
     el.author = $('author');
     el.send = $('send');
-    el.loadOlder = $('load-older');
+    el.olderSentinel = $('older-sentinel');
+    el.olderNote = $('older-note');
     el.jumpLatest = $('jump-latest');
     el.replyChip = $('reply-chip');
     el.replyLabel = $('reply-label');
@@ -543,7 +616,6 @@
     });
     on(el.text, 'input', autoGrow);
     on(el.author, 'change', rememberAuthor);
-    on(el.loadOlder, 'click', loadOlder);
     on(el.jumpLatest, 'click', scrollToBottom);
     on(el.replyCancel, 'click', cancelReply);
     on(el.addRoom, 'submit', addRoom);
@@ -570,6 +642,11 @@
     on(el.timeline, 'scroll', function () {
       state.atBottom = nearBottom();
       if (state.atBottom) { state.unseen = 0; hide(el.jumpLatest); }
+      /* IntersectionObserver 가 없는 환경(구형 브라우저)의 폴백.
+         있으면 관찰자가 맡으므로 여기서 또 부르지 않는다. */
+      if (!olderObserver && state.hasMore && el.timeline.scrollTop < 200) {
+        loadOlder();
+      }
     });
     on(doc, 'visibilitychange', function () { reportVisibility(isVisible()); });
     on(global, 'beforeunload', function () { reportVisibility(false); });
@@ -604,6 +681,7 @@
     clearTimeline: clearTimeline,
     switchRoom: switchRoom,
     loadOlder: loadOlder,
+    watchOlder: watchOlder,
     renderRooms: renderRooms,
     send: send,
     runSearch: runSearch,

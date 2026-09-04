@@ -26,11 +26,8 @@ site-packages 에 있고 그 옆에 상태를 쓰는 것은 잘못이다.
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
-import secrets
-import socket
 import sys
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -38,9 +35,6 @@ from pathlib import Path
 
 #: 방 목록 파일 이름
 ROOMS_FILE = "rooms.json"
-
-#: 이 설치(= 이 home 디렉토리)의 전송 수준 식별자를 담는 파일
-INSTANCE_FILE = "instance.txt"
 
 #: 기본 폴 주기(초). gitwire 기본값 30초보다 짧게 잡되, 호스트 rate limit 을
 #: 생각해 무작정 줄이지 않는다. 지연 = 폴 주기라는 한계는 README 에 명시한다.
@@ -77,41 +71,6 @@ def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
     if root is not None:
         return root / "chats"
     return _os_data_dir()
-
-
-def instance_id(home: Path) -> str:
-    """이 설치의 **전송 수준 식별자**(gitwire ``sender``)를 만들거나 읽는다.
-
-    ⚠️ gitwire 의 기본 ``sender`` 는 ``<유저>.<호스트>`` 다. 실제 배치에서는
-    참가자마다 머신이 달라 문제가 없지만, **같은 머신에서 두 인스턴스를 띄우면
-    (테스트, 계정 두 개, 한 사람이 두 프로필) 두 프로세스의 sender 가 같아진다.**
-    그러면 "이건 내가 보낸 것인가" 판정이 무너져 남의 메시지를 자기 에코로 오인한다.
-
-    그래서 home 마다 한 번 난수를 만들어 붙인다. 파일에 남기므로 재시작해도
-    같은 값이고, 사람에게 보여 줄 이름이 아니라 전송 식별자다.
-    """
-    path = Path(home) / INSTANCE_FILE
-    try:
-        existing = path.read_text(encoding="utf-8").strip()
-        if existing:
-            return existing
-    except OSError:
-        pass
-    try:
-        user = getpass.getuser()
-    except Exception:  # noqa: BLE001
-        user = "anon"
-    try:
-        host = socket.gethostname().split(".")[0]
-    except Exception:  # noqa: BLE001
-        host = "local"
-    value = f"{user}.{host}.{secrets.token_hex(3)}"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value + "\n", encoding="utf-8", newline="\n")
-    except OSError:
-        pass
-    return value
 
 
 @dataclass(frozen=True)

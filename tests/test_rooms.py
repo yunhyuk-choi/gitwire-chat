@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+import gitwire
+
 from gitwire_chat import schema
 from gitwire_chat.rooms import RoomError, room_id_for
 
@@ -111,6 +113,7 @@ def test_타임라인은_최근_N건만(manager, fake_opener):
         manager.send(room.id, f"메시지 {i}")
     recent = manager.timeline(room.id)          # settings.recent_limit == 5
     assert [m.text for m in recent] == [f"메시지 {i}" for i in range(7, 12)]
+    assert recent.has_more is True              # 위에 더 있다 (기반이 알려준 값)
 
 
 def test_이전_불러오기는_그_앞을_준다(manager):
@@ -118,19 +121,49 @@ def test_이전_불러오기는_그_앞을_준다(manager):
     for i in range(12):
         manager.send(room.id, f"메시지 {i}")
     recent = manager.timeline(room.id)
-    older = manager.older(room.id, recent[0].id)   # page_limit == 3
+    older = manager.older(room.id, recent.oldest)   # page_limit == 3
     assert [m.text for m in older] == ["메시지 4", "메시지 5", "메시지 6"]
+    assert older.has_more is True
 
-    # 계속 거슬러 올라가다 처음에 닿으면 빈 목록.
-    cursor = older[0].id
+    # 계속 거슬러 올라가다 처음에 닿으면 빈 쪽 + has_more=False.
+    cursor = older.oldest
     seen = []
     for _ in range(10):
         page = manager.older(room.id, cursor)
-        if not page:
+        if not page.messages:
             break
-        seen = page + seen
-        cursor = page[0].id
+        seen = list(page.messages) + seen
+        cursor = page.oldest
+        if not page.has_more:
+            break
     assert [m.text for m in seen] == [f"메시지 {i}" for i in range(0, 4)]
+
+    # 맨 위에서는 **더 없다고 말한다** — 무한 스크롤의 종료 조건이다.
+    assert manager.older(room.id, cursor).has_more is False
+
+
+def test_페이징은_기반의_keyset_커서를_그대로_쓴다(manager, fake_opener):
+    """소비자가 자기 방식으로 자르지 않는다 — before= 를 기반에 넘긴다."""
+    room = manager.register(REPO)
+    for i in range(9):
+        manager.send(room.id, f"메시지 {i}")
+    channel = fake_opener.channels[gitwire.normalize_repo_url(REPO)]
+
+    calls = []
+    original = channel.history_page
+
+    def spy(*, before=None, limit=50):
+        calls.append((before, limit))
+        return original(before=before, limit=limit)
+
+    channel.history_page = spy
+    first = manager.timeline(room.id)
+    second = manager.older(room.id, first.oldest)
+
+    assert calls == [(None, 5), (first.oldest, 3)]   # recent_limit=5, page_limit=3
+    assert [m.text for m in second] == ["메시지 1", "메시지 2", "메시지 3"]
+    # 전량 읽기(history(None))로 흘러가지 않았다.
+    assert all(c[1] is not None for c in calls)
 
 
 def test_검색은_DOM_에_없는_과거까지_뒤진다(manager):

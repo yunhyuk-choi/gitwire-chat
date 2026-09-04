@@ -62,7 +62,8 @@ class FakeChannel:
     def __init__(self, repo_url: str, **kwargs) -> None:
         self.repo_url = repo_url
         self.kwargs = kwargs
-        self.sender = kwargs.get("sender") or "fake.host"
+        # 이 앱은 이제 sender 를 넘기지 않는다 — 기반이 설치본 식별자를 준다.
+        self.sender = kwargs.get("sender") or f"fake.host.{abs(hash(repo_url)) % 999999:06d}"
         self.records: list[gitwire.Record] = []
         self.subscribers: list = []
         self.closed = False
@@ -73,7 +74,8 @@ class FakeChannel:
         self._lock = threading.Lock()
 
     # -- 발행 ---------------------------------------------------------
-    def append(self, payload, *, sender=None, flush=False) -> str:
+    def append(self, payload, *, sender=None, flush=False) -> gitwire.Record:
+        """기반과 같이 **Record 를 돌려준다** (ID 문자열이 아니다)."""
         with self._lock:
             self._n += 1
             ts = self._clock + timedelta(seconds=self._n)
@@ -83,7 +85,7 @@ class FakeChannel:
             self.records.append(record)
         for callback in list(self.subscribers):
             callback(record)
-        return rid
+        return record
 
     def inject(self, payload, sender="other.host") -> gitwire.Record:
         """다른 참가자가 보낸 것처럼 레코드를 밀어 넣는다 (구독 전달까지)."""
@@ -98,10 +100,24 @@ class FakeChannel:
         return record
 
     # -- 조회 ---------------------------------------------------------
-    def history(self, limit=None):
+    def history(self, limit=None, *, before=None):
         with self._lock:
             items = list(self.records)
+        if before is not None:
+            items = [r for r in items if r.id < before]
         return items if limit is None else items[-limit:]
+
+    def history_page(self, *, before=None, limit=50):
+        """기반의 keyset 페이징. 한 건 더 세어 has_more 를 판정하는 것까지 같다."""
+        with self._lock:
+            items = list(self.records)
+        if before is not None:
+            items = [r for r in items if r.id < before]
+        page = items[-limit:] if limit else items
+        return gitwire.HistoryPage(list(page), len(items) > len(page))
+
+    def record_ids(self, *, before=None, limit=None):
+        return [r.id for r in self.history(limit, before=before)]
 
     def fetch_new(self, limit=None, *, advance=True):
         with self._lock:

@@ -4,12 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitwire-chat"
-version = "0.1.0"
+version = "0.2.0"
 description = "중앙 서버 없이 git 레포를 메시지 저장소로 쓰는 로컬-퍼스트 비동기 채팅"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "gitwire",
+    # 전송 계층. PyPI 에 없으므로 **공개 레포를 직접** 가리킨다 — 이 한 줄이
+    # "레포만 클론하면 설치된다"를 성립시킨다. 예전처럼 `gitwire` 라고만 적으면
+    # 옆 디렉토리에 체크아웃을 나란히 둔 사람만 설치할 수 있다.
+    # 개발 중 로컬 체크아웃을 쓰는 방법은 README "개발" 참조.
+    "gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git",
     "flask>=3",
 ]
 
