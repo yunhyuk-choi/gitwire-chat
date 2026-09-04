@@ -480,11 +480,15 @@ export function createTimeline(env) {
   }
 
   /* ⭐ 보류 항목을 **서버가 준 진짜 레코드로 갈아끼운다.**
-     노드를 다시 만들지 않는다 — 같은 DOM 노드에서 키(봉투 ID)만 바꿔 단다. */
+     노드를 다시 만들지 않는다 — 같은 DOM 노드에서 키(봉투 ID)만 바꿔 단다.
+
+     ⚠️ `msg.mine` 을 여기서 세우지 않는다. 이건 봉투가 있는 레코드이고,
+     '내 것'인지는 **서버가 봉투를 보고 이미 판정해서 실어 보냈다.**
+     여기서 다시 참으로 박으면 판정이 두 곳이 되고, 둘이 어긋나는 날
+     어느 쪽이 맞는지 알 수 없다. */
   function settlePending(tempId, msg) {
     var draft = pendings.get(tempId);
     if (!draft) {
-      msg.mine = true;
       if (append(msg)) { onNewRendered(true); }
       return;
     }
@@ -504,7 +508,6 @@ export function createTimeline(env) {
       syncVirtual();
       return;
     }
-    msg.mine = true;
     msg.pending = false;
     msg.failed = false;
     if (node) {
@@ -561,8 +564,9 @@ export function createTimeline(env) {
          같은 말이 잠깐 두 줄로 보인다. */
       var settled = matchPending(msg);
       if (settled) { settlePending(settled, msg); onNewRendered(true); return; }
-      msg.mine = false;
-      if (append(msg)) { onNewRendered(false); }
+      /* `msg.mine` 은 서버가 봉투를 보고 붙여 보냈다 — 여기서 덮지 않는다.
+         (내 다른 탭에서 보낸 말도 이 경로로 들어오고, 그건 내 것이다.) */
+      if (append(msg)) { onNewRendered(!!msg.mine); }
     });
     bus.on('draft:add', function (e) { addPending(e.draft); });
     bus.on('draft:settle', function (e) { settlePending(e.tempId, e.message); });

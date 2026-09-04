@@ -321,7 +321,12 @@ export function makeFetch(routes) {
   const calls = [];
   const fetch = function (path, init) {
     calls.push({ path: path, init: init || {} });
-    const key = Object.keys(routes).find((k) => path.indexOf(k) === 0);
+    /* ⚠️ **가장 긴** 접두사가 이긴다. 먼저 선언된 것이 이기게 하면
+       '/api/rooms' 가 '/api/rooms/r1/search?...' 를 삼켜, 테스트가 엉뚱한
+       응답을 받고도 조용히 통과한다(실제로 한 번 그랬다). */
+    const key = Object.keys(routes)
+      .filter((k) => path.indexOf(k) === 0)
+      .sort((a, b) => b.length - a.length)[0] || null;
     const handler = key ? routes[key] : null;
     const raw = handler
       ? (typeof handler === 'function' ? handler(path, init) : handler)

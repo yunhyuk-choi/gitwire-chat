@@ -279,6 +279,8 @@ html, body {
 }
 .search-head { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .hit { padding: 6px 0; border-bottom: 1px solid var(--line); }
+/* 대화와 같은 표식 — 검색 결과에서도 내 말은 내 말이다. */
+.hit.mine { border-left: 3px solid var(--mine); padding-left: 6px; }
 .hit .author { font-weight: 600; font-size: 12px; }
 .hit .ts { margin-left: 6px; font-size: 11px; color: var(--muted); }
 .hit .body { white-space: pre-wrap; font-size: 13px; }

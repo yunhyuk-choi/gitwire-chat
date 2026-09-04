@@ -89,6 +89,10 @@ export function createComposer(env) {
       kind: 'msg',
       reply_to: replyTo,
       unknown: false,
+      /* ⚠️ 여기가 `mine` 을 손으로 세우는 **유일한** 자리다. 그리고 그럴 자격이
+         있다 — 이건 아직 봉투가 없는 낙관적 항목(`~pending/…`)이고, 방금 이
+         입력칸에서 나왔으니 정의상 내 것이다. 봉투가 도착하는 순간(`draft:settle`)
+         부터는 서버가 봉투를 보고 판정한 값이 이 자리를 대신한다. */
       mine: true,
       pending: true,
       failed: false

@@ -305,3 +305,54 @@ def test_재시작해도_커서와_방_목록이_이어진다(tmp_path, bare_rep
         assert [m["text"] for m in restarted.timeline()] == ["첫 마디"]
     finally:
         restarted.close()
+
+
+def test_내_것과_남의_것이_봉투로_갈린다(pair):
+    """⭐ 두 설치본이 **같은 레코드를 서로 반대로** 판정한다.
+
+    이게 `mine` 의 전부다 — '내 것'은 레코드의 속성이 아니라 **읽는 설치본과의
+    관계**다. 그래서 A 가 쓴 말은 A 화면에서 오른쪽(내 것), B 화면에서 왼쪽이다.
+
+    회귀의 초점: A 가 **다시 읽었을 때**(= 새로고침) 판정이 살아 있는가.
+    예전에는 전송 직후의 화면 특례로만 참이었고, 다시 읽으면 전부 남의 것이
+    됐다 — 봉투에 답이 있는데 아무도 비교하지 않았기 때문이다.
+    """
+    a, b, repo_url = pair
+    room = a.join(repo_url, "우리 방")
+    assert b.join(repo_url, "우리 방") == room
+    assert a.manager.instance != b.manager.instance
+
+    said = a.say("이건 A 가 쓴 말")
+    assert said["mine"] is True, "전송 응답부터 내 것이 아니다"
+
+    # (1) A 가 다시 읽는다 — 새로고침이 하는 그 요청이다.
+    reread = [m for m in a.timeline() if m["id"] == said["id"]]
+    assert reread and reread[0]["mine"] is True, "다시 읽으니 내 것이 아니게 됐다"
+
+    # (2) B 가 같은 레코드를 받아온다 — 같은 봉투, 반대 판정.
+    def b_sees():
+        b.manager.poll_now(b.room_id)
+        return [m for m in b.timeline() if m["id"] == said["id"]]
+
+    got = _wait(b_sees)
+    assert got, "B 가 A 의 메시지를 받지 못했다"
+    assert got[0]["sender"] == said["sender"]      # 봉투는 같고
+    assert got[0]["mine"] is False                 # 판정만 반대다
+
+    # (3) 반대 방향도 대칭이다.
+    replied = b.say("이건 B 가 쓴 말")
+    assert replied["mine"] is True
+
+    def a_sees():
+        a.manager.poll_now(a.room_id)
+        return [m for m in a.timeline() if m["id"] == replied["id"]]
+
+    back = _wait(a_sees)
+    assert back and back[0]["mine"] is False
+
+    # (4) 검색도 같은 문을 지난다 (조회 경로마다 다른 답이 나오면 안 된다).
+    for inst, mine_of_a in ((a, True), (b, False)):
+        hits = inst.client.get(
+            f"/api/rooms/{inst.room_id}/search?q=A 가 쓴 말"
+        ).get_json()["messages"]
+        assert [m["mine"] for m in hits] == [mine_of_a]
