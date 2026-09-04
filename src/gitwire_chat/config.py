@@ -40,12 +40,22 @@ ROOMS_FILE = "rooms.json"
 #: 생각해 무작정 줄이지 않는다. 지연 = 폴 주기라는 한계는 README 에 명시한다.
 DEFAULT_POLL_INTERVAL = 15.0
 
+#: 기본 포트. 자동 시작 등록(`autostart`)도 같은 값을 기본으로 쓰므로 여기가
+#: 단일 원천이다 — `__main__` 이 다시 정의하지 않고 이걸 가져다 쓴다.
+DEFAULT_PORT = 8770
 
-def _os_data_dir() -> Path:
-    if os.name == "nt":
+
+def os_data_dir(platform_key: str | None = None) -> Path:
+    """OS 데이터 디렉토리.
+
+    ``platform_key`` 로 **대상 OS 를 지정**할 수 있다 — 자동 시작 기능이 다른
+    OS 용 파일을 미리보기로 렌더할 때 쓴다. 없으면 지금 돌고 있는 OS.
+    """
+    key = platform_key or ("windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux")
+    if key == "windows":
         base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
         return Path(base) / "gitwire-chat"
-    if sys.platform == "darwin":
+    if key == "macos":
         return Path.home() / "Library" / "Application Support" / "gitwire-chat"
     base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
     return Path(base) / "gitwire-chat"
@@ -70,7 +80,7 @@ def resolve_home(explicit: str | os.PathLike | None = None) -> Path:
     root = _source_checkout_root()
     if root is not None:
         return root / "chats"
-    return _os_data_dir()
+    return os_data_dir()
 
 
 @dataclass(frozen=True)

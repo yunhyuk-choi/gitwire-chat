@@ -43,6 +43,9 @@ python -m gitwire_chat
 | `--no-notify` | OS 알림 끄기 |
 | `--open` | 기동 후 브라우저 열기 |
 
+서브커맨드가 하나 있다 — `autostart` (로그인 시 자동으로 띄우기: 등록·해제·상태).
+아래 「알림 · 자동 시작」 참조.
+
 ### 방 만들기 / 합류하기
 
 1. 사이드바 `＋` → **레포 주소를 넣는다.** 빈 레포면 gitwire 가 방 규약을 심는다.
@@ -134,16 +137,82 @@ export GITWIRE_TOKEN=ghp_...
 (Windows 토스트 / macOS `osascript` / Linux `notify-send`, 전부 실패하면 로그만).
 탭이 그 방을 **보고 있으면** 알림을 띄우지 않는다.
 
-로그인할 때 자동으로 띄우고 싶다면 (v1 은 자동 등록을 하지 않는다 — 안내만):
+### 로그인할 때 자동으로 띄우기
+
+알림이 제 값을 하려면 그 프로세스가 **로그인할 때 이미 떠 있어야** 한다.
+명령 한 줄이다 — 안내문을 보고 따라 할 필요가 없다.
+
+```bash
+python -m gitwire_chat autostart install --dry-run   # ① 무엇을 어디에 쓸지 먼저 본다
+python -m gitwire_chat autostart install             # ② 등록
+python -m gitwire_chat autostart status              # 지금 등록돼 있나 · 어디에 · 로그는 어디
+python -m gitwire_chat autostart uninstall           # 해제
+```
+
+OS 별로 **그 OS 의 정석 수단**을 쓴다. 셸 명령이 아니라 파일 하나를 쓰는 것이
+기본이고, 서비스 관리자에게 알려야 하는 곳에서만 한 단계를 더 밟는다.
+
+| OS | 무엇이 만들어지나 | 추가 단계 |
+|---|---|---|
+| Windows | 시작 폴더(`shell:startup`)의 `gitwire-chat.cmd` | 없음 (파일이 곧 등록이다) |
+| macOS | `~/Library/LaunchAgents/com.github.yunhyuk-choi.gitwire-chat.plist` | `launchctl bootstrap` |
+| Linux | `~/.config/systemd/user/gitwire-chat.service` | `systemctl --user enable --now` |
+
+지키는 것들:
+
+* **먼저 보여준다.** `--dry-run` 이 쓸 경로와 **파일 내용 전문**을 출력한다.
+  실제 등록에서도 같은 것을 보여준 뒤에 쓴다 — 환경을 바꾸는 동작이 조용히
+  일어나지 않는다. `--os windows|macos|linux|all` 로 **다른 OS 의 파일도 미리**
+  볼 수 있다(미리보기 전용 — 실제 등록은 그 OS 에서만 된다).
+* **멱등.** 두 번 등록해도 파일은 하나다. 내용이 같으면 아무것도 쓰지 않고
+  "이미 등록돼 있다"고 말한다. 옵션이 바뀌었으면 그 자리를 갱신한다. 해제도
+  없으면 없다고 말하고 끝난다.
+* **지금 이 인터프리터를 박는다.** venv 로 설치했으면 그 venv 의 인터프리터
+  **절대 경로**가 들어간다 — 로그인 셸의 `PATH` 를 믿지 않는다. `--port`·`--home`
+  같은 옵션도 등록 시점 값이 그대로 파일에 들어간다.
+* **콘솔 창이 뜨지 않는다.** Windows 에서는 같은 디렉토리의 `pythonw.exe` 를
+  쓴다(있는지 실제로 확인하고, 없으면 `python.exe` + 최소화로 폴백하며 그 사실을
+  보고한다).
+* **로그가 남는다.** 백그라운드로 돌면 실패해도 화면에 아무것도 안 남으므로,
+  표준출력·표준오류를 파일 하나로 모은다. `status` 가 그 경로를 알려준다.
+  (`%LOCALAPPDATA%\gitwire-chat\logs\` / `~/Library/Logs/gitwire-chat/` /
+  `$XDG_STATE_HOME/gitwire-chat/logs/`)
+* **systemd 가 없는 Linux 에서는 명확히 실패한다.** 조용히 다른 수단으로
+  넘어가지 않고, 수동 방법을 안내한다 — 등록됐다고 믿게 만드는 것이 제일 나쁘다.
+
+> ⚠️ Windows 의 시작 폴더에는 감독자가 없다. `uninstall` 은 **다음 로그인부터**
+> 뜨지 않게 한다 — 지금 떠 있는 프로세스는 그대로 돈다(작업 관리자에서
+> `pythonw.exe` 를 끝내면 된다). macOS·Linux 는 `bootout`/`disable --now` 로
+> 그 자리에서 함께 내린다.
+
+**Windows 에서 작업 스케줄러를 쓰지 않는 이유** — 스케줄러에도 "로그온 시 실행"
+트리거가 있다. 하지만 등록 수단이 `schtasks`/XML(UTF-16)이라 셸·인코딩 의존이
+늘고, 사용자가 눈으로 확인·삭제하기 어렵다. 시작 폴더는 탐색기에서 바로 보이고
+파일을 지우면 끝난다. 스케줄러가 주는 추가 능력(지연·조건·재시도)은 "로그인하면
+뜬다"는 목적에 필요하지 않다.
+
+#### 수동으로 하려면
+
+자동 등록이 막히는 환경이 있다(정책으로 시작 폴더가 잠긴 경우, systemd 없는
+배포판, 읽기 전용 홈 등). 그때는 아래를 손으로 한다 — `autostart install
+--dry-run` 이 출력하는 내용을 그대로 붙여 넣으면 된다.
 
 * **Windows** — `Win+R` → `shell:startup` → 아래 내용의 `.cmd` 파일을 넣는다.
+  (또는 작업 스케줄러 → 새 작업 → 트리거 "로그온할 때" → 동작에 같은 명령)
   ```bat
-  pythonw -m gitwire_chat --port 8770
+  @echo off
+  start "" /b "C:\경로\pythonw.exe" -m gitwire_chat --port 8770
   ```
 * **macOS** — `~/Library/LaunchAgents/` 에 `.plist` 를 만들고
-  `launchctl load` (`ProgramArguments` 에 `python3 -m gitwire_chat`).
+  `launchctl bootstrap gui/$UID <plist 경로>` (`ProgramArguments` 에
+  `python3 -m gitwire_chat`).
 * **Linux (systemd --user)** — `~/.config/systemd/user/gitwire-chat.service`
   를 만들고 `systemctl --user enable --now gitwire-chat`.
+* **systemd 가 없으면** — 데스크톱 환경의 "시작 프로그램"에 등록하거나
+  `~/.xprofile` 에 같은 명령을 백그라운드(`... &`)로 넣는다.
+
+> 등록 파일을 둘 디렉토리는 `--dir`(또는 `GITWIRE_CHAT_AUTOSTART_DIR`)로 바꿀 수
+> 있다. 실제 시작 폴더를 건드리지 않고 시험해 보거나 테스트할 때 쓴다.
 
 ---
 
