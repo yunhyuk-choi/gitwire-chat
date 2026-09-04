@@ -29,7 +29,10 @@ gitwire-chat = "gitwire_chat.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gitwire_chat = ["templates/*.html", "static/*"]
+# ⚠️ `static/*` 는 한 겹만 잡는다. 가상 스크롤 엔진은 static/vendor/... 아래에
+# 벤더링돼 있으므로 하위 디렉토리까지 명시해야 한다 — 빠지면 pip 로 설치했을 때만
+# 화면이 안 그려지는(소스 체크아웃에서는 멀쩡한) 조용한 실패가 된다.
+gitwire_chat = ["templates/*.html", "static/*", "static/vendor/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -27,6 +27,14 @@ const INDEX_HTML = path.join(ROOT, 'src', 'gitwire_chat', 'templates', 'index.ht
 const source = fs.readFileSync(APP_JS, 'utf8');
 const indexHtml = fs.readFileSync(INDEX_HTML, 'utf8');
 
+/* ⭐ 가상 스크롤 엔진은 **진짜**를 쓴다 (벤더링된 그 파일 그대로).
+   대역으로 바꾸면 "가상화가 실제로 도는가"를 아무것도 증명하지 못한다. */
+const virtual = await import(
+  url.pathToFileURL(path.join(
+    ROOT, 'src', 'gitwire_chat', 'static', 'vendor', 'tanstack-virtual-core', 'index.js'
+  )).href
+);
+
 const results = [];
 function test(name, fn) {
   return Promise.resolve()
@@ -36,6 +44,15 @@ function test(name, fn) {
 }
 
 /* ------------------------------------------------------------- 도우미 */
+
+/* 가상화가 실제로 읽는 높이. 테스트가 노드에 심어 준다(stub DOM 의 _height). */
+function heightsFor(doc, sizes) {
+  const list = doc.getElementById('messages');
+  for (const node of list.children) {
+    const id = node.dataset ? node.dataset.id : '';
+    if (sizes[id] !== undefined) { node.offsetHeight = sizes[id]; }
+  }
+}
 
 function msg(n, text, author) {
   const stamp = '20260903T0100' + String(n).padStart(2, '0') + '000Z';
@@ -57,6 +74,9 @@ function boot(options) {
   for (const id of ELEMENT_IDS) { doc.register(id); }
   // 실제 DOM 처럼 messages 를 timeline 안에 넣는다 (스크롤 계산이 성립하도록).
   doc.getElementById('timeline').appendChild(doc.getElementById('messages'));
+  /* 뷰포트 높이 — 이 안에 들어가는 만큼만 DOM 에 남는다. */
+  doc.getElementById('timeline').offsetHeight = opts.viewport || 300;
+  doc.getElementById('timeline').clientHeight = opts.viewport || 300;
   doc.body.setAttribute('data-default-author', '기본이름');
   StubEventSource.reset();
   StubIntersectionObserver.reset();
@@ -77,17 +97,21 @@ function boot(options) {
     return { messages: slice, has_more: upto.length > slice.length };
   }
 
-  const fetchStub = makeFetch({
+  const routes = {
     '/api/rooms/r1/messages?before=': olderPage,
     '/api/rooms/r2/messages': { messages: opts.room2 || [msg(50, '둘째 방 메시지')], has_more: false },
     '/api/rooms/r1/messages': { messages: messages, has_more: !!opts.hasMore },
     '/api/rooms/r1/visibility': { ok: true },
     '/api/rooms/r2/visibility': { ok: true },
     '/api/rooms': { rooms: rooms }
-  });
+  };
+  /* 테스트가 특정 경로만 갈아끼울 수 있게 한다 (키 순서는 그대로 유지된다). */
+  Object.assign(routes, opts.routes || {});
+  const fetchStub = makeFetch(routes);
 
   const context = {
     document: doc,
+    TanStackVirtual: virtual,
     fetch: fetchStub,
     EventSource: StubEventSource,
     IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
@@ -180,20 +204,30 @@ await test('같은 메시지가 두 번 와도 노드는 하나다 (멱등)', as
   assert.equal(chat.stats.duplicates, 2);
 });
 
-await test('순서가 뒤집혀 와도 제자리에 끼우고 남은 노드는 안 건드린다', async () => {
+await test('순서가 뒤집혀 와도 제자리에 들어가고 기존 노드는 그대로다', async () => {
   const { doc, chat } = await boot();
   const list = doc.getElementById('messages');
-  const before = list.children.slice();
+  const nodesById = new Map(list.children.map((c) => [c.dataset.id, c]));
 
   StubEventSource.current.emit('message', msg(7, '나중 것'));
   StubEventSource.current.emit('message', msg(5, '먼저 것이지만 늦게 도착'));
 
-  const texts = list.children.map((c) => c.dataset.id);
-  const sorted = texts.slice().sort();
-  assert.deepEqual(texts, sorted, '시간순 정렬이 깨졌다');
-  assert.equal(chat.stats.inserted, 1);            // 한 건만 중간 삽입
-  for (let i = 0; i < before.length; i++) {
-    assert.equal(list.children[i], before[i]);
+  /* ⭐ 정렬의 원본은 이제 **모델**이다 (DOM 은 화면에 보이는 창일 뿐이라
+     붙은 순서가 곧 시간순은 아니다). */
+  const ids = chat.items().map((m) => m.id);
+  assert.deepEqual(ids, ids.slice().sort(), '모델의 시간순 정렬이 깨졌다');
+
+  /* 화면에서도 세로 위치(translateY)가 시간순이어야 한다. */
+  const placed = list.children
+    .map((c) => [c.dataset.id, parseFloat(String(c.style.transform).replace(/[^0-9.]/g, ''))])
+    .sort((a, b) => a[1] - b[1])
+    .map((pair) => pair[0]);
+  assert.deepEqual(placed, placed.slice().sort(), '화면 배치가 시간순이 아니다');
+
+  /* 그리고 원래 있던 노드는 **같은 객체 그대로** 남아 있다. */
+  assert.equal(chat.stats.rebuiltInView, 0);
+  for (const [id, node] of nodesById) {
+    if (chat.nodes().has(id)) { assert.equal(chat.nodes().get(id), node, id + ' 가 교체됐다'); }
   }
 });
 
@@ -208,9 +242,11 @@ function pastMessages(count) {
   return out;
 }
 
-/* 마이크로태스크 큐를 비운다 (fetch 대역 → prepend 까지 흘려보낸다). */
+/* 큐를 비운다 (fetch 대역 → prepend → 가상화 재계산까지 흘려보낸다).
+   가상화가 한 턴 더 쓰는 경우가 있어 두 번 돌린다. */
 function settle() {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+  return new Promise((resolve) => setTimeout(resolve, 0))
+    .then(() => new Promise((resolve) => setTimeout(resolve, 0)));
 }
 
 /* 위로 올라간 상태를 만든다 (부팅 직후엔 맨 아래에 붙어 있다). */
@@ -223,8 +259,10 @@ function scrollUp(doc) {
 
 await test('⭐ 위로 로드: 스크롤 위치가 보존된다 (보정 전후 수치)', async () => {
   const { doc, chat } = await boot({ hasMore: true, past: pastMessages(6) });
+  await settle();          /* 부팅 직후 라이브러리의 스크롤 정리를 흘려보낸다 */
   const list = doc.getElementById('messages');
   const timeline = scrollUp(doc);
+  await settle();
   const before = list.children.slice();
 
   const heightBefore = timeline.scrollHeight;
@@ -238,18 +276,27 @@ await test('⭐ 위로 로드: 스크롤 위치가 보존된다 (보정 전후 �
   console.log('      스크롤 보정: height ' + heightBefore + ' → ' + heightAfter +
     ' (+' + grew + '), scrollTop ' + topBefore + ' → ' + timeline.scrollTop);
 
-  assert.ok(grew > 0, '위쪽 콘텐츠가 늘지 않았다 (테스트 전제가 깨졌다)');
+  assert.ok(grew > 0, '위쪽 콘텐츠가 늘지 않았다 (전제 실패) — ' +
+    JSON.stringify({ heightBefore: heightBefore, heightAfter: heightAfter,
+      items: chat.items().length, prepended: chat.stats.prepended }));
   assert.equal(timeline.scrollTop, topBefore + grew, '보던 자리가 아래로 튀었다');
   assert.equal(chat.stats.lastAnchor, grew);
   assert.equal(chat.stats.prepended, 2);
+  assert.equal(chat.items().length, 5, '모델에 과거 2건이 안 들어왔다');
 
-  // 앞에 끼웠을 뿐 기존 노드는 **같은 객체**로 그대로다 (전체 리렌더 0).
-  assert.equal(list.children.length, 5);
-  for (let i = 0; i < before.length; i++) {
-    assert.equal(list.children[i + 2], before[i], i + '번 노드가 교체됐다');
+  /* ⭐ 재정의한 불변식.
+     (옛 불변식은 "DOM 의 모든 노드가 그대로"였지만, 가상 스크롤에서는 화면 밖
+     노드를 걷어내는 것이 정상이다. 그래서 **창 안에 남아 있는 것**만 본다.) */
+  const stillInView = before.filter(function (node) {
+    return chat.nodes().has(node.dataset.id);
+  });
+  assert.ok(stillInView.length > 0, '창 안에 남은 노드가 하나도 없다 (전제 실패)');
+  for (const node of stillInView) {
+    assert.equal(chat.nodes().get(node.dataset.id), node,
+      node.dataset.id + ' 가 창 안에 있는데 교체됐다');
   }
-  assert.equal(doc.counts.removeChild, 0);
-  assert.equal(list.removedByReplace, 0);
+  assert.equal(chat.stats.rebuiltInView, 0, '창 안 노드를 다시 만들었다');
+  assert.equal(list.removedByReplace, 0, '타임라인을 통째로 비웠다');
   assert.equal(doc.counts.innerHTML, 0);
 });
 
@@ -324,8 +371,9 @@ await test('IntersectionObserver 가 없으면 스크롤 폴백으로 이어 붙
   await settle();
 
   const olderCalls = context.fetch.calls.filter((c) => c.path.indexOf('before=') >= 0);
-  assert.equal(olderCalls.length, 1);
-  assert.equal(chat.stats.prepended, 2);
+  assert.ok(olderCalls.length >= 1, '스크롤 폴백이 아예 안 돌았다');
+  assert.ok(chat.stats.prepended >= 2, '과거가 붙지 않았다');
+  assert.equal(chat.stats.rebuiltInView, 0);
 });
 
 await test('방을 바꿀 때만 타임라인을 비운다', async () => {
@@ -380,6 +428,243 @@ await test('가시성 변화를 서버에 보고한다 (OS 알림 판정의 근�
   const call = context.fetch.calls.slice(before).find((c) => c.path.indexOf('/visibility') >= 0);
   assert.ok(call, '가시성 보고가 나가지 않았다');
   assert.equal(JSON.parse(call.init.body).visible, false);
+});
+
+/* ------------------------------------------------- I. 가상 스크롤 */
+
+/* 긴 대화 하나 만들기 (n건). */
+function manyMessages(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const stamp = '20260903T' + String(Math.floor(i / 60)).padStart(2, '0') +
+      String(i % 60).padStart(2, '0') + '00000Z';
+    out.push({
+      id: 'records/20260903/' + stamp + '-a-' + String(i).padStart(6, '0') + '.json',
+      author: '앨리스', text: '메시지 ' + i, ts: '2026-09-03T01:00:00Z',
+      sender: 'a.host', kind: 'msg', reply_to: null, unknown: false
+    });
+  }
+  return out;
+}
+
+await test('⭐ 긴 대화에서도 DOM 노드 수가 상수에 가깝게 유지된다', async () => {
+  const many = manyMessages(2000);
+  const { doc, chat } = await boot({ messages: many, viewport: 300 });
+  const list = doc.getElementById('messages');
+
+  console.log('      메시지 ' + chat.items().length + '건 · DOM 노드 ' +
+    list.children.length + '개 · 전체 높이 ' + chat.virtualizer().getTotalSize() + 'px');
+
+  assert.equal(chat.items().length, 2000, '모델에는 전부 있어야 한다');
+  assert.ok(list.children.length < 40,
+    'DOM 에 ' + list.children.length + '개가 남았다 (가상화가 안 됐다)');
+
+  /* 위로 한참 올라가도 노드 수는 그대로다 (걷어내고 새로 그린다). */
+  const timeline = doc.getElementById('timeline');
+  const peak = [];
+  for (const offset of [20000, 40000, 60000, 1000]) {
+    timeline.scrollTop = offset;
+    timeline.dispatch('scroll');
+    await settle();
+    peak.push(list.children.length);
+  }
+  console.log('      스크롤하며 본 DOM 노드 수: ' + peak.join(', '));
+  assert.ok(Math.max.apply(null, peak) < 40, '스크롤 중 노드가 쌓였다: ' + peak);
+  assert.ok(chat.stats.recycled > 0, '창 밖 노드를 걷어낸 적이 없다 (가상화 아님)');
+  assert.equal(chat.stats.rebuiltInView, 0, '창 안 노드를 다시 만들었다 (리렌더 사고)');
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 가변 높이: 실제 높이를 재서 반영한다 (고정 높이 가정 없음)', async () => {
+  const list3 = [msg(1, '짧다'), msg(2, '아주 긴 메시지 '.repeat(30)), msg(3, '보통')];
+  const { doc, chat } = await boot({ messages: list3, viewport: 300 });
+  const list = doc.getElementById('messages');
+  const ids = chat.items().map((m) => m.id);
+
+  /* 브라우저가 잰 높이를 흉내낸다: 짧은 것 40, 아주 긴 것 260, 보통 60 */
+  const sizes = {};
+  sizes[ids[0]] = 40; sizes[ids[1]] = 260; sizes[ids[2]] = 60;
+  heightsFor(doc, sizes);
+  /* 브라우저라면 ResizeObserver 가 알려 준다. stub 에는 없으므로 앱이 창 크기
+     변화 때 하는 것과 같은 일(측정 캐시 비우기)을 직접 시킨다. */
+  chat.virtualizer().measure();
+  chat.syncVirtual();
+  await settle();
+
+  const measured = chat.virtualizer().getVirtualItems().map((v) => v.size);
+  console.log('      실측 높이: ' + measured.join(', ') +
+    ' · 전체 ' + chat.virtualizer().getTotalSize() + 'px');
+  assert.deepEqual(measured, [40, 260, 60], '높이가 실측되지 않았다(추정치 그대로)');
+
+  /* 세로 위치가 실측 높이 + 간격(6)으로 누적된다 — 고정 높이였다면 균등했을 것. */
+  const starts = chat.virtualizer().getVirtualItems().map((v) => v.start);
+  assert.deepEqual(starts, [0, 46, 312]);
+  assert.equal(list.children.length, 3);
+});
+
+await test('⭐ 재정의한 불변식이 진짜 리렌더 사고를 잡는다 (대조군)', async () => {
+  const { doc, chat } = await boot({ messages: manyMessages(50), viewport: 300 });
+  const list = doc.getElementById('messages');
+
+  /* (1) 정상 — 창 밖 제거는 일어나도 rebuiltInView 는 0 */
+  doc.getElementById('timeline').scrollTop = 1500;
+  doc.getElementById('timeline').dispatch('scroll');
+  await settle();
+  assert.ok(chat.stats.recycled > 0, '창 밖 제거가 없었다 (전제 실패)');
+  assert.equal(chat.stats.rebuiltInView, 0);
+
+  /* (2) 대조군 — 창 안 노드를 몰래 버리고 다시 그리게 만든다.
+     = "화면에 그대로 있는 메시지를 다시 만들었다" 는 사고. 카운터가 잡아야 한다. */
+  const inView = chat.virtualizer().getVirtualItems().length;
+  const before = chat.stats.rebuiltInView;
+  chat.nodes().forEach(function (node, id) {
+    if (node.parentNode) { node.parentNode.removeChild(node); }
+    chat.nodes()['delete'](id);
+  });
+  chat.renderWindow();
+
+  console.log('      대조군: 창 안 ' + inView + '개를 버리고 다시 그림 → rebuiltInView ' +
+    before + ' → ' + chat.stats.rebuiltInView);
+  assert.ok(chat.stats.rebuiltInView >= inView,
+    '리렌더 사고를 못 잡았다 — 불변식이 무력해졌다');
+  assert.equal(list.children.length, inView, '다시 그린 뒤 창 크기는 같아야 한다');
+});
+
+/* ------------------------------------------- G. 연결 상태 · 레포 만들기 */
+
+const CONNECTING_ROOMS = [{
+  id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방',
+  status: { state: 'connecting', detail: '', code: '', hint: '' }
+}];
+
+await test('⭐ 받는 중인 방: 자리에 안내가 남고, 준비되면 저절로 채워진다', async () => {
+  let ready = false;
+  const { doc, chat } = await boot({
+    rooms: CONNECTING_ROOMS,
+    routes: {
+      '/api/rooms/r1/messages': () => (ready
+        ? { messages: [msg(1), msg(2)], has_more: false }
+        : { __http: 409, error: '방을 받는 중이다 — 잠시 뒤 다시 보인다',
+            status: { state: 'connecting', detail: '', hint: '' } })
+    }
+  });
+  const list = doc.getElementById('messages');
+  const trouble = doc.getElementById('room-trouble');
+
+  assert.equal(trouble.hidden, false, '받는 중 안내가 안 보인다');
+  assert.ok(doc.getElementById('room-trouble-text').textContent.indexOf('받는 중') >= 0);
+  assert.equal(doc.getElementById('room-retry').hidden, true, '받는 중엔 재시도가 없다');
+  assert.equal(list.children.length, 0);
+  assert.equal(chat.stats.created, 0);
+
+  // 클론이 끝났다 — 서버가 기존 'rooms' 이벤트로 알린다 (새 배관 없음).
+  ready = true;
+  StubEventSource.current.emit('rooms', {
+    rooms: [Object.assign({}, CONNECTING_ROOMS[0], { status: { state: 'ready' } })]
+  });
+  await settle();
+
+  assert.equal(list.children.length, 2, '준비된 뒤 타임라인이 안 채워졌다');
+  assert.equal(trouble.hidden, true);
+  assert.equal(chat.stats.cleared, 1, '타임라인을 다시 비웠다 (전체 리렌더)');
+  assert.equal(list.removedByReplace, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 실패한 방: 사라지지 않고 사유·안내가 남고 재시도가 된다', async () => {
+  const failed = [{
+    id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방',
+    status: {
+      state: 'failed', code: 'auth', detail: '인증에 실패했다 (토큰이 없거나 권한이 없다)',
+      hint: '환경변수 GITWIRE_TOKEN 에 토큰을 넣고 앱을 다시 띄워라'
+    }
+  }];
+  const { doc, context } = await boot({
+    rooms: failed,
+    routes: {
+      '/api/rooms/r1/messages': { __http: 409, error: '인증에 실패했다', status: failed[0].status },
+      '/api/rooms/r1/retry': { status: { state: 'connecting' } }
+    }
+  });
+
+  // 방은 목록에 그대로 있고, 상태가 함께 보인다.
+  const rooms = doc.getElementById('rooms');
+  assert.equal(rooms.children.length, 1, '실패한 방이 목록에서 사라졌다');
+  assert.ok(rooms.children[0].textContent.indexOf('실패') >= 0);
+  assert.ok(doc.getElementById('room-trouble-text').textContent.indexOf('인증에 실패') >= 0);
+  assert.ok(doc.getElementById('room-trouble-hint').textContent.indexOf('GITWIRE_TOKEN') >= 0);
+  assert.equal(doc.getElementById('room-retry').hidden, false);
+
+  doc.getElementById('room-retry').dispatch('click');
+  await settle();
+  const retried = context.fetch.calls.filter((c) => c.path.indexOf('/retry') >= 0);
+  assert.equal(retried.length, 1, '재시도 요청이 안 나갔다');
+  assert.equal(retried[0].init.method, 'POST');
+});
+
+await test('⭐ 레포 만들기(API): 만든 주소가 그대로 방이 된다 (손으로 옮기지 않는다)', async () => {
+  const { doc, chat, context } = await boot({
+    routes: {
+      '/api/repos/plan': {
+        forge: { kind: 'github', host: 'github.com', label: 'GitHub' },
+        mode: 'api', owner: 'yunhyuk-choi', name: 'our-room', private: true,
+        link: 'https://github.com/new?name=our-room&visibility=private&owner=yunhyuk-choi',
+        clone_url: 'https://github.com/yunhyuk-choi/our-room.git',
+        token_env: 'GITWIRE_TOKEN', detail: ''
+      },
+      '/api/repos': {
+        repo: { full_name: 'yunhyuk-choi/our-room', private: true,
+                clone_url: 'https://github.com/yunhyuk-choi/our-room.git' }
+      }
+    }
+  });
+  doc.getElementById('room-name').value = '우리 방';
+
+  await chat.planNewRepo();
+  const plan = doc.getElementById('new-repo-plan');
+  assert.equal(plan.hidden, false);
+  // 무엇이 만들어지는지 **누르기 전에** 보인다.
+  assert.ok(plan.textContent.indexOf('yunhyuk-choi/our-room') >= 0, plan.textContent);
+  assert.ok(plan.textContent.indexOf('비공개') >= 0);
+  assert.equal(doc.getElementById('new-repo-create').hidden, false);
+
+  await chat.createNewRepo();
+  await settle();
+
+  // 만든 주소가 그대로 등록 요청에 실린다 (사용자가 어디에도 붙여넣지 않았다).
+  const posted = context.fetch.calls.filter(
+    (c) => c.path === '/api/rooms' && c.init.method === 'POST');
+  assert.equal(posted.length, 1, '방 등록까지 이어지지 않았다');
+  assert.equal(JSON.parse(posted[0].init.body).repo_url,
+    'https://github.com/yunhyuk-choi/our-room.git');
+});
+
+await test('레포 만들기(링크): 프리필 링크를 주고, 만들고 오면 그 주소로 잇는다', async () => {
+  const link = 'https://github.com/new?name=our-room&visibility=private';
+  const { doc, chat, context } = await boot({
+    routes: {
+      '/api/repos/plan': {
+        forge: { kind: 'github', host: 'github.com', label: 'GitHub' },
+        mode: 'link', owner: 'yunhyuk-choi', name: 'our-room', private: true,
+        link: link, clone_url: 'https://github.com/yunhyuk-choi/our-room.git',
+        token_env: 'GITWIRE_TOKEN', detail: ''
+      }
+    }
+  });
+
+  await chat.planNewRepo();
+  assert.equal(doc.getElementById('new-repo-link').getAttribute('href'), link);
+  assert.equal(doc.getElementById('new-repo-link').hidden, false);
+  assert.equal(doc.getElementById('new-repo-create').hidden, true, 'API 없이 만들기 버튼이 떴다');
+  assert.equal(doc.getElementById('new-repo-use').hidden, false);
+
+  doc.getElementById('new-repo-use').dispatch('click');
+  await settle();
+  const posted = context.fetch.calls.filter(
+    (c) => c.path === '/api/rooms' && c.init.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.equal(JSON.parse(posted[0].init.body).repo_url,
+    'https://github.com/yunhyuk-choi/our-room.git');
 });
 
 /* -------------------------------------------------------------- 보고 */

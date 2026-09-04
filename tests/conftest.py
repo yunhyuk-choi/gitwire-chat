@@ -199,10 +199,25 @@ class RecordingNotifier(Notifier):
         return True
 
 
+class ConnectedRoomManager(RoomManager):
+    """등록이 **끝까지** 진행된 뒤 돌려주는 테스트용 매니저.
+
+    실제 `register()` 는 즉시 반환하고 클론은 백그라운드에서 돈다(그게 요점이다).
+    브라우저는 SSE 로 완료를 기다리는데, 대부분의 테스트는 그 타이밍이 관심사가
+    아니라 '연결된 방'이 필요할 뿐이다 — 그래서 여기서 기다려 준다.
+    비동기 동작 자체를 보는 테스트는 `RoomManager` 를 직접 쓴다.
+    """
+
+    def register(self, *args, **kwargs):
+        room = super().register(*args, **kwargs)
+        self.wait_for_connect(timeout=30.0)
+        return room
+
+
 @pytest.fixture
 def manager(settings, fake_opener):
     bus = EventBus(keepalive=0.05)
-    mgr = RoomManager(
+    mgr = ConnectedRoomManager(
         settings,
         bus=bus,
         notifier=RecordingNotifier(),

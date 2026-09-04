@@ -9,6 +9,14 @@
  *   - innerHTML 을 쓴 적이 있나  ← 있으면 그 자체로 실패다
  *
  * 그래서 "전체 리렌더가 없다"를 눈이 아니라 **수**로 판정할 수 있다.
+ *
+ * 가상 스크롤(@tanstack/virtual-core)이 들어오면서 **레이아웃 흉내**가 조금 필요해졌다.
+ * 라이브러리는 진짜다(대역이 아니다) — 그것이 읽는 값만 우리가 준다:
+ *   - 스크롤 요소의 `offsetHeight`(뷰포트 높이)·`scrollTop`·`scrollTo`
+ *   - 항목 노드의 `offsetHeight`  ← **가변 높이의 원천**
+ *   - `ownerDocument.defaultView`(라이브러리가 window 를 찾는 경로)
+ * 높이는 노드에 심어 둔 `_height` 를 쓴다. 테스트가 메시지마다 다른 값을 넣어
+ * "길이가 제각각인 대화"를 만든다.
  */
 
 export class ClassList {
@@ -31,6 +39,7 @@ export class Node {
   constructor(tag, doc) {
     this.tagName = String(tag || '').toUpperCase();
     this.doc = doc;
+    this.ownerDocument = doc;
     this.children = [];
     this.parent = null;
     this.attrs = {};
@@ -47,6 +56,38 @@ export class Node {
     this.removedByReplace = 0;
     this._text = '';
     this.isFragment = false;
+    /* 이 노드가 차지하는 높이(px). 테스트가 정하면 가변 높이가 된다. */
+    this._height = 0;
+    this._width = 400;
+  }
+
+  /* 가상화 라이브러리가 항목 높이를 읽는 곳. */
+  get offsetHeight() {
+    if (this._height) { return this._height; }
+    /* 정하지 않았으면 자손 수로 대충 만든다 (예전 scrollHeight 규칙과 같은 뜻). */
+    let n = 0;
+    const walk = (node) => { for (const c of node.children) { n += 1; walk(c); } };
+    walk(this);
+    return n * 20;
+  }
+  set offsetHeight(value) { this._height = value; }
+  get offsetWidth() { return this._width; }
+  set offsetWidth(value) { this._width = value; }
+
+  getBoundingClientRect() {
+    return {
+      width: this.offsetWidth, height: this.offsetHeight,
+      top: 0, left: 0, right: this.offsetWidth, bottom: this.offsetHeight
+    };
+  }
+
+  /* 스크롤 요소로 쓰일 때 (라이브러리가 부른다). */
+  scrollTo(options) {
+    const top = options && typeof options === 'object' ? options.top : options;
+    if (typeof top === 'number') {
+      this.scrollTop = Math.max(0, Math.min(top, this.scrollHeight));
+      this.dispatch('scroll');
+    }
   }
 
   /* textContent 만 쓰게 하려는 것이 요점이다. innerHTML 은 세팅되면 카운트한다. */
@@ -62,8 +103,19 @@ export class Node {
     this._text = value == null ? '' : String(value);
   }
 
-  /* 실제 브라우저처럼 자손 수에 비례해 늘어나는 값 (스크롤 앵커링 검증용). */
+  /* 스크롤 높이.
+     가상 스크롤은 컨테이너에 **전체 높이**를 style.height 로 적는다 — 화면 밖
+     항목은 DOM 에 없으므로 자손 수로 재면 틀린다. 그래서 style.height 가 있으면
+     그것이 우선이고, 자식들의 style.height 합도 반영한다. */
   get scrollHeight() {
+    const own = parseFloat(this.style && this.style.height) || 0;
+    if (own) { return own; }
+    let total = 0;
+    for (const child of this.children) {
+      const h = parseFloat(child.style && child.style.height) || 0;
+      total += h || child.offsetHeight;
+    }
+    if (total) { return total; }
     let n = 0;
     const walk = (node) => { for (const c of node.children) { n += 1; walk(c); } };
     walk(this);
@@ -74,6 +126,8 @@ export class Node {
   get innerHTML() { return ''; }
   set innerHTML(value) { this.doc.counts.innerHTML += 1; this._text = String(value); }
 
+  /* 진짜 DOM 과 같은 이름을 쓴다 — 앱 코드가 표준 API 로 쓰게. */
+  get parentNode() { return this.parent; }
   get classList() { return new ClassList(this); }
   get firstChild() { return this.children.length ? this.children[0] : null; }
   get lastChild() { return this.children.length ? this.children[this.children.length - 1] : null; }
@@ -163,8 +217,18 @@ export class StubDocument {
     this.visibilityState = 'visible';
     this.listeners = {};
     this.body = new Node('body', this);
+    /* ResizeObserver 는 일부러 두지 않는다 — 없으면 라이브러리가 offsetHeight
+       폴백을 쓰고, 그래야 테스트가 높이를 **결정론적으로** 통제할 수 있다. */
+    this.window = {
+      document: this, setTimeout, clearTimeout,
+      requestAnimationFrame: (fn) => setTimeout(fn, 0),
+      cancelAnimationFrame: clearTimeout,
+      addEventListener() {}, removeEventListener() {}
+    };
   }
   createElement(tag) { this.counts.createElement += 1; return new Node(tag, this); }
+  /* 라이브러리가 `scrollElement.ownerDocument.defaultView` 로 window 를 찾는다. */
+  get defaultView() { return this.window; }
   createDocumentFragment() {
     const frag = new Node('#fragment', this);
     frag.isFragment = true;
@@ -190,7 +254,11 @@ export const ELEMENT_IDS = [
   'reply-chip', 'reply-label', 'reply-cancel', 'add-room', 'add-room-submit',
   'add-room-error', 'repo-url', 'room-name', 'token-env', 'toggle-add',
   'add-room-cancel', 'back', 'refresh', 'toggle-search', 'search-bar',
-  'search-q', 'search-close', 'search-results', 'search-list', 'search-summary'
+  'search-q', 'search-close', 'search-results', 'search-list', 'search-summary',
+  'room-trouble', 'room-trouble-text', 'room-trouble-hint', 'room-retry',
+  'new-repo-toggle', 'new-repo-form', 'new-repo-owner', 'new-repo-name',
+  'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
+  'new-repo-use', 'new-repo-error'
 ];
 
 /* IntersectionObserver 대역.
@@ -247,19 +315,23 @@ export class StubEventSource {
 }
 StubEventSource.opened = [];
 
-/* 아주 작은 fetch 대역: 경로 → 응답 JSON. 호출 기록도 남긴다. */
+/* 아주 작은 fetch 대역: 경로 → 응답 JSON. 호출 기록도 남긴다.
+   응답에 `__http` 를 넣으면 그 상태코드로 답한다 (409 처럼 '오류가 아닌 상태'). */
 export function makeFetch(routes) {
   const calls = [];
   const fetch = function (path, init) {
     calls.push({ path: path, init: init || {} });
     const key = Object.keys(routes).find((k) => path.indexOf(k) === 0);
     const handler = key ? routes[key] : null;
-    const body = handler
+    const raw = handler
       ? (typeof handler === 'function' ? handler(path, init) : handler)
       : { error: 'stub 라우트 없음: ' + path };
+    const code = raw && raw.__http ? raw.__http : (key ? 200 : 404);
+    const body = Object.assign({}, raw);
+    delete body.__http;
     return Promise.resolve({
-      ok: !!key,
-      status: key ? 200 : 404,
+      ok: code >= 200 && code < 300,
+      status: code,
       json: function () { return Promise.resolve(body); }
     });
   };

@@ -10,7 +10,9 @@ import pytest
 import gitwire
 
 from gitwire_chat import schema
-from gitwire_chat.rooms import RoomError, room_id_for
+from gitwire_chat.rooms import RoomError, RoomNotReady, room_id_for
+
+from conftest import FakeChannel
 
 REPO = "https://example.invalid/team/room.git"
 
@@ -44,16 +46,76 @@ def test_빈_주소는_거부된다(manager):
         manager.register("   ")
 
 
-def test_채널을_못_열면_등록이_취소된다(settings):
-    from gitwire_chat.rooms import RoomManager
+def test_클론에_실패해도_방은_사라지지_않고_사유가_남는다(settings):
+    """예전에는 등록이 취소되며 방이 통째로 사라져 *왜* 안 됐는지 알 수 없었다."""
+    from gitwire_chat.rooms import FAILED, READY, RoomManager
 
-    def broken(url, **kw):
-        raise OSError("클론 실패")
+    attempts = []
 
-    mgr = RoomManager(settings, opener=broken)
-    with pytest.raises(RoomError):
-        mgr.register(REPO)
-    assert mgr.rooms() == []
+    def flaky(url, **kw):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise gitwire.AuthError("authentication failed")
+        return FakeChannel(url, **kw)
+
+    mgr = RoomManager(settings, opener=flaky)
+    try:
+        room = mgr.register(REPO)          # 즉시 돌아온다
+        mgr.wait_for_connect()
+
+        assert [r.id for r in mgr.rooms()] == [room.id], "방이 사라졌다"
+        status = mgr.status(room.id)
+        assert status.state == FAILED
+        assert status.code == "auth"
+        assert "토큰" in status.hint and "GITWIRE_TOKEN" in status.hint
+        payload = mgr.rooms_payload()[0]
+        assert payload["status"]["state"] == FAILED
+
+        # 읽기·쓰기는 "아직 아니다"로 갈린다 (일반 오류가 아니다)
+        with pytest.raises(RoomNotReady):
+            mgr.timeline(room.id)
+        with pytest.raises(RoomNotReady):
+            mgr.send(room.id, "안녕")
+
+        # 재시도하면 붙는다
+        mgr.reconnect(room.id)
+        mgr.wait_for_connect()
+        assert mgr.status(room.id).state == READY
+        assert mgr.timeline(room.id).messages == []
+    finally:
+        mgr.stop()
+
+
+def test_등록은_클론을_기다리지_않고_즉시_돌아온다(settings):
+    """⭐ G-1 의 요점 — 느린 클론이 HTTP 요청을 붙잡지 않는다."""
+    import threading
+    import time
+    from gitwire_chat.rooms import CONNECTING, READY, RoomManager
+
+    release = threading.Event()
+
+    def slow(url, **kw):
+        release.wait(10.0)                 # 느린 네트워크·큰 레포를 흉내낸다
+        return FakeChannel(url, **kw)
+
+    mgr = RoomManager(settings, opener=slow)
+    try:
+        t0 = time.monotonic()
+        room = mgr.register(REPO)
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 1.0, f"등록이 클론을 기다렸다 ({elapsed:.1f}s)"
+        assert mgr.status(room.id).state == CONNECTING
+        assert mgr.rooms_payload()[0]["status"]["state"] == CONNECTING
+        with pytest.raises(RoomNotReady):  # 아직 못 읽는다 — 그리고 그게 보인다
+            mgr.timeline(room.id)
+
+        release.set()
+        mgr.wait_for_connect()
+        assert mgr.status(room.id).state == READY
+    finally:
+        release.set()
+        mgr.stop()
 
 
 def test_보내면_레코드가_남고_로컬_에코가_즉시_흐른다(manager, fake_opener):
@@ -230,3 +292,24 @@ def test_한_방이_실패해도_나머지는_돈다(settings, fake_opener):
     mgr.start()          # 예외가 밖으로 나가지 않는다
     assert len(mgr.rooms()) == 2
     mgr.stop()
+
+
+def test_내용이_있는_레포는_사유가_구분된다(settings):
+    """gitwire 가 막아 준 것을 사용자 말로 옮긴다 (기반의 안전장치와 짝)."""
+    from gitwire_chat.rooms import FAILED, RoomManager
+
+    def busy_repo(url, **kw):
+        raise gitwire.ChannelInitError(
+            "이 레포에는 이미 내용이 있다 (src/app.py). 채널 규약은 **빈 레포에만** 심는다"
+        )
+
+    mgr = RoomManager(settings, opener=busy_repo)
+    try:
+        room = mgr.register(REPO)
+        mgr.wait_for_connect()
+        status = mgr.status(room.id)
+        assert status.state == FAILED and status.code == "notempty"
+        assert "빈 레포" in status.hint
+        assert [r.id for r in mgr.rooms()] == [room.id]   # 방은 남는다
+    finally:
+        mgr.stop()

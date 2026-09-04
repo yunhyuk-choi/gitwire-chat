@@ -150,17 +150,21 @@ html, body {
   overflow-anchor: none;
 }
 
-.messages { display: flex; flex-direction: column; gap: 6px; }
+/* 가상 스크롤 컨테이너 — 높이는 JS 가 전체 높이로 정하고, 메시지는 그 안에
+   절대 위치로 놓인다. 화면에 보이는 것만 DOM 에 있다. */
+.messages { position: relative; width: 100%; }
+.messages > .msg { position: absolute; top: 0; left: 0; right: 0; }
 
 .msg {
-  align-self: flex-start;
+  /* 절대 위치(가상 스크롤) 안에서의 좌우 정렬은 margin 으로 한다. */
+  margin-right: auto;
   max-width: min(86%, 620px);
   padding: 7px 10px;
   border-radius: var(--radius);
   background: var(--panel);
   border: 1px solid var(--line);
 }
-.msg.mine { align-self: flex-end; background: var(--mine); }
+.msg.mine { margin-left: auto; margin-right: 0; background: var(--mine); }
 .msg.unknown { opacity: 0.7; border-style: dashed; }
 
 .msg-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--muted); }
@@ -281,4 +285,34 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 /* 아주 좁을 때 — 표시 이름 칸이 본문 줄을 잡아먹지 않게 위로 뺀다. */
 @media (max-width: 400px) {
   .composer .author { flex: 1 1 100%; }
+}
+
+/* --- 방 연결 상태 · 레포 만들기 거들기 ------------------------------- */
+
+.room-state { font-size: 11px; color: var(--muted); }
+.room-state.failed { color: #c0392b; }   /* .error 와 같은 색 */
+.room-row { display: flex; align-items: center; gap: 6px; }
+.room-row .link { flex: none; }
+
+.room-trouble {
+  margin: 8px 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+.room-trouble p { margin: 0 0 6px; font-size: 13px; }
+
+.new-repo { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.new-repo-form { margin-top: 6px; }
+.new-repo .row { flex-wrap: wrap; gap: 6px; }
+a.button {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  text-decoration: none;
+  color: inherit;
 }
