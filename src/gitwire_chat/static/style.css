@@ -282,3 +282,33 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 @media (max-width: 400px) {
   .composer .author { flex: 1 1 100%; }
 }
+
+/* --- 방 연결 상태 · 레포 만들기 거들기 ------------------------------- */
+
+.room-state { font-size: 11px; color: var(--muted); }
+.room-state.failed { color: #c0392b; }   /* .error 와 같은 색 */
+.room-row { display: flex; align-items: center; gap: 6px; }
+.room-row .link { flex: none; }
+
+.room-trouble {
+  margin: 8px 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow-wrap: anywhere;
+}
+.room-trouble p { margin: 0 0 6px; font-size: 13px; }
+
+.new-repo { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.new-repo-form { margin-top: 6px; }
+.new-repo .row { flex-wrap: wrap; gap: 6px; }
+a.button {
+  display: inline-block;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  text-decoration: none;
+  color: inherit;
+}

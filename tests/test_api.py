@@ -138,3 +138,172 @@ def test_SSE_는_새_메시지만_흘린다(client, manager):
     # ⭐ 과거 메시지는 스트림으로 오지 않는다 — 스트림은 '증분'만 나른다.
     assert payload["text"] != "이건 스트림 열기 전 메시지"
     res.close()
+
+
+# ------------------------------------------------ G. 연결 상태 · 레포 만들기
+
+from conftest import FakeChannel  # noqa: E402
+
+
+def test_방_등록은_즉시_돌아오고_상태가_함께_온다(client, manager):
+    """클론은 백그라운드다 — 응답에 '받는 중' 이 실려 화면이 설명할 수 있다."""
+    res = client.post("/api/rooms", json={"repo_url": REPO, "name": "우리 방"})
+    assert res.status_code == 201
+    room = res.get_json()["room"]
+    # 응답에 연결 상태가 함께 온다 — 화면이 곧바로 '받는 중' 을 그릴 수 있다.
+    assert room["status"]["state"] in ("connecting", "ready")
+
+    manager.wait_for_connect()
+    listed = client.get("/api/rooms").get_json()["rooms"]
+    assert listed[0]["status"]["state"] == "ready"
+
+
+def test_아직_안_붙은_방은_409_와_상태를_돌려준다(settings):
+    """오류(400)가 아니라 **상태**(409)다 — 화면이 '받는 중' 을 그릴 수 있게."""
+    import threading
+
+    from gitwire_chat.app import create_app
+    from gitwire_chat.events import EventBus
+    from gitwire_chat.rooms import RoomManager
+
+    release = threading.Event()
+
+    def slow(url, **kw):
+        release.wait(10.0)
+        return FakeChannel(url, **kw)
+
+    mgr = RoomManager(settings, bus=EventBus(keepalive=0.05), opener=slow)
+    slow_app = create_app(settings, mgr, start=False)
+    slow_client = slow_app.test_client()
+    try:
+        created = slow_client.post("/api/rooms", json={"repo_url": REPO})
+        assert created.status_code == 201
+        room_id = created.get_json()["room"]["id"]
+
+        got = slow_client.get(f"/api/rooms/{room_id}/messages")
+        assert got.status_code == 409
+        body = got.get_json()
+        assert body["status"]["state"] == "connecting"
+        assert body["error"]
+
+        sent = slow_client.post(f"/api/rooms/{room_id}/messages", json={"text": "안녕"})
+        assert sent.status_code == 409
+    finally:
+        release.set()
+        mgr.stop()
+
+
+def test_실패한_방은_재시도할_수_있다(settings):
+    import gitwire
+
+    from gitwire_chat.app import create_app
+    from gitwire_chat.events import EventBus
+    from gitwire_chat.rooms import RoomManager
+
+    attempts = []
+
+    def flaky(url, **kw):
+        attempts.append(url)
+        if len(attempts) == 1:
+            raise gitwire.AuthError("authentication failed")
+        return FakeChannel(url, **kw)
+
+    mgr = RoomManager(settings, bus=EventBus(keepalive=0.05), opener=flaky)
+    flaky_app = create_app(settings, mgr, start=False)
+    flaky_client = flaky_app.test_client()
+    try:
+        room_id = flaky_client.post("/api/rooms", json={"repo_url": REPO}).get_json()[
+            "room"
+        ]["id"]
+        mgr.wait_for_connect()
+        listed = flaky_client.get("/api/rooms").get_json()["rooms"]
+        assert listed[0]["status"]["state"] == "failed"
+        assert listed[0]["status"]["code"] == "auth"
+        assert "GITWIRE_TOKEN" in listed[0]["status"]["hint"]
+
+        retried = flaky_client.post(f"/api/rooms/{room_id}/retry")
+        assert retried.status_code == 200
+        mgr.wait_for_connect()
+        assert flaky_client.get("/api/rooms").get_json()["rooms"][0]["status"][
+            "state"
+        ] == "ready"
+    finally:
+        mgr.stop()
+
+
+def test_레포_만들기_계획은_무엇이_만들어지는지_알려준다(client, monkeypatch):
+    """토큰이 없으면 링크 모드 — 프리필된 주소와 유도된 clone_url 을 준다."""
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    res = client.post(
+        "/api/repos/plan",
+        json={"host": "github.com", "name": "우리 방", "owner": "yunhyuk-choi"},
+    )
+    assert res.status_code == 200
+    plan = res.get_json()
+    assert plan["mode"] == "link"
+    assert plan["private"] is True
+    assert plan["name"] == "chat-room"          # 한국어 이름 → 기본값(사용자가 고친다)
+    assert "visibility=private" in plan["link"]
+    assert plan["clone_url"] == "https://github.com/yunhyuk-choi/chat-room.git"
+
+
+def test_모르는_호스트는_거들지_않는다(client):
+    plan = client.post(
+        "/api/repos/plan", json={"host": "git.example.internal", "name": "room"}
+    ).get_json()
+    assert plan["mode"] == "manual"
+    assert plan["link"] == "" and plan["clone_url"] == ""
+
+
+def test_토큰이_있으면_앱_안에서_만들_계획이_된다(client, monkeypatch):
+    monkeypatch.setenv("GITWIRE_TOKEN", "ghp_secret_value")
+    monkeypatch.setattr(
+        "gitwire_chat.forges.github_login", lambda token: "yunhyuk-choi"
+    )
+    plan = client.post(
+        "/api/repos/plan", json={"host": "github.com", "name": "our-room"}
+    ).get_json()
+    assert plan["mode"] == "api"
+    assert plan["owner"] == "yunhyuk-choi"       # 누구 계정에 만들지 미리 보인다
+    assert "ghp_secret" not in str(plan)         # ⚠️ 토큰은 응답에 없다
+
+
+def test_레포_생성은_토큰이_없으면_사유를_준다(client, monkeypatch):
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    res = client.post("/api/repos", json={"host": "github.com", "name": "our-room"})
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["code"] == "token" and "GITWIRE_TOKEN" in body["error"]
+
+
+def test_레포_생성_실패는_사유와_힌트를_그대로_전달한다(client, monkeypatch):
+    from gitwire_chat import forges
+
+    monkeypatch.setenv("GITWIRE_TOKEN", "ghp_secret_value")
+
+    def boom(*args, **kwargs):
+        raise forges.ForgeError(
+            "만들 수 없는 이름이다 (name already exists)", code="name",
+            hint="다른 이름을 넣어라.",
+        )
+
+    monkeypatch.setattr("gitwire_chat.forges.create_github_repo", boom)
+    res = client.post("/api/repos", json={"host": "github.com", "name": "our-room"})
+    assert res.status_code == 400
+    body = res.get_json()
+    assert body["code"] == "name" and body["hint"]
+    assert "ghp_secret" not in str(body)
+
+
+def test_레포_생성_성공은_주소를_돌려준다(client, monkeypatch):
+    monkeypatch.setenv("GITWIRE_TOKEN", "ghp_secret_value")
+    monkeypatch.setattr(
+        "gitwire_chat.forges.create_github_repo",
+        lambda *a, **k: {
+            "full_name": "me/our-room", "private": True,
+            "clone_url": "https://github.com/me/our-room.git", "html_url": "",
+        },
+    )
+    res = client.post("/api/repos", json={"host": "github.com", "name": "our-room"})
+    assert res.status_code == 201
+    assert res.get_json()["repo"]["clone_url"] == "https://github.com/me/our-room.git"

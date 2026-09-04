@@ -64,11 +64,21 @@ class Instance:
         self.room_id: str | None = None
 
     def join(self, repo_url: str, name: str) -> str:
+        """방 등록 → **즉시** 201. 클론은 백그라운드이므로 여기서 기다려 준다.
+
+        (브라우저는 기다리지 않고 '받는 중' 을 그리다가 SSE 로 완료를 받는다.)
+        """
         res = self.client.post(
             "/api/rooms", json={"repo_url": repo_url, "name": name}
         )
         assert res.status_code == 201, res.get_data(as_text=True)
-        self.room_id = res.get_json()["room"]["id"]
+        body = res.get_json()["room"]
+        assert body["status"]["state"] == "connecting"
+        self.room_id = body["id"]
+        self.manager.wait_for_connect()
+        assert self.manager.status(self.room_id).state == "ready", (
+            self.manager.status(self.room_id).detail
+        )
         return self.room_id
 
     def say(self, text: str) -> dict:
@@ -243,6 +253,10 @@ def test_재시작해도_커서와_방_목록이_이어진다(tmp_path, bare_rep
         assert [r.repo_url for r in restarted.manager.rooms()] == [str(bare_repo)]
         # 방 목록이 디스크에서 그대로 복원된다 — 다시 등록할 필요가 없다.
         restarted.room_id = restarted.manager.rooms()[0].id
+        # 재시작 후 연결(클론은 이미 디스크에 있다)도 백그라운드다.
+        restarted.manager.connect(restarted.room_id)
+        restarted.manager.wait_for_connect()
+        assert restarted.manager.status(restarted.room_id).state == "ready"
         # 전송 식별자도 그대로 — 재시작해도 '내 메시지' 판정이 유지된다.
         assert restarted.manager.instance == first.manager.instance
         assert [m["text"] for m in restarted.timeline()] == ["첫 마디"]

@@ -40,6 +40,8 @@
     unseen: 0,
     hasMore: false,      /* 위쪽에 더 남았나 (서버가 알려준 값) */
     loadingOlder: false, /* 위로 불러오는 중 — 중복 요청 차단 */
+    loaded: false,       /* 지금 방의 타임라인을 실제로 받았나 */
+    plan: null,          /* '레포 만들기' 계획 (서버가 계산해 준 것) */
     booted: false
   };
 
@@ -91,7 +93,14 @@
     }
     return global.fetch(path, init).then(function (res) {
       return res.json().then(function (data) {
-        if (!res.ok) { throw new Error((data && data.error) || ('HTTP ' + res.status)); }
+        if (!res.ok) {
+          var err = new Error((data && data.error) || ('HTTP ' + res.status));
+          /* 서버가 함께 준 것(연결 상태·사유·힌트)을 잃지 않는다 —
+             "왜 안 되는지"를 화면에 남기는 것이 이 앱의 규칙이다. */
+          err.status = res.status;
+          err.payload = data || {};
+          throw err;
+        }
         return data;
       });
     });
@@ -273,6 +282,14 @@
 
   /* ---------------------------------------------------------- 방 목록 */
 
+  /* 연결 상태 → 사람이 읽는 한 줄. 서버가 준 값만 쓴다(추측하지 않는다). */
+  function stateLabel(status) {
+    if (!status) { return ''; }
+    if (status.state === 'connecting') { return '받는 중…'; }
+    if (status.state === 'failed') { return '실패 · ' + (status.detail || '사유 없음'); }
+    return '';
+  }
+
   function renderRooms(rooms) {
     state.rooms = rooms || [];
     /* 방 목록은 대화가 아니다 — 짧고, 바뀔 때만 다시 그린다.
@@ -285,12 +302,58 @@
         btn.setAttribute('type', 'button');
         btn.appendChild(make('span', 'room-name', room.name || room.repo_url));
         btn.appendChild(make('span', 'room-url', room.repo_url));
+        var label = stateLabel(room.status);
+        if (label) {
+          var cls = room.status.state === 'failed' ? 'room-state failed' : 'room-state';
+          btn.appendChild(make('span', cls, label));
+        }
         btn.addEventListener('click', function () { switchRoom(room.id); });
         li.appendChild(btn);
+        if (room.status && room.status.state === 'failed') {
+          var retry = make('button', 'link', '재시도');
+          retry.setAttribute('type', 'button');
+          retry.addEventListener('click', function () { retryRoom(room.id); });
+          li.className = li.className + ' room-row';
+          li.appendChild(retry);
+        }
         el.rooms.appendChild(li);
       }(state.rooms[i]));
     }
     if (state.rooms.length) { hide(el.roomsEmpty); } else { show(el.roomsEmpty); }
+    showRoomTrouble();
+  }
+
+  function roomStatus(roomId) {
+    for (var i = 0; i < state.rooms.length; i++) {
+      if (state.rooms[i].id === roomId) { return state.rooms[i].status || null; }
+    }
+    return null;
+  }
+
+  /* 지금 보고 있는 방이 아직 안 붙었으면 그 자리에 사유를 남긴다.
+     ⚠️ 방을 목록에서 지우지 않는다 — 사용자가 왜 안 됐는지 볼 수 있어야 한다. */
+  function showRoomTrouble(status) {
+    if (!el.roomTrouble) { return; }
+    var current = status || roomStatus(state.roomId);
+    if (!state.roomId || !current || current.state === 'ready') {
+      hide(el.roomTrouble);
+      return;
+    }
+    setText(el.roomTroubleText,
+      current.state === 'failed'
+        ? '이 방을 열지 못했다 — ' + (current.detail || '사유 없음')
+        : '방을 받는 중이다 (클론). 끝나면 대화가 바로 뜬다.');
+    setText(el.roomTroubleHint, current.hint || '');
+    if (el.roomRetry) { el.roomRetry.hidden = current.state !== 'failed'; }
+    show(el.roomTrouble);
+  }
+
+  function retryRoom(roomId) {
+    var id = roomId || state.roomId;
+    if (!id) { return; }
+    showRoomTrouble({ state: 'connecting' });
+    return api('/api/rooms/' + encodeURIComponent(id) + '/retry', { method: 'POST' })
+      ['catch'](function (err) { status(String(err.message || err), true); });
   }
 
   function currentRoom() {
@@ -343,7 +406,15 @@
       if (appendMessage(msg)) { onNewRendered(false); }
     });
     src.addEventListener('rooms', function (event) {
-      try { renderRooms(JSON.parse(event.data).rooms); } catch (err) { /* 무시 */ }
+      try {
+        renderRooms(JSON.parse(event.data).rooms);
+      } catch (err) { return; }
+      /* 받는 중이던 방이 준비되면 **그때** 타임라인을 받아온다.
+         (새 배관을 만들지 않는다 — 방 목록을 미는 기존 이벤트에 얹었다.) */
+      var current = roomStatus(state.roomId);
+      if (!state.loaded && current && current.state === 'ready') {
+        loadRecent(state.roomId);
+      }
     });
     src.addEventListener('trouble', function (event) {
       try { status('폴링 경고: ' + JSON.parse(event.data).detail, true); }
@@ -362,6 +433,7 @@
     if (!roomId) { return; }
     if (state.roomId && state.roomId !== roomId) { reportVisibility(false); }
     state.roomId = roomId;
+    state.loaded = false;
     unwatchOlder();
     clearTimeline();
     renderRooms(state.rooms);
@@ -373,6 +445,7 @@
     hide(el.searchResults);
     status('불러오는 중…');
     connect(roomId);
+    showRoomTrouble();
     return loadRecent(roomId);
   }
 
@@ -383,11 +456,23 @@
         var list = data.messages || [];
         for (var i = 0; i < list.length; i++) { appendMessage(list[i]); }
         state.hasMore = !!data.has_more;
+        state.loaded = true;
+        hide(el.roomTrouble);
         scrollToBottom();
         showOlderState();
         watchOlder();     /* 위로 올리면 그때부터 과거가 이어 붙는다 */
         status('');
-      })['catch'](function (err) { status(String(err.message || err), true); });
+      })['catch'](function (err) {
+        if (state.roomId !== roomId) { return; }
+        /* 409 = 아직 받는 중이거나 실패 — 오류 문구가 아니라 **상태**로 그린다.
+           준비되면 SSE 'rooms' 이벤트가 다시 불러온다. */
+        if (err.status === 409) {
+          showRoomTrouble(err.payload && err.payload.status);
+          status('');
+          return;
+        }
+        status(String(err.message || err), true);
+      });
   }
 
   /* ------------------------------------------- 위로 무한 스크롤 (과거) */
@@ -536,6 +621,9 @@
       el.repoUrl.value = '';
       el.roomName.value = '';
       hide(el.addRoom);
+      hide(el.newRepoForm);
+      /* 등록은 즉시 돌아온다 — 클론은 백그라운드다. 방으로 바로 들어가면
+         '받는 중' 이 보이고, 끝나면 SSE 로 대화가 채워진다. */
       return api('/api/rooms').then(function (all) {
         renderRooms(all.rooms);
         return switchRoom(data.room.id);
@@ -547,6 +635,85 @@
       setText(el.addRoomSubmit, '방 등록');
       el.addRoomSubmit.disabled = false;
     });
+  }
+
+  /* ------------------------------------------- 레포 만들기 거들기 (G-2) */
+
+  function newRepoError(message) {
+    if (!el.newRepoError) { return; }
+    if (!message) { hide(el.newRepoError); return; }
+    setText(el.newRepoError, message);
+    show(el.newRepoError);
+  }
+
+  function newRepoBody() {
+    return {
+      host: 'github.com',
+      name: (el.newRepoName.value || '').trim() || (el.roomName.value || '').trim(),
+      owner: (el.newRepoOwner.value || '').trim(),
+      token_env: (el.tokenEnv.value || '').trim(),
+      description: (el.roomName.value || '').trim()
+    };
+  }
+
+  /* "무엇이 만들어지나" — 누르기 전에 보여준다. 레포 생성은 계정을 바꾸는
+     외부 동작이라 조용히 하지 않는다. */
+  function planNewRepo() {
+    newRepoError('');
+    return api('/api/repos/plan', { method: 'POST', body: newRepoBody() })
+      .then(function (plan) {
+        state.plan = plan;
+        if (el.newRepoName && !el.newRepoName.value) {
+          el.newRepoName.value = plan.name || '';
+        }
+        var where = (plan.owner ? plan.owner + '/' : '') + (plan.name || '');
+        setText(el.newRepoPlan,
+          plan.forge.label + ' 에 ' + where + ' 을(를) 비공개(private)로 만든다.' +
+          (plan.mode === 'api'
+            ? ' 토큰(' + plan.token_env + ')이 있어 앱 안에서 바로 만든다.'
+            : plan.mode === 'link'
+              ? ' 링크로 가서 만들고 오면 그 주소로 방을 잇는다.'
+              : ' 이 호스트는 거들 수 없다 — 주소를 직접 넣어라.'));
+        show(el.newRepoPlan);
+        if (plan.detail) { newRepoError(plan.detail); }
+        if (plan.mode === 'api') {
+          show(el.newRepoCreate);
+        } else { hide(el.newRepoCreate); }
+        if (plan.link) {
+          el.newRepoLink.setAttribute('href', plan.link);
+          show(el.newRepoLink);
+          if (plan.clone_url) { show(el.newRepoUse); } else { hide(el.newRepoUse); }
+        } else {
+          hide(el.newRepoLink);
+          hide(el.newRepoUse);
+        }
+      })['catch'](function (err) { newRepoError(String(err.message || err)); });
+  }
+
+  /* 만든 주소를 입력칸에 넣고 그대로 방까지 만든다 — 사용자가 URL 을 옮겨
+     적지 않는 것이 이 거들기의 핵심이다. */
+  function useRepoUrl(url) {
+    if (!url) { return; }
+    el.repoUrl.value = url;
+    hide(el.newRepoForm);
+    return addRoom();
+  }
+
+  function createNewRepo() {
+    newRepoError('');
+    setText(el.newRepoCreate, '만드는 중…');
+    el.newRepoCreate.disabled = true;
+    return api('/api/repos', { method: 'POST', body: newRepoBody() })
+      .then(function (data) {
+        return useRepoUrl(data.repo && data.repo.clone_url);
+      })['catch'](function (err) {
+        var payload = err.payload || {};
+        newRepoError(String(err.message || err) +
+          (payload.hint ? ' — ' + payload.hint : ''));
+      }).then(function () {
+        setText(el.newRepoCreate, '지금 만들기');
+        el.newRepoCreate.disabled = false;
+      });
   }
 
   /* ------------------------------------------------------------ 입력칸 */
@@ -593,6 +760,20 @@
     el.tokenEnv = $('token-env');
     el.toggleAdd = $('toggle-add');
     el.addRoomCancel = $('add-room-cancel');
+    el.roomTrouble = $('room-trouble');
+    el.roomTroubleText = $('room-trouble-text');
+    el.roomTroubleHint = $('room-trouble-hint');
+    el.roomRetry = $('room-retry');
+    el.newRepoToggle = $('new-repo-toggle');
+    el.newRepoForm = $('new-repo-form');
+    el.newRepoOwner = $('new-repo-owner');
+    el.newRepoName = $('new-repo-name');
+    el.newRepoCheck = $('new-repo-check');
+    el.newRepoPlan = $('new-repo-plan');
+    el.newRepoLink = $('new-repo-link');
+    el.newRepoCreate = $('new-repo-create');
+    el.newRepoUse = $('new-repo-use');
+    el.newRepoError = $('new-repo-error');
     el.back = $('back');
     el.refresh = $('refresh');
     el.toggleSearch = $('toggle-search');
@@ -623,6 +804,20 @@
       if (el.addRoom.hidden) { show(el.addRoom); } else { hide(el.addRoom); }
     });
     on(el.addRoomCancel, 'click', function () { hide(el.addRoom); });
+    on(el.roomRetry, 'click', function () { retryRoom(state.roomId); });
+    on(el.newRepoToggle, 'click', function () {
+      if (el.newRepoForm.hidden) {
+        show(el.newRepoForm);
+        if (!el.newRepoName.value) {
+          el.newRepoName.value = (el.roomName.value || '').trim();
+        }
+      } else { hide(el.newRepoForm); }
+    });
+    on(el.newRepoCheck, 'click', planNewRepo);
+    on(el.newRepoCreate, 'click', createNewRepo);
+    on(el.newRepoUse, 'click', function () {
+      useRepoUrl(state.plan && state.plan.clone_url);
+    });
     on(el.back, 'click', function () {
       doc.body.dataset.view = 'rooms';
       doc.body.setAttribute('data-view', 'rooms');
@@ -683,6 +878,9 @@
     loadOlder: loadOlder,
     watchOlder: watchOlder,
     renderRooms: renderRooms,
+    retryRoom: retryRoom,
+    planNewRepo: planNewRepo,
+    createNewRepo: createNewRepo,
     send: send,
     runSearch: runSearch,
     addRoom: addRoom,

@@ -36,6 +36,32 @@
         <button type="button" id="add-room-cancel">취소</button>
       </div>
       <p class="error" id="add-room-error" hidden></p>
+
+      <!-- 레포가 아직 없는 사람을 위한 거들기. 만든 주소는 위 칸에 자동으로 들어간다
+           (사용자가 URL 을 손으로 옮겨 적지 않게 하는 것이 이 블록의 존재 이유다). -->
+      <div class="new-repo">
+        <button type="button" class="link" id="new-repo-toggle">레포가 아직 없다 — 만들기 거들기</button>
+        <div class="new-repo-form" id="new-repo-form" hidden>
+          <label class="field">
+            <span>소유자 (사용자명 또는 조직)</span>
+            <input type="text" id="new-repo-owner" placeholder="비우면 토큰 주인" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>레포 이름</span>
+            <input type="text" id="new-repo-name" placeholder="our-room" autocomplete="off">
+          </label>
+          <div class="row">
+            <button type="button" id="new-repo-check">무엇이 만들어지나 보기</button>
+          </div>
+          <p class="hint" id="new-repo-plan" hidden></p>
+          <div class="row">
+            <a class="button" id="new-repo-link" target="_blank" rel="noopener noreferrer" hidden>GitHub 에서 만들기</a>
+            <button type="button" class="primary" id="new-repo-create" hidden>지금 만들기</button>
+            <button type="button" id="new-repo-use" hidden>만들었다 · 이 주소로 방 만들기</button>
+          </div>
+          <p class="error" id="new-repo-error" hidden></p>
+        </div>
+      </div>
     </form>
 
     <ul class="rooms" id="rooms"></ul>
@@ -74,6 +100,13 @@
     </div>
 
     <button type="button" class="jump" id="jump-latest" hidden>새 메시지 ↓</button>
+
+    <!-- 방이 아직 안 붙었거나 실패했을 때 그 자리에 남는 안내 (방은 사라지지 않는다) -->
+    <div class="room-trouble" id="room-trouble" hidden>
+      <p id="room-trouble-text"></p>
+      <p class="hint" id="room-trouble-hint"></p>
+      <button type="button" id="room-retry">재시도</button>
+    </div>
 
     <form class="composer" id="composer">
       <input type="text" class="author" id="author" placeholder="표시 이름" autocomplete="off">

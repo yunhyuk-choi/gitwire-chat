@@ -77,14 +77,17 @@ function boot(options) {
     return { messages: slice, has_more: upto.length > slice.length };
   }
 
-  const fetchStub = makeFetch({
+  const routes = {
     '/api/rooms/r1/messages?before=': olderPage,
     '/api/rooms/r2/messages': { messages: opts.room2 || [msg(50, '둘째 방 메시지')], has_more: false },
     '/api/rooms/r1/messages': { messages: messages, has_more: !!opts.hasMore },
     '/api/rooms/r1/visibility': { ok: true },
     '/api/rooms/r2/visibility': { ok: true },
     '/api/rooms': { rooms: rooms }
-  });
+  };
+  /* 테스트가 특정 경로만 갈아끼울 수 있게 한다 (키 순서는 그대로 유지된다). */
+  Object.assign(routes, opts.routes || {});
+  const fetchStub = makeFetch(routes);
 
   const context = {
     document: doc,
@@ -380,6 +383,143 @@ await test('가시성 변화를 서버에 보고한다 (OS 알림 판정의 근�
   const call = context.fetch.calls.slice(before).find((c) => c.path.indexOf('/visibility') >= 0);
   assert.ok(call, '가시성 보고가 나가지 않았다');
   assert.equal(JSON.parse(call.init.body).visible, false);
+});
+
+/* ------------------------------------------- G. 연결 상태 · 레포 만들기 */
+
+const CONNECTING_ROOMS = [{
+  id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방',
+  status: { state: 'connecting', detail: '', code: '', hint: '' }
+}];
+
+await test('⭐ 받는 중인 방: 자리에 안내가 남고, 준비되면 저절로 채워진다', async () => {
+  let ready = false;
+  const { doc, chat } = await boot({
+    rooms: CONNECTING_ROOMS,
+    routes: {
+      '/api/rooms/r1/messages': () => (ready
+        ? { messages: [msg(1), msg(2)], has_more: false }
+        : { __http: 409, error: '방을 받는 중이다 — 잠시 뒤 다시 보인다',
+            status: { state: 'connecting', detail: '', hint: '' } })
+    }
+  });
+  const list = doc.getElementById('messages');
+  const trouble = doc.getElementById('room-trouble');
+
+  assert.equal(trouble.hidden, false, '받는 중 안내가 안 보인다');
+  assert.ok(doc.getElementById('room-trouble-text').textContent.indexOf('받는 중') >= 0);
+  assert.equal(doc.getElementById('room-retry').hidden, true, '받는 중엔 재시도가 없다');
+  assert.equal(list.children.length, 0);
+  assert.equal(chat.stats.created, 0);
+
+  // 클론이 끝났다 — 서버가 기존 'rooms' 이벤트로 알린다 (새 배관 없음).
+  ready = true;
+  StubEventSource.current.emit('rooms', {
+    rooms: [Object.assign({}, CONNECTING_ROOMS[0], { status: { state: 'ready' } })]
+  });
+  await settle();
+
+  assert.equal(list.children.length, 2, '준비된 뒤 타임라인이 안 채워졌다');
+  assert.equal(trouble.hidden, true);
+  assert.equal(chat.stats.cleared, 1, '타임라인을 다시 비웠다 (전체 리렌더)');
+  assert.equal(list.removedByReplace, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 실패한 방: 사라지지 않고 사유·안내가 남고 재시도가 된다', async () => {
+  const failed = [{
+    id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방',
+    status: {
+      state: 'failed', code: 'auth', detail: '인증에 실패했다 (토큰이 없거나 권한이 없다)',
+      hint: '환경변수 GITWIRE_TOKEN 에 토큰을 넣고 앱을 다시 띄워라'
+    }
+  }];
+  const { doc, context } = await boot({
+    rooms: failed,
+    routes: {
+      '/api/rooms/r1/messages': { __http: 409, error: '인증에 실패했다', status: failed[0].status },
+      '/api/rooms/r1/retry': { status: { state: 'connecting' } }
+    }
+  });
+
+  // 방은 목록에 그대로 있고, 상태가 함께 보인다.
+  const rooms = doc.getElementById('rooms');
+  assert.equal(rooms.children.length, 1, '실패한 방이 목록에서 사라졌다');
+  assert.ok(rooms.children[0].textContent.indexOf('실패') >= 0);
+  assert.ok(doc.getElementById('room-trouble-text').textContent.indexOf('인증에 실패') >= 0);
+  assert.ok(doc.getElementById('room-trouble-hint').textContent.indexOf('GITWIRE_TOKEN') >= 0);
+  assert.equal(doc.getElementById('room-retry').hidden, false);
+
+  doc.getElementById('room-retry').dispatch('click');
+  await settle();
+  const retried = context.fetch.calls.filter((c) => c.path.indexOf('/retry') >= 0);
+  assert.equal(retried.length, 1, '재시도 요청이 안 나갔다');
+  assert.equal(retried[0].init.method, 'POST');
+});
+
+await test('⭐ 레포 만들기(API): 만든 주소가 그대로 방이 된다 (손으로 옮기지 않는다)', async () => {
+  const { doc, chat, context } = await boot({
+    routes: {
+      '/api/repos/plan': {
+        forge: { kind: 'github', host: 'github.com', label: 'GitHub' },
+        mode: 'api', owner: 'yunhyuk-choi', name: 'our-room', private: true,
+        link: 'https://github.com/new?name=our-room&visibility=private&owner=yunhyuk-choi',
+        clone_url: 'https://github.com/yunhyuk-choi/our-room.git',
+        token_env: 'GITWIRE_TOKEN', detail: ''
+      },
+      '/api/repos': {
+        repo: { full_name: 'yunhyuk-choi/our-room', private: true,
+                clone_url: 'https://github.com/yunhyuk-choi/our-room.git' }
+      }
+    }
+  });
+  doc.getElementById('room-name').value = '우리 방';
+
+  await chat.planNewRepo();
+  const plan = doc.getElementById('new-repo-plan');
+  assert.equal(plan.hidden, false);
+  // 무엇이 만들어지는지 **누르기 전에** 보인다.
+  assert.ok(plan.textContent.indexOf('yunhyuk-choi/our-room') >= 0, plan.textContent);
+  assert.ok(plan.textContent.indexOf('비공개') >= 0);
+  assert.equal(doc.getElementById('new-repo-create').hidden, false);
+
+  await chat.createNewRepo();
+  await settle();
+
+  // 만든 주소가 그대로 등록 요청에 실린다 (사용자가 어디에도 붙여넣지 않았다).
+  const posted = context.fetch.calls.filter(
+    (c) => c.path === '/api/rooms' && c.init.method === 'POST');
+  assert.equal(posted.length, 1, '방 등록까지 이어지지 않았다');
+  assert.equal(JSON.parse(posted[0].init.body).repo_url,
+    'https://github.com/yunhyuk-choi/our-room.git');
+});
+
+await test('레포 만들기(링크): 프리필 링크를 주고, 만들고 오면 그 주소로 잇는다', async () => {
+  const link = 'https://github.com/new?name=our-room&visibility=private';
+  const { doc, chat, context } = await boot({
+    routes: {
+      '/api/repos/plan': {
+        forge: { kind: 'github', host: 'github.com', label: 'GitHub' },
+        mode: 'link', owner: 'yunhyuk-choi', name: 'our-room', private: true,
+        link: link, clone_url: 'https://github.com/yunhyuk-choi/our-room.git',
+        token_env: 'GITWIRE_TOKEN', detail: ''
+      }
+    }
+  });
+
+  await chat.planNewRepo();
+  assert.equal(doc.getElementById('new-repo-link').getAttribute('href'), link);
+  assert.equal(doc.getElementById('new-repo-link').hidden, false);
+  assert.equal(doc.getElementById('new-repo-create').hidden, true, 'API 없이 만들기 버튼이 떴다');
+  assert.equal(doc.getElementById('new-repo-use').hidden, false);
+
+  doc.getElementById('new-repo-use').dispatch('click');
+  await settle();
+  const posted = context.fetch.calls.filter(
+    (c) => c.path === '/api/rooms' && c.init.method === 'POST');
+  assert.equal(posted.length, 1);
+  assert.equal(JSON.parse(posted[0].init.body).repo_url,
+    'https://github.com/yunhyuk-choi/our-room.git');
 });
 
 /* -------------------------------------------------------------- 보고 */

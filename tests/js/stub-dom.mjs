@@ -190,7 +190,11 @@ export const ELEMENT_IDS = [
   'reply-chip', 'reply-label', 'reply-cancel', 'add-room', 'add-room-submit',
   'add-room-error', 'repo-url', 'room-name', 'token-env', 'toggle-add',
   'add-room-cancel', 'back', 'refresh', 'toggle-search', 'search-bar',
-  'search-q', 'search-close', 'search-results', 'search-list', 'search-summary'
+  'search-q', 'search-close', 'search-results', 'search-list', 'search-summary',
+  'room-trouble', 'room-trouble-text', 'room-trouble-hint', 'room-retry',
+  'new-repo-toggle', 'new-repo-form', 'new-repo-owner', 'new-repo-name',
+  'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
+  'new-repo-use', 'new-repo-error'
 ];
 
 /* IntersectionObserver 대역.
@@ -247,19 +251,23 @@ export class StubEventSource {
 }
 StubEventSource.opened = [];
 
-/* 아주 작은 fetch 대역: 경로 → 응답 JSON. 호출 기록도 남긴다. */
+/* 아주 작은 fetch 대역: 경로 → 응답 JSON. 호출 기록도 남긴다.
+   응답에 `__http` 를 넣으면 그 상태코드로 답한다 (409 처럼 '오류가 아닌 상태'). */
 export function makeFetch(routes) {
   const calls = [];
   const fetch = function (path, init) {
     calls.push({ path: path, init: init || {} });
     const key = Object.keys(routes).find((k) => path.indexOf(k) === 0);
     const handler = key ? routes[key] : null;
-    const body = handler
+    const raw = handler
       ? (typeof handler === 'function' ? handler(path, init) : handler)
       : { error: 'stub 라우트 없음: ' + path };
+    const code = raw && raw.__http ? raw.__http : (key ? 200 : 404);
+    const body = Object.assign({}, raw);
+    delete body.__http;
     return Promise.resolve({
-      ok: !!key,
-      status: key ? 200 : 404,
+      ok: code >= 200 && code < 300,
+      status: code,
       json: function () { return Promise.resolve(body); }
     });
   };

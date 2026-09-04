@@ -3,7 +3,11 @@
 방 하나 = gitwire 채널 하나 = git 레포 하나. 이 모듈이 하는 일은 얇다:
 
 * 방 등록/목록 (`chats/rooms.json`)
-* 채널 열기 (빈 레포면 gitwire 가 알아서 초기화한다)
+* 채널 열기 = **클론** (빈 레포면 gitwire 가 알아서 초기화한다).
+  ⭐ 클론은 **백그라운드**에서 돈다 — 등록은 즉시 돌아오고, 진행 상태(`받는 중 /
+  완료 / 실패+사유`)를 이벤트 버스로 민다. 클론을 HTTP 요청 안에서 동기로 돌리면
+  대화가 쌓인 방이나 느린 네트워크에서 버튼이 수십 초 멈춰 있고 화면에는 아무
+  설명이 없다 — 사용자는 앱이 죽은 줄 안다.
 * 타임라인 조회 (최근 N + 이전 불러오기) · 검색
 * 메시지 전송 (+ **로컬 에코**)
 * 상시 구독 → 새 메시지를 이벤트 버스로, 그리고 조건이 맞으면 OS 알림으로
@@ -55,6 +59,99 @@ SEEN_LIMIT = 4096
 
 class RoomError(Exception):
     """방 등록·조회 실패 (사용자에게 그대로 보여줘도 되는 메시지)."""
+
+
+#: 방 연결 상태 — 사용자에게 그대로 보이는 3단계.
+CONNECTING = "connecting"   # 받는 중 (클론·초기화)
+READY = "ready"             # 완료
+FAILED = "failed"           # 실패 (사유가 남는다)
+
+
+class RoomNotReady(RoomError):
+    """아직 받는 중이거나 실패한 방 — 호출자는 상태를 보여주고 기다리게 한다."""
+
+
+@dataclass(frozen=True)
+class RoomStatus:
+    """방 하나의 연결 상태. **디스크에 저장하지 않는다** — 재시작하면 다시 연결한다.
+
+    실패해도 방을 목록에서 지우지 않는다. 예전에는 등록이 취소되면서 방이 통째로
+    사라져 사용자가 *왜* 안 됐는지 알 수 없었다.
+    """
+
+    state: str = CONNECTING
+    detail: str = ""      # 사람이 읽는 사유
+    code: str = ""        # url / auth / notfound / network / init / error
+    hint: str = ""        # 다음에 무엇을 하면 되는지
+
+    def to_json(self) -> dict:
+        return {
+            "state": self.state, "detail": self.detail,
+            "code": self.code, "hint": self.hint,
+        }
+
+
+def _reason(text: str) -> str:
+    """git 출력에서 **사람이 볼 한 줄**만 뽑는다.
+
+    gitwire 의 GitError 는 실행한 명령 전체와 여러 줄 stderr 를 담는다. 그건
+    로그에는 좋지만 화면에 그대로 뿌리면 사용자가 읽지 않는다. `fatal:` 줄이
+    있으면 그것이 사유이고, 없으면 마지막 의미 있는 줄을 쓴다.
+    """
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    fatal = [line for line in lines if line.lower().startswith("fatal:")]
+    picked = fatal[0][len("fatal:"):].strip() if fatal else (lines[-1] if lines else "")
+    return picked[:200]
+
+
+def classify(exc: BaseException, room: "Room | None" = None) -> RoomStatus:
+    """클론 실패를 **구분해서** 사람이 다음 행동을 알 수 있는 사유로 바꾼다.
+
+    ⚠️ gitwire 는 모든 git 출력에서 자격증명을 레닥션한다. 그 문자열을 그대로
+    쓰되, 토큰 **이름**만 언급하고 값은 어디에도 넣지 않는다.
+    """
+    text = str(exc)
+    low = text.lower()
+    var = (room.token_env if room and room.token_env else "GITWIRE_TOKEN")
+    token_hint = (
+        f"비공개 레포라면 토큰이 필요하다. 환경변수 {var} 에 토큰을 넣고 앱을 "
+        f"다시 띄워라 (PowerShell: $env:{var}=\"...\" / bash: export {var}=...). "
+        "방 등록 시 '토큰 환경변수' 칸에 다른 이름을 넣을 수도 있다."
+    )
+    if isinstance(exc, gitwire.AuthError) or "authentication failed" in low or (
+        "could not read username" in low or "could not read password" in low
+        or "terminal prompts disabled" in low or "invalid username or password" in low
+    ):
+        return RoomStatus(FAILED, "인증에 실패했다 (토큰이 없거나 권한이 없다)",
+                          "auth", token_hint)
+    if ("could not resolve host" in low or "failed to connect" in low
+            or "timed out" in low or "network is unreachable" in low
+            or "connection refused" in low or "ssl certificate" in low):
+        return RoomStatus(FAILED, "네트워크에 연결하지 못했다", "network",
+                          "연결을 확인하고 다시 시도하라.")
+    if ("not found" in low or "does not exist" in low
+            or "repository not found" in low):
+        return RoomStatus(
+            FAILED, "그 주소의 레포를 찾지 못했다", "notfound",
+            "주소에 오타가 없는지 확인하라. 비공개 레포는 토큰이 없으면 "
+            "'없는 레포'처럼 보인다 — " + token_hint,
+        )
+    # git 이 "레포가 아니다 / 읽을 수 없다" 라고 할 때. 로컬 경로 오타·잘못된
+    # 주소가 여기로 온다 (git 은 원인을 특정해 주지 않는다).
+    if ("does not appear to be a git repository" in low
+            or "could not read from remote repository" in low
+            or "unable to access" in low or "no such file or directory" in low
+            or "repository" in low and "invalid" in low):
+        return RoomStatus(
+            FAILED, "레포 주소를 열 수 없다 — " + (_reason(text) or "주소를 확인하라"),
+            "url",
+            "https://호스트/소유자/레포.git 형태인지, 오타가 없는지 확인하라. "
+            "비공개 레포라면 접근 권한도 필요하다 — " + token_hint,
+        )
+    if isinstance(exc, gitwire.ChannelInitError):
+        return RoomStatus(FAILED, "방 규약을 심지 못했다", "init",
+                          "그 레포에 쓰기 권한이 있는지 확인하라.")
+    return RoomStatus(FAILED, _reason(text) or "알 수 없는 오류", "error", "")
 
 
 @dataclass(frozen=True)
@@ -139,6 +236,10 @@ class RoomManager:
         self._channels: dict[str, Any] = {}
         self._subs: dict[str, Any] = {}
         self._seen: dict[str, _Seen] = {}
+        self._status: dict[str, RoomStatus] = {}
+        # 방 하나의 클론이 **동시에 두 번** 시작되지 않게 한다 (같은 디렉토리다).
+        self._connecting: dict[str, threading.Lock] = {}
+        self._workers: dict[str, threading.Thread] = {}
         self._started = False
         self.instance = gitwire.installation_id(settings.home)
         """이 설치의 전송 수준 식별자. **gitwire 가 만들고 영속시킨다** — 같은
@@ -165,6 +266,31 @@ class RoomManager:
             raise RoomError(f"등록되지 않은 방이다: {room_id}")
         return room
 
+    def status(self, room_id: str) -> RoomStatus:
+        with self._lock:
+            return self._status.get(room_id, RoomStatus(CONNECTING))
+
+    def rooms_payload(self) -> list[dict]:
+        """방 목록 + 연결 상태. **API 와 SSE 가 같은 값을 쓴다** (단일 원천)."""
+        with self._lock:
+            rooms = list(self._rooms.values())
+            status = dict(self._status)
+        return [
+            {**room.to_json(),
+             "status": status.get(room.id, RoomStatus(CONNECTING)).to_json()}
+            for room in rooms
+        ]
+
+    def _publish_rooms(self) -> None:
+        self.bus.publish(None, "rooms", {"rooms": self.rooms_payload()})
+
+    def _set_status(self, room_id: str, status: RoomStatus) -> None:
+        with self._lock:
+            if room_id not in self._rooms:
+                return
+            self._status[room_id] = status
+        self._publish_rooms()
+
     # ---------------------------------------------------------- 채널 열기
 
     def _credential(self, room: Room):
@@ -176,12 +302,27 @@ class RoomManager:
             return None
 
     def channel(self, room_id: str):
-        """방의 gitwire 채널. 없으면 연다 (빈 레포면 gitwire 가 초기화)."""
+        """방의 gitwire 채널. 없으면 연다 (= 클론. 빈 레포면 gitwire 가 초기화).
+
+        ⚠️ **오래 걸린다.** HTTP 요청 스레드에서 부르지 마라 — `_connect()` 가
+        백그라운드에서 부르고, 요청 경로는 `_ready_channel()` 로 상태만 본다.
+        """
         with self._lock:
             channel = self._channels.get(room_id)
             if channel is not None:
                 return channel
             room = self.get(room_id)
+            # 같은 방을 두 스레드가 동시에 클론하면 같은 디렉토리를 함께 만진다.
+            gate = self._connecting.setdefault(room_id, threading.Lock())
+        with gate:
+            with self._lock:
+                channel = self._channels.get(room_id)
+            if channel is not None:
+                return channel
+            return self._open_channel(room)
+
+    def _open_channel(self, room: Room):
+        room_id = room.id
         kwargs: dict[str, Any] = {
             "home": self.home,
             "consumer": "chat",
@@ -205,6 +346,79 @@ class RoomManager:
             self._channels[room_id] = channel
             self._seen.setdefault(room_id, _Seen())
         return channel
+
+    def _ready_channel(self, room_id: str):
+        """요청 경로용 — 아직 안 된 방이면 **기다리지 않고** 상태를 알린다.
+
+        아무도 연결을 시작하지 않았으면 여기서 시작한다(그리고 곧바로 상태를
+        돌려준다). 그래서 재시작 직후 방을 열어도 저절로 붙는다.
+        """
+        with self._lock:
+            channel = self._channels.get(room_id)
+        if channel is not None:
+            return channel
+        self.get(room_id)                       # 등록 여부 먼저 (없으면 RoomError)
+        status = self.status(room_id)
+        if status.state == FAILED:
+            raise RoomNotReady(status.detail or "방을 열지 못했다")
+        with self._lock:
+            worker = self._workers.get(room_id)
+            idle = worker is None or not worker.is_alive()
+        if idle:
+            self._connect_async(room_id)
+        raise RoomNotReady("방을 받는 중이다 — 잠시 뒤 다시 보인다")
+
+    # --------------------------------------------------------- 연결(클론)
+
+    def _connect(self, room_id: str) -> bool:
+        """클론·초기화를 **여기서** 한다. 오래 걸리므로 백그라운드에서만 부른다."""
+        try:
+            room = self.get(room_id)
+        except RoomError:
+            return False
+        self._set_status(room_id, RoomStatus(CONNECTING))
+        try:
+            self.channel(room_id)
+        except Exception as exc:  # noqa: BLE001
+            cause = exc.__cause__ or exc
+            status = classify(cause, room)
+            log.warning("방 %s 연결 실패 [%s]: %s", room_id, status.code, status.detail)
+            self._set_status(room_id, status)
+            return False
+        self._set_status(room_id, RoomStatus(READY))
+        if self._started:
+            self._start_room(room_id)
+            self._publish_rooms()       # 구독까지 붙은 상태를 한 번 더 알린다
+        return True
+
+    def _connect_async(self, room_id: str) -> threading.Thread:
+        thread = threading.Thread(
+            target=self._connect, args=(room_id,),
+            name=f"gitwire-chat-connect-{room_id[:8]}", daemon=True,
+        )
+        with self._lock:
+            running = self._workers.get(room_id)
+            if running is not None and running.is_alive():
+                return running          # 이미 붙는 중이다 (스레드를 쌓지 않는다)
+            self._workers[room_id] = thread
+        thread.start()
+        return thread
+
+    def wait_for_connect(self, timeout: float = 30.0) -> None:
+        """진행 중인 연결이 끝나기를 기다린다 (테스트·종료 경로용)."""
+        with self._lock:
+            workers = list(self._workers.values())
+        for thread in workers:
+            thread.join(timeout)
+
+    def connect(self, room_id: str) -> RoomStatus:
+        """연결(클론)을 시작한다. 이미 붙는 중이면 그대로 둔다. 재시도도 이것이다."""
+        self.get(room_id)
+        self._connect_async(room_id)
+        return RoomStatus(CONNECTING)
+
+    #: 사용자가 "재시도"를 누르는 경로 — 하는 일은 같다.
+    reconnect = connect
 
     # --------------------------------------------------------------- 등록
 
@@ -239,16 +453,12 @@ class RoomManager:
         )
         with self._lock:
             self._rooms[rid] = room
-        try:
-            self.channel(rid)  # 여기서 클론·초기화가 일어난다 (실패하면 등록 취소)
-        except RoomError:
-            with self._lock:
-                self._rooms.pop(rid, None)
-            raise
+            self._status[rid] = RoomStatus(CONNECTING)
         self._persist()
-        if self._started:
-            self._start_room(rid)
-        self.bus.publish(None, "rooms", {"rooms": [r.to_json() for r in self.rooms()]})
+        # ⭐ 클론은 백그라운드로. 등록은 **즉시** 돌아오고 방은 '받는 중' 으로 뜬다.
+        # 실패해도 방을 지우지 않는다 — 사유를 화면에 남기고 재시도하게 한다.
+        self._publish_rooms()
+        self._connect_async(rid)
         return room
 
     def unregister(self, room_id: str) -> None:
@@ -258,6 +468,9 @@ class RoomManager:
             sub = self._subs.pop(room_id, None)
             channel = self._channels.pop(room_id, None)
             self._seen.pop(room_id, None)
+            self._status.pop(room_id, None)
+            self._connecting.pop(room_id, None)
+            self._workers.pop(room_id, None)
         if sub is not None:
             try:
                 sub.stop()
@@ -269,7 +482,7 @@ class RoomManager:
             except Exception:  # noqa: BLE001
                 log.debug("채널 정리 실패", exc_info=True)
         self._persist()
-        self.bus.publish(None, "rooms", {"rooms": [r.to_json() for r in self.rooms()]})
+        self._publish_rooms()
 
     def _persist(self) -> None:
         try:
@@ -281,7 +494,7 @@ class RoomManager:
 
     def _messages(self, room_id: str, limit: int | None = None) -> list[schema.Message]:
         """전량(또는 최근 N건) — 검색처럼 정말 전부 훑어야 하는 곳 전용."""
-        channel = self.channel(room_id)
+        channel = self._ready_channel(room_id)
         try:
             records = channel.history(limit)
         except Exception as exc:  # noqa: BLE001
@@ -296,7 +509,7 @@ class RoomManager:
         기반의 keyset 페이징(``history_page``)에 그대로 얹는다 — **요청한 만큼의
         레코드만 열린다.** 예전에는 '이전 불러오기'가 매번 대화 전체를 읽었다.
         """
-        channel = self.channel(room_id)
+        channel = self._ready_channel(room_id)
         size = limit or (
             self.settings.page_limit if before else self.settings.recent_limit
         )
@@ -357,7 +570,7 @@ class RoomManager:
         payload = schema.build_payload(
             author or room.author or self.settings.author, text, reply_to
         )
-        channel = self.channel(room_id)
+        channel = self._ready_channel(room_id)
         try:
             record = channel.append(payload, flush=True)
         except Exception as exc:  # noqa: BLE001
@@ -436,13 +649,23 @@ class RoomManager:
             self._subs[room_id] = sub
 
     def start(self) -> None:
-        """등록된 모든 방을 구독한다. 한 방이 실패해도 나머지는 돈다."""
+        """등록된 모든 방을 연결·구독한다. 한 방이 실패해도 나머지는 돈다.
+
+        연결은 **백그라운드**다 — 방이 여럿이면 예전에는 앱 기동이 클론 N개를
+        순서대로 기다렸고, 그동안 서버가 화면조차 못 줬다.
+        """
         self._started = True
         for room in self.rooms():
-            self._start_room(room.id)
+            with self._lock:
+                ready = room.id in self._channels
+            if ready:
+                self._start_room(room.id)
+            else:
+                self._connect_async(room.id)
 
     def stop(self) -> None:
         self._started = False
+        self.wait_for_connect(timeout=5.0)   # 진행 중인 클론을 먼저 정리한다
         with self._lock:
             subs = list(self._subs.values())
             self._subs.clear()
@@ -463,7 +686,7 @@ class RoomManager:
 
     def poll_now(self, room_id: str) -> int:
         """폴 주기를 기다리지 않고 즉시 한 번 당겨온다 (수동 새로고침)."""
-        channel = self.channel(room_id)
+        channel = self._ready_channel(room_id)
         delivered = 0
 
         def callback(record):
@@ -478,11 +701,15 @@ class RoomManager:
         return delivered
 
     def info(self, room_id: str) -> dict:
-        channel = self.channel(room_id)
+        status = self.status(room_id).to_json()
         try:
-            return channel.info()
+            channel = self._ready_channel(room_id)
+        except RoomNotReady as exc:
+            return {"status": status, "error": str(exc)}
+        try:
+            return {"status": status, **channel.info()}
         except Exception as exc:  # noqa: BLE001
-            return {"error": str(exc)}
+            return {"status": status, "error": str(exc)}
 
 
 def messages_json(messages: Iterable[schema.Message]) -> list[dict]:
