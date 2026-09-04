@@ -9,15 +9,25 @@
  *
  *   1. `innerHTML` 을 **어디에서도 쓰지 않는다.** 텍스트는 전부 `textContent`
  *      로 넣는다 (덤으로 XSS 가 원천 봉쇄된다).
- *   2. 이미 화면에 있는 메시지 노드는 **다시 만들지도, 지우지도 않는다.**
- *      메시지 ID(= gitwire 봉투 ID)로 중복을 걸러내므로, 같은 메시지가 로컬
- *      에코와 SSE 로 두 번 와도 노드는 한 번만 생긴다.
+ *   2. **화면 안에 있는** 메시지 노드는 다시 만들지 않는다. 메시지 ID
+ *      (= gitwire 봉투 ID)로 중복을 걸러내므로, 같은 메시지가 로컬 에코와 SSE 로
+ *      두 번 와도 노드는 한 번만 생긴다.
+ *      ⚠️ 화면 **밖**으로 나간 노드는 가상 스크롤이 걷어낸다 — 그건 사고가 아니라
+ *      정상 동작이다. 둘을 뭉개면 진짜 리렌더 버그를 못 잡으므로 카운터를 나눈다:
+ *        · `stats.recycled`      창 밖으로 나가 걷어낸 수 (정상, 0 이 아니어도 된다)
+ *        · `stats.rebuiltInView` **창 안에 계속 있었는데 다시 만든 수** ← 항상 0
  *   3. 타임라인 컨테이너를 비우는 곳은 **방을 바꿀 때 딱 한 곳**뿐이다
  *      (`switchRoom`). 그건 같은 대화의 리렌더가 아니라 다른 대화로의 전환이다.
  *
  * 과거는 **위로 스크롤하면 자동으로 이어 붙는다**(페이지 버튼이 아니다). 그때
  * 지켜야 하는 세 가지는 `prependMessages`(스크롤 보정) · `onNewRendered`
  * (아래쪽 SSE 와 자리 다툼 금지) · `loadOlder`(중복 로드 차단)에 각각 있다.
+ *
+ * 타임라인은 **가상 스크롤**이다 (@tanstack/virtual-core, static/vendor 에 벤더링).
+ * 화면에 보이는 만큼만 DOM 에 둔다 — 수천 건을 거슬러 올라가도 노드 수가 상수에
+ * 가깝게 유지된다. 메시지는 길이가 제각각이라 **가변 높이**로 쓰며, 높이는
+ * 추정값이 아니라 `measureElement` 로 **실측**해 반영한다.
+ * 모델(`items`)이 원본이고 DOM 은 그 창(window)일 뿐이다.
  *
  * 이 세 가지를 눈으로 믿지 않고 **세어서** 확인한다 — `__chat.stats` 가 노드
  * 생성/붙이기/비우기 횟수를 기록하고, stub DOM 테스트가 그 수를 검증한다.
@@ -26,6 +36,21 @@
   'use strict';
 
   var doc = global.document;
+
+  /* 화면에 보이지 않아도 되는 것들의 원본. DOM 은 이 배열의 '창' 이다. */
+  var items = [];              /* 정렬된 메시지 모델 (id 오름차순 = 시간순) */
+  var nodes = new Map();       /* id → 노드 (지금 창 안에 있는 것만) */
+  var virtualizer = null;
+  var lastWindow = new Set();  /* 직전 창의 id 들 (리렌더 사고 판정용) */
+  var rendering = false;       /* 그리는 중 (재진입 방지) */
+  var renderAgain = false;     /* 그리는 동안 또 요청이 왔다 */
+
+  /* 처음 그릴 때 쓰는 높이 추정치(px). 실측되면 바로 대체된다. */
+  var ESTIMATED_HEIGHT = 64;
+  /* 메시지 사이 간격(px) — CSS 의 여백을 가상화 계산에 알려 준다. */
+  var ITEM_GAP = 6;
+  /* 화면 밖에 여유로 더 그리는 개수. 스크롤 시 빈칸이 보이지 않게. */
+  var OVERSCAN = 6;
 
   var state = {
     rooms: [],
@@ -53,6 +78,9 @@
     inserted: 0,    /* 중간에 끼운 수 (순서 보정) */
     prepended: 0,   /* 앞에 붙인 수 (이전 불러오기) */
     duplicates: 0,  /* ID 중복으로 걸러낸 수 */
+    recycled: 0,    /* 창 밖으로 나가 걷어낸 수 (가상화의 정상 동작) */
+    rebuiltInView: 0, /* ⭐ 창 안에 있었는데 다시 만든 수 — **항상 0** 이어야 한다 */
+    measured: 0,    /* 실측된 높이 반영 횟수 (가변 높이가 실제로 도는가) */
     cleared: 0,     /* 타임라인을 비운 횟수 = 방 전환 횟수 */
     olderRequests: 0, /* 위로 불러오기 요청 수 (중복 발화 감시) */
     anchored: 0,    /* 스크롤 보정 횟수 */
@@ -63,6 +91,7 @@
   var olderObserver = null;
 
   var el = {};
+  var virtual = null;          /* @tanstack/virtual-core (index.html 이 실어 준다) */
 
   function $(id) { return doc.getElementById(id); }
 
@@ -131,6 +160,10 @@
   /* 메시지 하나의 DOM 을 만든다. **오직 여기서만** 메시지 노드가 생긴다. */
   function buildMessage(msg) {
     stats.created += 1;
+    if (lastWindow.has(msg.id)) {
+      /* 창 안에 있던 것을 다시 만들었다 = 리렌더 사고. 세어 두면 테스트가 잡는다. */
+      stats.rebuiltInView += 1;
+    }
     var wrap = make('article', 'msg');
     if (msg.mine) { wrap.className = 'msg mine'; }
     if (msg.unknown) { wrap.className = wrap.className + ' unknown'; }
@@ -165,72 +198,152 @@
   function remember(msg) { known[msg.id] = msg; }
   function lookup(id) { return known[id] || null; }
 
-  /* --------------------------------------------------------- 붙이기 */
+  /* ------------------------------------------------- 모델 · 가상 스크롤 */
 
-  /* 정렬 위치. 메시지 ID 는 고정폭 타임스탬프로 시작하므로 사전식 = 시간순. */
+  /* 정렬 위치(이진 탐색). 메시지 ID 는 고정폭 타임스탬프로 시작하므로
+     사전식 = 시간순이다. 모델이 정렬돼 있으면 DOM 순서를 걱정할 필요가 없다. */
   function insertionIndex(id) {
-    var kids = el.messages.children;
-    var i = kids.length;
-    while (i > 0) {
-      var kidId = kids[i - 1].dataset ? kids[i - 1].dataset.id : '';
-      if (!kidId || kidId <= id) { break; }
-      i -= 1;
+    var lo = 0;
+    var hi = items.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (items[mid].id <= id) { lo = mid + 1; } else { hi = mid; }
     }
-    return i;
+    return lo;
   }
 
-  /* 새 메시지 1건을 화면에 붙인다. 반환값: 실제로 붙였나.
-     ⚠️ 이미 있는 노드는 절대 건드리지 않는다. */
-  function appendMessage(msg) {
+  /* 모델에 1건 넣는다 (DOM 은 건드리지 않는다). 반환값: 실제로 넣었나. */
+  function insertItem(msg) {
     if (!msg || !msg.id) { return false; }
     if (state.seen.has(msg.id)) { stats.duplicates += 1; return false; }
     state.seen.add(msg.id);
     remember(msg);
-
-    var node = buildMessage(msg);
-    var kids = el.messages.children;
     var index = insertionIndex(msg.id);
-    if (index >= kids.length) {
-      el.messages.appendChild(node);
-      stats.appended += 1;
-    } else {
-      el.messages.insertBefore(node, kids[index]);
-      stats.inserted += 1;
-    }
+    items.splice(index, 0, msg);
     if (!state.oldest || msg.id < state.oldest) { state.oldest = msg.id; }
     return true;
   }
 
-  /* '이전 불러오기' — 앞쪽에 한 덩어리로 끼운다. 기존 노드는 그대로 남는다. */
+  function virtualOptions() {
+    return {
+      count: items.length,
+      getScrollElement: function () { return el.timeline; },
+      estimateSize: function () { return ESTIMATED_HEIGHT; },
+      getItemKey: function (index) { return items[index] ? items[index].id : index; },
+      overscan: OVERSCAN,
+      gap: ITEM_GAP,
+      scrollToFn: virtual.elementScroll,
+      observeElementRect: virtual.observeElementRect,
+      observeElementOffset: virtual.observeElementOffset,
+      /* ⭐ 가변 높이: 추정치로 그린 뒤 **실제 높이를 재서** 반영한다.
+         메시지 길이가 제각각이라 고정 높이 가정은 성립하지 않는다. */
+      measureElement: function (element, entry, instance) {
+        stats.measured += 1;
+        return virtual.measureElement(element, entry, instance);
+      },
+      onChange: function () { renderWindow(); }
+    };
+  }
+
+  function ensureVirtualizer() {
+    if (virtualizer || !el.timeline) { return virtualizer; }
+    if (!virtual || !virtual.Virtualizer) { return null; }
+    virtualizer = new virtual.Virtualizer(virtualOptions());
+    virtualizer._didMount();
+    virtualizer._willUpdate();
+    return virtualizer;
+  }
+
+  /* 모델이 바뀐 뒤 창을 다시 계산한다. */
+  function syncVirtual() {
+    var v = ensureVirtualizer();
+    if (!v) { return; }
+    v.setOptions(virtualOptions());
+    v._willUpdate();
+    renderWindow();
+  }
+
+  /* ⭐ 창(window) 그리기 — 보이는 것만 DOM 에 둔다.
+     · 창 안에 계속 있는 노드는 **같은 객체 그대로** 둔다 (재사용).
+     · 창 밖으로 나간 노드만 걷어낸다 (`recycled`).
+     · 창 안에 있던 것을 다시 만들면 `rebuiltInView` 가 올라간다 = 사고. */
+  function renderWindow() {
+    var v = virtualizer;
+    if (!v || !el.messages) { return; }
+    /* ⚠️ 재진입 금지.
+       그리는 도중 `measureElement` 가 크기 변화를 알리면 라이브러리가 곧바로
+       onChange 를 다시 부른다. 그대로 두면 창을 반쯤 그린 상태에서 또 그리기
+       시작해, 아직 만들지 않은 노드를 "창 안에 있었는데 없다"로 오판한다.
+       한 번에 하나만 그리고, 도중에 요청이 오면 끝난 뒤 한 번 더 그린다. */
+    if (rendering) { renderAgain = true; return; }
+    rendering = true;
+    try {
+      paintWindow(v);
+    } finally {
+      rendering = false;
+    }
+    if (renderAgain) { renderAgain = false; renderWindow(); }
+  }
+
+  function paintWindow(v) {
+    var visible = v.getVirtualItems();
+    var keep = new Set();
+    for (var i = 0; i < visible.length; i++) {
+      var vi = visible[i];
+      var msg = items[vi.index];
+      if (!msg) { continue; }
+      keep.add(msg.id);
+      var node = nodes.get(msg.id);
+      if (!node) {
+        node = buildMessage(msg);
+        nodes.set(msg.id, node);
+        el.messages.appendChild(node);
+        stats.appended += 1;
+      }
+      node.setAttribute('data-index', String(vi.index));
+      if (node.style) { node.style.transform = 'translateY(' + vi.start + 'px)'; }
+      v.measureElement(node);          /* 가변 높이 실측 */
+    }
+    nodes.forEach(function (node, id) {
+      if (keep.has(id)) { return; }
+      /* 화면 밖 — 걷어낸다. 이건 사고가 아니라 가상화의 정상 동작이다. */
+      if (node.parentNode === el.messages) { el.messages.removeChild(node); }
+      nodes['delete'](id);
+      stats.recycled += 1;
+    });
+    if (el.messages.style) {
+      el.messages.style.height = v.getTotalSize() + 'px';
+    }
+    lastWindow = keep;
+  }
+
+  /* 새 메시지 1건. 반환값: 실제로 붙였나. */
+  function appendMessage(msg) {
+    if (!insertItem(msg)) { return false; }
+    syncVirtual();
+    return true;
+  }
+
+  /* '이전 불러오기' — 앞쪽에 한 덩어리로 끼운다. */
   function prependMessages(list) {
-    var frag = doc.createDocumentFragment();
     var added = 0;
     for (var i = 0; i < list.length; i++) {
-      var msg = list[i];
-      if (!msg || !msg.id || state.seen.has(msg.id)) {
-        if (msg && msg.id) { stats.duplicates += 1; }
-        continue;
-      }
-      state.seen.add(msg.id);
-      remember(msg);
-      frag.appendChild(buildMessage(msg));
-      added += 1;
-      if (!state.oldest || msg.id < state.oldest) { state.oldest = msg.id; }
+      if (insertItem(list[i])) { added += 1; }
     }
     if (!added) { return 0; }
     /* ⭐ 스크롤 점프 방지.
-       위에 노드를 끼우면 `scrollTop` 은 그대로인데 위쪽 콘텐츠가 늘어나므로
-       **보던 화면이 아래로 튄다.** 그래서 삽입 전 높이를 재고, 삽입 직후
-       늘어난 만큼 `scrollTop` 을 내려 화면상의 위치를 그대로 유지한다.
-       (CSS `overflow-anchor` 는 브라우저마다 동작이 달라 믿지 않는다 —
-       오히려 우리 보정과 겹치지 않게 CSS 에서 꺼 둔다.) */
-    var heightBefore = el.timeline ? el.timeline.scrollHeight : 0;
+       위에 항목을 끼우면 `scrollTop` 은 그대로인데 위쪽 콘텐츠가 늘어나므로
+       **보던 화면이 아래로 튄다.** 가상화에서는 늘어난 양이 DOM 높이가 아니라
+       **가상화가 계산한 전체 높이(getTotalSize)** 의 차이다 — 화면 밖 항목은
+       DOM 에 없기 때문이다. 그 차이만큼 `scrollTop` 을 내린다.
+       (CSS `overflow-anchor` 는 브라우저마다 달라 믿지 않고 꺼 둔다.) */
+    var v = ensureVirtualizer();
+    var heightBefore = v ? v.getTotalSize() : 0;
     var topBefore = el.timeline ? el.timeline.scrollTop : 0;
-    var first = el.messages.children.length ? el.messages.children[0] : null;
-    el.messages.insertBefore(frag, first);
     stats.prepended += added;
-    if (el.timeline) {
-      var grew = el.timeline.scrollHeight - heightBefore;
+    syncVirtual();
+    if (el.timeline && v) {
+      var grew = v.getTotalSize() - heightBefore;
       el.timeline.scrollTop = topBefore + grew;
       stats.anchored += 1;
       stats.lastAnchor = grew;
@@ -246,7 +359,11 @@
     state.unseen = 0;
     state.hasMore = false;
     state.loadingOlder = false;
+    items = [];
+    nodes.clear();
+    lastWindow = new Set();
     el.messages.replaceChildren();
+    syncVirtual();
   }
 
   /* ------------------------------------------------------------ 스크롤 */
@@ -259,6 +376,12 @@
 
   function scrollToBottom() {
     if (!el.timeline) { return; }
+    /* 가상화에서는 마지막 항목으로 보내는 것이 정확하다 — DOM 높이가 아니라
+       가상화가 계산한 전체 높이가 기준이기 때문이다. */
+    if (virtualizer && items.length) {
+      virtualizer.scrollToIndex(items.length - 1, { align: 'end' });
+      renderWindow();
+    }
     el.timeline.scrollTop = el.timeline.scrollHeight;
     state.atBottom = true;
     state.unseen = 0;
@@ -458,9 +581,12 @@
         state.hasMore = !!data.has_more;
         state.loaded = true;
         hide(el.roomTrouble);
-        scrollToBottom();
         showOlderState();
-        watchOlder();     /* 위로 올리면 그때부터 과거가 이어 붙는다 */
+        /* ⚠️ 관찰을 **먼저** 붙인다. 맨 아래로 보내는 동작이 스크롤 이벤트를
+           일으키는데, 그때 관찰자가 없으면 폴백 경로가 대신 발동해 의도치 않은
+           시점에 과거를 불러온다(대화가 짧으면 곧바로 위 끝이기 때문이다). */
+        watchOlder();
+        scrollToBottom();
         status('');
       })['catch'](function (err) {
         if (state.roomId !== roomId) { return; }
@@ -843,6 +969,13 @@
         loadOlder();
       }
     });
+    /* 반응형 — 창 폭이 바뀌면 줄바꿈이 달라져 **높이가 달라진다.**
+       측정값 캐시를 비워 다시 재게 한다(안 그러면 옛 높이로 배치가 어긋난다). */
+    on(global, 'resize', function () {
+      if (!virtualizer) { return; }
+      virtualizer.measure();
+      syncVirtual();
+    });
     on(doc, 'visibilitychange', function () { reportVisibility(isVisible()); });
     on(global, 'beforeunload', function () { reportVisibility(false); });
   }
@@ -850,7 +983,15 @@
   function boot() {
     if (state.booted) { return; }
     state.booted = true;
+    virtual = global.TanStackVirtual || null;
     cache();
+    if (!virtual || !virtual.Virtualizer) {
+      /* 벤더링된 파일이라 정상 설치에서는 없을 수 없다. 없으면 조용히 다르게
+         동작하지 말고 분명히 말한다. */
+      status('가상 스크롤 라이브러리를 불러오지 못했다 (static/vendor 확인)', true);
+      return;
+    }
+    ensureVirtualizer();
     state.client = uid();
     state.seen = new global.Set();
     var stored = null;
@@ -871,6 +1012,11 @@
     boot: boot,
     state: state,
     stats: stats,
+    items: function () { return items; },
+    nodes: function () { return nodes; },
+    virtualizer: function () { return virtualizer; },
+    renderWindow: renderWindow,
+    syncVirtual: syncVirtual,
     appendMessage: appendMessage,
     prependMessages: prependMessages,
     clearTimeline: clearTimeline,

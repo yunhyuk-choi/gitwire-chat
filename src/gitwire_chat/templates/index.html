@@ -122,6 +122,15 @@
   </main>
 </div>
 
+<!-- 가상 스크롤 엔진(@tanstack/virtual-core)은 레포에 **벤더링**되어 있다.
+     CDN 을 쓰지 않는 이유: 이 앱은 내 컴퓨터에서 도는 로컬 앱이고, 오프라인에서도
+     떠야 하며, 외부 호스트에 의존을 만들지 않는다. 모듈 스크립트는 classic
+     스크립트보다 늦게(defer 처럼) 실행되지만 DOMContentLoaded 전이라, app.js 가
+     boot() 하는 시점에는 이미 준비돼 있다. -->
+<script type="module">
+  import * as virtual from "{{ url_for('static', filename='vendor/tanstack-virtual-core/index.js') }}";
+  window.TanStackVirtual = virtual;
+</script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

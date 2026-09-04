@@ -149,6 +149,15 @@ def classify(exc: BaseException, room: "Room | None" = None) -> RoomStatus:
             "비공개 레포라면 접근 권한도 필요하다 — " + token_hint,
         )
     if isinstance(exc, gitwire.ChannelInitError):
+        if "빈 레포" in text:
+            # 쓰고 있는 코드 레포 주소를 넣은 경우. gitwire 가 아무것도 쓰지 않고
+            # 막아 준다 — 사용자에게는 "새 레포를 만들라"가 답이다.
+            return RoomStatus(
+                FAILED, "이 레포에는 이미 내용이 있다 (채팅 방은 빈 레포에만 만든다)",
+                "notempty",
+                "빈 레포 주소를 넣어라. 없으면 방 등록 폼의 "
+                "「레포가 아직 없다 — 만들기 거들기」로 새로 만들 수 있다.",
+            )
         return RoomStatus(FAILED, "방 규약을 심지 못했다", "init",
                           "그 레포에 쓰기 권한이 있는지 확인하라.")
     return RoomStatus(FAILED, _reason(text) or "알 수 없는 오류", "error", "")

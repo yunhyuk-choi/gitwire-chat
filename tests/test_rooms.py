@@ -292,3 +292,24 @@ def test_한_방이_실패해도_나머지는_돈다(settings, fake_opener):
     mgr.start()          # 예외가 밖으로 나가지 않는다
     assert len(mgr.rooms()) == 2
     mgr.stop()
+
+
+def test_내용이_있는_레포는_사유가_구분된다(settings):
+    """gitwire 가 막아 준 것을 사용자 말로 옮긴다 (기반의 안전장치와 짝)."""
+    from gitwire_chat.rooms import FAILED, RoomManager
+
+    def busy_repo(url, **kw):
+        raise gitwire.ChannelInitError(
+            "이 레포에는 이미 내용이 있다 (src/app.py). 채널 규약은 **빈 레포에만** 심는다"
+        )
+
+    mgr = RoomManager(settings, opener=busy_repo)
+    try:
+        room = mgr.register(REPO)
+        mgr.wait_for_connect()
+        status = mgr.status(room.id)
+        assert status.state == FAILED and status.code == "notempty"
+        assert "빈 레포" in status.hint
+        assert [r.id for r in mgr.rooms()] == [room.id]   # 방은 남는다
+    finally:
+        mgr.stop()
