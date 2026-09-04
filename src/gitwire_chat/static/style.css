@@ -173,6 +173,24 @@ html, body {
 .msg.mine { margin-left: auto; margin-right: 0; background: var(--mine); }
 .msg.unknown { opacity: 0.7; border-style: dashed; }
 
+/* 낙관적 전송 — 아직 서버가 받았다고 말하지 않은 말풍선.
+   '흐리게' 로만 구분한다. 자리를 차지하는 별도 요소를 넣으면 그 순간
+   가상 스크롤의 높이 계산이 흔들려 화면이 튄다. */
+.msg.pending { opacity: 0.55; }
+.msg.failed { border-color: #c0392b; opacity: 1; }
+
+.msg-state[hidden] { display: none; }
+.msg-state {
+  margin-top: 2px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--muted);
+}
+.msg.failed .msg-state .state-text { color: #c0392b; }   /* .error 와 같은 색 */
+.msg-state .retry { color: var(--accent); text-decoration: underline; }
+
 .msg-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--muted); }
 .msg-head .author { font-weight: 600; color: var(--ink); }
 .msg .body { white-space: pre-wrap; }

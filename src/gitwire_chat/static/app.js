@@ -92,6 +92,21 @@
 
   var olderObserver = null;
 
+  /* ⭐ 낙관적 전송 — 아직 서버 응답을 받지 못한, **화면에만 있는** 메시지들.
+     tempId → 모델 객체.
+
+     임시 ID 는 `~` 로 시작한다. 실제 봉투 ID(`records/...`)보다 사전식으로
+     **뒤**라서, 정렬 규칙(ID 오름차순 = 시간순)을 하나도 건드리지 않고 항상
+     맨 아래에 놓인다. 서버 응답이 오면 이 키를 **진짜 봉투 ID 로 갈아끼우되
+     노드는 그대로 쓴다** (`settlePending`). */
+  var pendings = new Map();
+  var pendingSeq = 0;
+
+  function pendingId() {
+    pendingSeq += 1;
+    return '~pending/' + ('000000' + pendingSeq).slice(-6);
+  }
+
   var el = {};
   var virtual = null;          /* @tanstack/virtual-core (index.html 이 실어 준다) */
 
@@ -181,8 +196,6 @@
       stats.rebuiltInView += 1;
     }
     var wrap = make('article', 'msg');
-    if (msg.mine) { wrap.className = 'msg mine'; }
-    if (msg.unknown) { wrap.className = wrap.className + ' unknown'; }
     wrap.dataset.id = msg.id;
     wrap.setAttribute('data-id', msg.id);
 
@@ -207,7 +220,42 @@
     reply.addEventListener('click', function () { startReply(msg); });
     actions.appendChild(reply);
     wrap.appendChild(actions);
+
+    /* 전송 상태가 앉을 자리. 평소엔 비어 숨어 있다 — 낙관적 전송만 여기에 쓴다.
+       노드를 다시 만들지 않고 **이 자리만** 갈아 끼우기 위해 참조를 들고 있는다. */
+    var slot = make('div', 'msg-state');
+    wrap.appendChild(slot);
+    wrap.stateSlot = slot;
+    paintState(wrap, msg);
     return wrap;
+  }
+
+  /* 전송 상태를 노드에 **덧입힌다** — 노드를 새로 만들지 않는다.
+     만들 때 한 번(buildMessage), 상태가 바뀔 때 그 자리에서 한 번 불린다. */
+  function paintState(node, msg) {
+    if (!node) { return; }
+    var cls = 'msg';
+    if (msg.mine) { cls += ' mine'; }
+    if (msg.unknown) { cls += ' unknown'; }
+    if (msg.pending) { cls += ' pending'; }
+    if (msg.failed) { cls += ' failed'; }
+    node.className = cls;
+    var slot = node.stateSlot;
+    if (!slot) { return; }
+    slot.replaceChildren();
+    if (msg.failed) {
+      slot.appendChild(make('span', 'state-text', '전송 실패'));
+      var again = make('button', 'link retry', '재시도');
+      again.setAttribute('type', 'button');
+      again.addEventListener('click', function () { retrySend(msg); });
+      slot.appendChild(again);
+      slot.hidden = false;
+    } else if (msg.pending) {
+      slot.appendChild(make('span', 'state-text', '보내는 중…'));
+      slot.hidden = false;
+    } else {
+      slot.hidden = true;
+    }
   }
 
   var known = {};
@@ -236,7 +284,10 @@
     remember(msg);
     var index = insertionIndex(msg.id);
     items.splice(index, 0, msg);
-    if (!state.oldest || msg.id < state.oldest) { state.oldest = msg.id; }
+    /* 보류 항목의 임시 ID 는 '위로 불러오기' 커서가 될 수 없다 (서버가 모른다). */
+    if (!msg.pending && (!state.oldest || msg.id < state.oldest)) {
+      state.oldest = msg.id;
+    }
     return true;
   }
 
@@ -461,6 +512,7 @@
     state.loadingOlder = false;
     items = [];
     nodes.clear();
+    pendings.clear();      /* 보류 중이던 것은 그 방의 것이다 */
     lastWindow = new Set();
     el.messages.replaceChildren();
     syncVirtual();
@@ -625,6 +677,11 @@
       var msg;
       try { msg = JSON.parse(event.data); } catch (err) { return; }
       if (state.roomId !== roomId) { return; }
+      /* 내가 방금 낙관적으로 띄운 그 말이 되돌아온 것이면 **갈아끼운다.**
+         POST 응답보다 SSE 가 먼저 오는 경우가 실제로 있고, 그때 짝짓지 않으면
+         같은 말이 잠깐 두 줄로 보인다. */
+      var settled = matchPending(msg);
+      if (settled) { settlePending(settled, msg); onNewRendered(true); return; }
       msg.mine = false;
       if (appendMessage(msg)) { onNewRendered(false); }
     });
@@ -779,29 +836,133 @@
     hide(el.replyChip);
   }
 
+  /* ⭐ 낙관적 전송 — 서버 응답을 **기다리지 않고** 지금 붙인다.
+
+     어차피 갈 것이고, 실패하면 그때 그 말풍선 옆에 '전송 실패' 와 재시도를
+     준다. 예전에는 POST 응답을 받은 뒤에 붙였다 — 서버가 빠를 땐 티가 안 나지만
+     원격이 느려지거나 막히는 순간 그대로 멈춘 것처럼 보인다. */
   function send() {
     var text = (el.text.value || '').trim();
     if (!text || !state.roomId) { return; }
     var author = (el.author.value || '').trim() || state.author;
-    var roomId = state.roomId;
+    var draft = {
+      id: pendingId(),
+      roomId: state.roomId,
+      author: author,
+      text: text,
+      ts: new Date().toISOString(),
+      sender: '',
+      kind: 'msg',
+      reply_to: state.replyTo,
+      unknown: false,
+      mine: true,
+      pending: true,
+      failed: false
+    };
     el.text.value = '';
     autoGrow();
-    var body = { text: text, author: author, reply_to: state.replyTo };
     cancelReply();
-    status('보내는 중…');
+    if (!appendMessage(draft)) {
+      /* 붙지 못했다 — 사용자가 쓴 글을 잃지 않는다. */
+      el.text.value = text;
+      autoGrow();
+      return;
+    }
+    pendings.set(draft.id, draft);
+    onNewRendered(true);
+    status('');
+    return postDraft(draft);
+  }
+
+  /* 보류 항목 하나를 서버로 보낸다 (최초 전송·재시도가 같은 경로를 쓴다). */
+  function postDraft(draft) {
+    var roomId = draft.roomId;
+    var body = { text: draft.text, author: draft.author, reply_to: draft.reply_to };
     return api('/api/rooms/' + encodeURIComponent(roomId) + '/messages',
       { method: 'POST', body: body })
       .then(function (data) {
         if (state.roomId !== roomId) { return; }
-        var msg = data.message;
-        msg.mine = true;
-        /* 로컬 에코. 잠시 뒤 SSE 로 같은 ID 가 또 와도 중복으로 걸러진다. */
-        if (appendMessage(msg)) { onNewRendered(true); }
-        status('');
+        settlePending(draft.id, data.message);
       })['catch'](function (err) {
-        status('전송 실패: ' + String(err.message || err), true);
-        el.text.value = text;
+        if (state.roomId !== roomId) { return; }
+        markFailed(draft, err);
       });
+  }
+
+  /* 실패 — 말풍선을 **그 자리에 남기고** 사유와 재시도를 붙인다.
+     ⚠️ 입력칸으로 되돌리지 않는다. 글은 이미 저 말풍선 안에 있다 —
+     되돌리면 같은 글이 두 곳에 생긴다. */
+  function markFailed(draft, err) {
+    if (!pendings.has(draft.id)) { return; }
+    draft.pending = false;
+    draft.failed = true;
+    paintState(nodes.get(draft.id), draft);
+    status('전송 실패: ' + errText(err), true);
+  }
+
+  function retrySend(msg) {
+    if (!msg || !pendings.has(msg.id) || msg.pending) { return; }
+    msg.pending = true;
+    msg.failed = false;
+    paintState(nodes.get(msg.id), msg);
+    status('');
+    return postDraft(msg);
+  }
+
+  /* SSE 로 온 레코드가 내가 띄운 보류 항목인가. 봉투 ID 는 아직 모르므로
+     같은 이름·같은 본문의 **가장 먼저 보낸 것**과 짝짓는다. */
+  function matchPending(msg) {
+    var found = null;
+    pendings.forEach(function (item, id) {
+      if (found || item.failed) { return; }
+      if (item.author === msg.author && item.text === msg.text) { found = id; }
+    });
+    return found;
+  }
+
+  /* ⭐ 보류 항목을 **서버가 준 진짜 레코드로 갈아끼운다.**
+
+     노드를 다시 만들지 않는다 — 같은 DOM 노드에서 키(봉투 ID)만 바꿔 단다.
+     다시 만들면 `rebuiltInView` 가 올라가고, 그 값이 0 이라는 것이 이 앱의
+     불변식이다. */
+  function settlePending(tempId, msg) {
+    var pending = pendings.get(tempId);
+    if (!pending) {
+      /* 이미 정리됐다 (SSE 가 먼저 처리했다) — ID 중복 제거가 나머지를 맡는다. */
+      msg.mine = true;
+      if (appendMessage(msg)) { onNewRendered(true); }
+      return;
+    }
+    pendings['delete'](tempId);
+    var node = nodes.get(tempId) || null;
+    var at = items.indexOf(pending);
+    if (at >= 0) { items.splice(at, 1); }
+    state.seen['delete'](tempId);
+    delete known[tempId];
+    if (node) { nodes['delete'](tempId); }
+    var wasInView = lastWindow.has(tempId);
+    lastWindow['delete'](tempId);
+
+    if (state.seen.has(msg.id)) {
+      /* 진짜 레코드가 이미 화면에 있다 — 임시 노드만 걷어낸다. */
+      if (node && node.parentNode === el.messages) {
+        el.messages.removeChild(node);
+      }
+      syncVirtual();
+      return;
+    }
+    msg.mine = true;
+    msg.pending = false;
+    msg.failed = false;
+    if (node) {
+      node.dataset.id = msg.id;
+      node.setAttribute('data-id', msg.id);
+      nodes.set(msg.id, node);
+      if (wasInView) { lastWindow.add(msg.id); }
+      paintState(node, msg);
+    }
+    insertItem(msg);
+    syncVirtual();
   }
 
   /* ------------------------------------------------------------ 검색 */
@@ -1153,6 +1314,8 @@
     planNewRepo: planNewRepo,
     createNewRepo: createNewRepo,
     send: send,
+    retrySend: retrySend,
+    pendings: function () { return pendings; },
     runSearch: runSearch,
     addRoom: addRoom,
     connect: connect,

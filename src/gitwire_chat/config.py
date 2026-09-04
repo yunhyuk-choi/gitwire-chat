@@ -130,6 +130,33 @@ class Settings:
 
     page_limit: int = 50
     notifications: bool = True
+
+    credential_cache: float = 0.0
+    """git 자격증명 **메모리 캐시**의 수명(초). `0` = 끔 (기본값).
+
+    ⚠️ **옵트인이다.** 환경변수 `GITWIRE_CHAT_CREDENTIAL_CACHE` 로 켠다
+    (예: `900`).
+
+    무엇을 사나 — 이 앱이 관리하는 클론에서 원격을 볼 때(백그라운드 폴러)
+    git 이 왕복마다 OS 자격증명 관리자를 새 프로세스로 띄운다. 실측(이 머신 ·
+    GitHub private repo, 5회 중앙값) `ls-remote` **1320ms → 1167ms**. 즉
+    **왕복당 약 150~400ms**이고, 나머지 ~900ms 는 캐시로 지울 수 없는 고정비다
+    (HTTPS 왕복 3회 + 프로세스 기동).
+
+    무엇을 파나 — `git-credential-cache` 데몬이 자격증명을 **메모리에** 이
+    시간 동안 들고 있고, 그동안 같은 OS 사용자로 도는 프로세스가 소켓으로 꺼내
+    쓸 수 있다. 디스크에는 쓰지 않는다. 짧게 잡을수록 노출 창이 좁다.
+
+    무엇을 건드리지 않나 — **사용자의 global·system git 설정을 절대 고치지
+    않는다.** 이 앱이 만든 클론의 `.git/config` 에만 쓰고, 상속된 helper 는
+    사슬 뒤에 남겨 캐시가 비면 원래대로 동작한다 (gitwire README
+    「자격증명 조회 비용」).
+
+    ⭐ 그리고 이건 **사람이 기다리는 경로가 아니다.** 타임라인 조회는 원격을
+    아예 보지 않으므로(`rooms.RoomManager.page`), 이 설정이 줄이는 것은
+    백그라운드 폴러의 비용뿐이다. 기본값이 끔인 이유이기도 하다.
+    """
+
     extra: dict = field(default_factory=dict)
 
     @property
@@ -146,9 +173,24 @@ def default_author() -> str:
     return "익명"
 
 
+def _credential_cache_from_env() -> float:
+    """`GITWIRE_CHAT_CREDENTIAL_CACHE` (초). 없거나 이상하면 0(끔)."""
+    raw = (os.environ.get("GITWIRE_CHAT_CREDENTIAL_CACHE") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
 def load_settings(home: str | os.PathLike | None = None, **overrides) -> Settings:
     resolved = resolve_home(home)
-    settings = Settings(home=resolved, author=default_author())
+    settings = Settings(
+        home=resolved,
+        author=default_author(),
+        credential_cache=_credential_cache_from_env(),
+    )
     for key, value in overrides.items():
         if value is not None and hasattr(settings, key):
             setattr(settings, key, value)

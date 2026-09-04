@@ -733,6 +733,172 @@ await test('격하 안내는 일상적인 빈 status 로 지워지지 않는다'
     '격하 안내가 지워졌다 — ' + JSON.stringify(doc.getElementById('status').textContent));
 });
 
+/* ------------------------------------------------- 낙관적 전송 (즉시 렌더) */
+
+/* 응답을 **내가 원할 때** 주는 fetch 대역.
+   즉시 resolve 되는 대역으로는 "기다리는 동안"이 존재하지 않아 낙관적
+   업데이트를 아무것도 증명하지 못한다. */
+function deferredFetch(extra) {
+  const routes = Object.assign({ '/api/rooms': { rooms: [] } }, extra || {});
+  const waiting = [];
+  const fetch = function (path, init) {
+    const opts = init || {};
+    fetch.calls.push({ path, init: opts });
+    if (path.indexOf('/messages') >= 0 && opts.method === 'POST') {
+      return new Promise((resolve) => { waiting.push(resolve); });
+    }
+    const key = Object.keys(routes).find((k) => path.indexOf(k) === 0);
+    const body = key ? routes[key] : { error: 'stub 라우트 없음: ' + path };
+    return Promise.resolve({
+      ok: !!key, status: key ? 200 : 404, json: () => Promise.resolve(body)
+    });
+  };
+  fetch.calls = [];
+  fetch.waiting = waiting;
+  fetch.answer = function (body, code) {
+    const resolve = waiting.shift();
+    assert.ok(resolve, '기다리는 POST 가 없다');
+    resolve({ ok: code === undefined || code < 300, status: code || 201,
+      json: () => Promise.resolve(body) });
+    return settle();
+  };
+  return fetch;
+}
+
+/* 서브트리에서 클래스로 노드 찾기 (재시도 버튼처럼 안쪽에 있는 것들). */
+function findByClass(node, cls) {
+  for (const child of node.children) {
+    if (String(child.className).split(' ').indexOf(cls) >= 0) { return child; }
+    const found = findByClass(child, cls);
+    if (found) { return found; }
+  }
+  return null;
+}
+
+async function startSending(text) {
+  const booted = await boot();
+  const { doc, chat, context } = booted;
+  const list = doc.getElementById('messages');
+  const before = list.children.length;
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = text;
+  const sending = chat.send();
+  await settle();
+  return Object.assign(booted, {
+    list, before, sending, bubble: list.children[before]
+  });
+}
+
+await test('⭐ 낙관적 전송: 응답을 기다리지 않고 지금 뜬다', async () => {
+  const { doc, chat, list, before, bubble } = await startSending('지금 바로 떠야 한다');
+
+  // 서버는 아직 아무 말도 하지 않았다.
+  assert.equal(chat.pendings().size, 1);
+  assert.equal(list.children.length, before + 1);
+  assert.ok(bubble.textContent.includes('지금 바로 떠야 한다'));
+  assert.ok(String(bubble.className).includes('pending'), '보내는 중 표시가 없다');
+  assert.ok(bubble.textContent.includes('보내는 중'));
+  assert.equal(doc.getElementById('text').value, '', '입력칸이 비워지지 않았다');
+  assert.equal(chat.stats.innerHTML, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 성공 시 진짜 봉투 ID 로 갈아끼우되 노드를 다시 만들지 않는다', async () => {
+  const { chat, context, list, before, bubble, sending } =
+    await startSending('갈아끼울 말');
+  const createdBefore = chat.stats.created;
+
+  const real = msg(30, '갈아끼울 말', '기본이름');
+  await context.fetch.answer({ message: real });
+  await sending;
+
+  assert.equal(list.children.length, before + 1);
+  assert.equal(list.children[before], bubble, '노드가 교체됐다');
+  assert.equal(chat.stats.created, createdBefore, '노드를 새로 만들었다');
+  assert.equal(chat.stats.rebuiltInView, 0);          // ⭐ 불변식
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(bubble.getAttribute('data-id'), real.id);
+  assert.equal(String(bubble.className).includes('pending'), false);
+  assert.equal(bubble.textContent.includes('보내는 중'), false);
+  assert.equal(chat.pendings().size, 0);
+
+  // 모델은 여전히 시간순이고, 임시 ID 는 흔적도 없다.
+  const ids = chat.items().map((m) => m.id);
+  assert.deepEqual(ids, ids.slice().sort());
+  assert.equal(ids.filter((id) => id.indexOf('~') === 0).length, 0);
+  assert.equal(chat.state.oldest.indexOf('~'), -1, '임시 ID 가 페이징 커서가 됐다');
+});
+
+await test('⭐ 실패: 말풍선이 남고 "전송 실패" + 재시도가 붙는다 (입력 내용 안 잃음)', async () => {
+  const { doc, chat, context, list, before, bubble, sending } =
+    await startSending('실패할 말');
+
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+
+  assert.ok(String(bubble.className).includes('failed'));
+  assert.ok(bubble.textContent.includes('전송 실패'));
+  assert.ok(bubble.textContent.includes('재시도'));
+  // 글은 말풍선 안에 그대로 있다 — 입력칸으로 되돌리지 않는다(같은 글이 두 곳에
+  // 생기는 것을 막는다).
+  assert.ok(bubble.textContent.includes('실패할 말'));
+  assert.equal(doc.getElementById('text').value, '');
+  assert.equal(list.children.length, before + 1);
+  assert.ok(doc.getElementById('status').textContent.includes('전송 실패'));
+
+  // 재시도 — 사용자가 그 버튼을 누른다.
+  const createdBefore = chat.stats.created;
+  const button = findByClass(bubble, 'retry');
+  assert.ok(button, '재시도 버튼이 없다');
+  button.dispatch('click');
+  await settle();
+  assert.ok(String(bubble.className).includes('pending'), '다시 보내는 중이 아니다');
+
+  const real = msg(31, '실패할 말', '기본이름');
+  await context.fetch.answer({ message: real });
+  assert.equal(list.children[before], bubble, '재시도가 노드를 갈아치웠다');
+  assert.equal(chat.stats.created, createdBefore);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(chat.pendings().size, 0);
+});
+
+await test('⭐ SSE 가 응답보다 먼저 와도 같은 말이 두 번 뜨지 않는다', async () => {
+  const { chat, context, list, before, bubble, sending } =
+    await startSending('겹치는 말');
+  const createdBefore = chat.stats.created;
+  const real = msg(32, '겹치는 말', '기본이름');
+
+  // 서버 응답보다 폴링(SSE)이 먼저 도착하는 실제 순서.
+  StubEventSource.current.emit('message', real);
+  assert.equal(list.children.length, before + 1, '같은 말이 두 줄로 떴다');
+  assert.equal(list.children[before], bubble);
+  assert.equal(bubble.dataset.id, real.id);
+  assert.equal(chat.stats.created, createdBefore);
+
+  // 뒤늦게 온 응답도 아무것도 어지르지 않는다.
+  await context.fetch.answer({ message: real });
+  await sending;
+  assert.equal(list.children.length, before + 1);
+  assert.equal(list.children[before], bubble);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(chat.pendings().size, 0);
+  assert.equal(chat.items().filter((m) => m.text === '겹치는 말').length, 1);
+});
+
+await test('보류 중에 방을 바꾸면 그 방의 말이 새 방에 새지 않는다', async () => {
+  const { chat, context, list, sending } = await startSending('첫 방에서 쓴 말');
+  const real = msg(33, '첫 방에서 쓴 말', '기본이름');
+
+  await chat.switchRoom('r2');
+  assert.equal(chat.pendings().size, 0, '방을 바꿨는데 보류가 남았다');
+  const after = list.children.length;
+
+  await context.fetch.answer({ message: real });
+  await sending;
+  assert.equal(list.children.length, after, '다른 방 메시지가 새어 들어왔다');
+});
+
 /* -------------------------------------------------------------- 보고 */
 
 let failed = 0;

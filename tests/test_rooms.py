@@ -214,15 +214,16 @@ def test_페이징은_기반의_keyset_커서를_그대로_쓴다(manager, fake_
     calls = []
     original = channel.history_page
 
-    def spy(*, before=None, limit=50):
-        calls.append((before, limit))
-        return original(before=before, limit=limit)
+    def spy(*, before=None, limit=50, fresh=True):
+        calls.append((before, limit, fresh))
+        return original(before=before, limit=limit, fresh=fresh)
 
     channel.history_page = spy
     first = manager.timeline(room.id)
     second = manager.older(room.id, first.oldest)
 
-    assert calls == [(None, 5), (first.oldest, 3)]   # recent_limit=5, page_limit=3
+    # recent_limit=5, page_limit=3. fresh=False = 읽기는 원격을 보지 않는다.
+    assert calls == [(None, 5, False), (first.oldest, 3, False)]
     assert [m.text for m in second] == ["메시지 1", "메시지 2", "메시지 3"]
     # 전량 읽기(history(None))로 흘러가지 않았다.
     assert all(c[1] is not None for c in calls)

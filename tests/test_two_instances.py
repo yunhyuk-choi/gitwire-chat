@@ -241,6 +241,49 @@ def test_상대_메시지를_자기_에코로_오인하지_않는다(pair):
     assert b.notifier.sent and "앨리스: 나야" in b.notifier.sent[-1][1]
 
 
+def test_읽기에서_원격을_뗀_뒤에도_폴러가_새_메시지를_가져온다(pair, bare_repo):
+    """⭐ 조회는 로컬 클론만 읽는다 — 그럼 새 메시지는 누가 가져오나.
+
+    답은 **구독(폴러)** 이다. 그것을 증명하려면 다른 경로를 전부 막아야 한다:
+
+    * '지금 당기기'(`refresh_async`)를 **꺼 버린다** — 방을 열 때 도는 그 경로가
+      남아 있으면 폴러가 죽어 있어도 이 테스트가 통과해 버린다.
+    * 그리고 `poll_now()` 를 손으로 부르지 않는다.
+
+    남는 것은 백그라운드 구독 스레드 하나뿐이고, 그것만으로 A 의 말이 B 의
+    **로컬 읽기**에 나타나야 한다.
+    """
+    a, b, repo_url = pair
+    a.join(repo_url, "우리 방")
+    room_b = b.join(repo_url, "우리 방")
+
+    # 조회 경로가 정말 로컬만 읽는지 그 자리에서 기록한다 (기반 호출을 가로챈다).
+    channel = b.manager.channel(room_b)
+    original_page = channel.history_page
+    fresh_flags: list[bool] = []
+
+    def watched(*, before=None, limit=50, fresh=True):
+        fresh_flags.append(bool(fresh))
+        return original_page(before=before, limit=limit, fresh=fresh)
+
+    channel.history_page = watched
+    # '방을 열 때 한 번 당기기'를 막는다 — 폴러 말고는 아무것도 남기지 않는다.
+    b.manager.refresh_async = lambda room_id: None
+
+    b.manager.start()                     # 유일하게 남은 신선도 경로
+    assert b.timeline() == []
+    assert fresh_flags == [False], "조회가 원격을 봤다"
+
+    said = a.say("폴러야 이거 가져와")
+
+    got = _wait(lambda: [m for m in b.timeline() if m["id"] == said["id"]])
+    assert got, "폴러가 새 메시지를 가져오지 못했다"
+    assert got[0]["text"] == "폴러야 이거 가져와"
+    assert got[0]["author"] == "앨리스"
+    # 그동안 조회는 **한 번도** 원격을 보지 않았다.
+    assert fresh_flags == [False] * len(fresh_flags)
+
+
 def test_재시작해도_커서와_방_목록이_이어진다(tmp_path, bare_repo):
     """일회성/재기동 소비자여도 중복·유실이 없다 — gitwire 커서가 디스크에 있다."""
     first = Instance(tmp_path / "A" / "chats", "앨리스")

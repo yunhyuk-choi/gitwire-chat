@@ -68,6 +68,9 @@ class FakeChannel:
         self.subscribers: list = []
         self.closed = False
         self.skipped_to = 0
+        # 읽기가 원격을 봤는지(=fresh) 그대로 기록한다. 테스트가 이 값을 본다.
+        self.read_fresh: list[bool] = []
+        self.polls = 0
         self._cursor = 0
         self._clock = datetime(2026, 9, 3, 1, 0, 0, tzinfo=timezone.utc)
         self._n = 0
@@ -100,15 +103,19 @@ class FakeChannel:
         return record
 
     # -- 조회 ---------------------------------------------------------
-    def history(self, limit=None, *, before=None):
+    # ``fresh`` = 기반의 신선도 정책 (True 면 ls-remote 왕복, False 면 로컬만).
+    # 대역에서는 결과가 같지만 **무엇을 요청했는지**를 기록해 둔다.
+    def history(self, limit=None, *, before=None, fresh=True):
+        self.read_fresh.append(bool(fresh))
         with self._lock:
             items = list(self.records)
         if before is not None:
             items = [r for r in items if r.id < before]
         return items if limit is None else items[-limit:]
 
-    def history_page(self, *, before=None, limit=50):
+    def history_page(self, *, before=None, limit=50, fresh=True):
         """기반의 keyset 페이징. 한 건 더 세어 has_more 를 판정하는 것까지 같다."""
+        self.read_fresh.append(bool(fresh))
         with self._lock:
             items = list(self.records)
         if before is not None:
@@ -116,8 +123,8 @@ class FakeChannel:
         page = items[-limit:] if limit else items
         return gitwire.HistoryPage(list(page), len(items) > len(page))
 
-    def record_ids(self, *, before=None, limit=None):
-        return [r.id for r in self.history(limit, before=before)]
+    def record_ids(self, *, before=None, limit=None, fresh=True):
+        return [r.id for r in self.history(limit, before=before, fresh=fresh)]
 
     def fetch_new(self, limit=None, *, advance=True):
         with self._lock:
@@ -129,6 +136,7 @@ class FakeChannel:
             return list(items)
 
     def poll_once(self, callback, *, on_error=None):
+        self.polls += 1
         delivered = 0
         for record in self.fetch_new():
             callback(record)
