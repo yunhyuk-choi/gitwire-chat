@@ -36,4 +36,7 @@ gitwire_chat = ["templates/*.html", "static/*", "static/vendor/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-p no:cacheprovider"
+# `-ra` = 건너뛴 테스트의 **사유를 매 실행 요약에 찍는다.** 브라우저 연기 테스트는
+# 브라우저가 없는 환경에서 SKIP 되는데, 그것이 조용히 지나가면 "돌았다고 착각한
+# 검증"이 된다 — 이번 사고가 바로 그 계열이다.
+addopts = "-p no:cacheprovider -ra"

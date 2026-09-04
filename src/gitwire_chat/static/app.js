@@ -67,7 +67,9 @@
     loadingOlder: false, /* 위로 불러오는 중 — 중복 요청 차단 */
     loaded: false,       /* 지금 방의 타임라인을 실제로 받았나 */
     plan: null,          /* '레포 만들기' 계획 (서버가 계산해 준 것) */
-    booted: false
+    booted: false,
+    degraded: false,     /* 가상 스크롤 없이(전부 그리기) 도는 중인가 */
+    notice: ''           /* 사라지면 안 되는 안내 (상태줄이 비어도 다시 뜬다) */
   };
 
   /* 렌더 규율 검증용 카운터. 프로덕션 코드에도 남긴다 — 값이 싸고,
@@ -135,8 +137,22 @@
     });
   }
 
+  /* 예외를 사람이 읽는 한 줄로. (예외 객체·문자열·이벤트 무엇이 와도 된다.) */
+  function errText(err) {
+    if (!err) { return '알 수 없는 오류'; }
+    if (err.message) { return String(err.message); }
+    return String(err);
+  }
+
   function status(text, isError) {
     if (!el.status) { return; }
+    /* 격하 같은 '계속 보여야 하는 사실'은 일상적인 status('') 로 지워지지 않는다.
+       (지워지면 그 순간부터 다시 조용한 실패가 된다.) */
+    if (!text && state.notice) {
+      setText(el.status, state.notice);
+      el.status.className = 'status error';
+      return;
+    }
     setText(el.status, text || '');
     el.status.className = isError ? 'status error' : 'status';
   }
@@ -247,20 +263,104 @@
 
   function ensureVirtualizer() {
     if (virtualizer || !el.timeline) { return virtualizer; }
+    if (state.degraded) { return null; }
     if (!virtual || !virtual.Virtualizer) { return null; }
-    virtualizer = new virtual.Virtualizer(virtualOptions());
-    virtualizer._didMount();
-    virtualizer._willUpdate();
+    /* ⚠️ **생성자에서 터질 수 있다.** 실제로 그랬다 — 벤더 번들이 브라우저에 없는
+       Node 전역을 참조해 `new Virtualizer(...)` 가 ReferenceError 를 던졌다.
+       여기서 잡지 않으면 그 예외가 boot() 을 통째로 끊어 배선(wire)까지 못 간다.
+       '라이브러리가 있나'만 보는 방어가 무력했던 이유가 정확히 이것이다:
+       라이브러리는 **있었고**, 못 쓰는 것이었다. 있음이 아니라 **됨**을 본다. */
+    try {
+      virtualizer = new virtual.Virtualizer(virtualOptions());
+      virtualizer._didMount();
+      virtualizer._willUpdate();
+    } catch (err) {
+      virtualizer = null;
+      degrade('가상 스크롤 엔진을 시작하지 못했다 (' + errText(err) + ')');
+      return null;
+    }
     return virtualizer;
+  }
+
+  /* ⭐ 격하(degrade) — 가상 스크롤 없이 계속 간다.
+     판단 근거: 가상화는 "수천 건에서도 DOM 노드 수를 상수로" 만드는 **성능
+     최적화**이지 채팅의 전제가 아니다. 메시지를 읽고 쓰는 데 필요한 것은
+     모델과 노드뿐이다. 그것 하나가 실패했다고 앱 전체를 죽이면 사용자는 앱이
+     죽은 줄도 모른다(실측된 사고: 모든 버튼이 무반응, 서버 호출 0회).
+     느려질지언정 도는 편이 낫다 — 단, **조용히** 격하하지는 않는다. */
+  function degrade(reason) {
+    if (state.degraded) { return; }
+    state.degraded = true;
+    virtualizer = null;
+    state.notice = reason + ' · 가상 스크롤 없이(전부 그리기) 계속한다';
+    if (el.messages) {
+      /* 가상화 전용 배치(absolute + transform)를 끄는 스위치. style.css 참조. */
+      if (el.messages.classList) { el.messages.classList.add('plain'); }
+      if (el.messages.style) { el.messages.style.height = ''; }
+    }
+    status(state.notice, true);
+    renderPlain();
+  }
+
+  /* 전체 높이 — 가상화가 있으면 그 계산값, 없으면 실제 스크롤 높이. */
+  function totalHeight(v) {
+    if (v) { return v.getTotalSize(); }
+    return el.timeline ? el.timeline.scrollHeight : 0;
   }
 
   /* 모델이 바뀐 뒤 창을 다시 계산한다. */
   function syncVirtual() {
+    if (state.degraded) { renderPlain(); return; }
     var v = ensureVirtualizer();
     if (!v) { return; }
     v.setOptions(virtualOptions());
     v._willUpdate();
     renderWindow();
+  }
+
+  /* 격하 모드의 그리기 — 모델 전부를 순서대로 둔다.
+     규율은 가상화 때와 같다: 이미 있는 노드는 **다시 만들지 않고** 자리만 맞춘다
+     (그래서 `rebuiltInView` 는 여기서도 0 이어야 한다). */
+  function renderPlain() {
+    if (!el.messages) { return; }
+    if (rendering) { renderAgain = true; return; }
+    rendering = true;
+    try {
+      paintAll();
+    } finally {
+      rendering = false;
+    }
+    if (renderAgain) { renderAgain = false; renderPlain(); }
+  }
+
+  function paintAll() {
+    var keep = new Set();
+    var prev = null;
+    for (var i = 0; i < items.length; i++) {
+      var msg = items[i];
+      keep.add(msg.id);
+      var node = nodes.get(msg.id);
+      var fresh = !node;
+      if (fresh) {
+        node = buildMessage(msg);
+        nodes.set(msg.id, node);
+      }
+      node.setAttribute('data-index', String(i));
+      if (node.style) { node.style.transform = ''; }
+      var want = prev ? prev.nextSibling : el.messages.firstChild;
+      if (node !== want) {
+        el.messages.insertBefore(node, want);
+        if (fresh) { stats[want ? 'inserted' : 'appended'] += 1; }
+      }
+      prev = node;
+    }
+    nodes.forEach(function (node, id) {
+      if (keep.has(id)) { return; }
+      if (node.parentNode === el.messages) { el.messages.removeChild(node); }
+      nodes['delete'](id);
+      stats.recycled += 1;
+    });
+    lastWindow = keep;
   }
 
   /* ⭐ 창(window) 그리기 — 보이는 것만 DOM 에 둔다.
@@ -338,12 +438,12 @@
        DOM 에 없기 때문이다. 그 차이만큼 `scrollTop` 을 내린다.
        (CSS `overflow-anchor` 는 브라우저마다 달라 믿지 않고 꺼 둔다.) */
     var v = ensureVirtualizer();
-    var heightBefore = v ? v.getTotalSize() : 0;
+    var heightBefore = totalHeight(v);
     var topBefore = el.timeline ? el.timeline.scrollTop : 0;
     stats.prepended += added;
     syncVirtual();
-    if (el.timeline && v) {
-      var grew = v.getTotalSize() - heightBefore;
+    if (el.timeline) {
+      var grew = totalHeight(virtualizer) - heightBefore;
       el.timeline.scrollTop = topBefore + grew;
       stats.anchored += 1;
       stats.lastAnchor = grew;
@@ -980,18 +1080,32 @@
     on(global, 'beforeunload', function () { reportVisibility(false); });
   }
 
+  /* ⭐ 조용한 실패 금지 — 어디서 터지든 화면 아래 한 줄로 드러낸다.
+     이 앱을 쓰는 사람은 개발자 콘솔을 열지 않는다. 콘솔에만 남는 예외는
+     "아무 일도 안 일어나는 앱"과 구분되지 않는다 (이번 사고가 정확히 그랬다). */
+  function watchCrashes() {
+    on(global, 'error', function (e) {
+      state.notice = '화면 스크립트에서 오류가 났다 — ' + errText(e && (e.error || e.message || e));
+      status(state.notice, true);
+    });
+    on(global, 'unhandledrejection', function (e) {
+      state.notice = '처리되지 않은 오류가 났다 — ' + errText(e && e.reason);
+      status(state.notice, true);
+    });
+  }
+
   function boot() {
     if (state.booted) { return; }
     state.booted = true;
     virtual = global.TanStackVirtual || null;
     cache();
-    if (!virtual || !virtual.Virtualizer) {
-      /* 벤더링된 파일이라 정상 설치에서는 없을 수 없다. 없으면 조용히 다르게
-         동작하지 말고 분명히 말한다. */
-      status('가상 스크롤 라이브러리를 불러오지 못했다 (static/vendor 확인)', true);
-      return;
-    }
-    ensureVirtualizer();
+    watchCrashes();
+
+    /* ⭐ **배선이 먼저다.** 가상 스크롤은 성능 최적화지 채팅의 전제가 아니다.
+       예전에는 이 순서가 뒤집혀 있어서, 가상화 준비가 예외를 던지면 boot() 이
+       거기서 끊기고 wire() 에 도달하지 못했다 — 화면의 **모든 버튼이 죽고**
+       서버 호출이 한 번도 나가지 않았다. 배선을 앞에 두면 최악의 경우에도
+       "느린 채팅"이지 "죽은 앱"이 아니다. */
     state.client = uid();
     state.seen = new global.Set();
     var stored = null;
@@ -1001,11 +1115,20 @@
       (doc.body.getAttribute ? doc.body.getAttribute('data-default-author') : '') || '';
     if (el.author) { el.author.value = state.author; }
     wire();
+
+    /* 그다음에 가상화를 준비한다. 실패하면 격하될 뿐 부팅은 계속된다.
+       — 없음(라이브러리 자체가 안 옴)과 안 됨(와도 못 씀) 둘 다 여기서 걸린다. */
+    if (!virtual || !virtual.Virtualizer) {
+      degrade('가상 스크롤 라이브러리를 불러오지 못했다 (static/vendor 확인)');
+    } else {
+      ensureVirtualizer();
+    }
+
     return api('/api/rooms').then(function (data) {
       renderRooms(data.rooms || []);
       if (data.rooms && data.rooms.length) { return switchRoom(data.rooms[0].id); }
       status('');
-    })['catch'](function (err) { status(String(err.message || err), true); });
+    })['catch'](function (err) { status(errText(err), true); });
   }
 
   global.__chat = {
@@ -1016,6 +1139,8 @@
     nodes: function () { return nodes; },
     virtualizer: function () { return virtualizer; },
     renderWindow: renderWindow,
+    renderPlain: renderPlain,
+    degrade: degrade,
     syncVirtual: syncVirtual,
     appendMessage: appendMessage,
     prependMessages: prependMessages,

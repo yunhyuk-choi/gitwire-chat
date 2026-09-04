@@ -1,10 +1,13 @@
+/* @tanstack/virtual-core 3.17.8 (MIT) — npm 배포본 dist/esm/utils.js 벤더링본.
+   ⚠️ 상류 원본에서 딱 한 가지를 바꿨다 (번들러가 했을 치환을 미리 해 둔 것).
+   무엇을·왜 바꿨는지와 상류 갱신 절차는 같은 디렉토리의 VENDORING.md 에 있다. */
 function memo(getDeps, fn, opts) {
   let deps = opts.initialDeps ?? [];
   let result;
   let isInitial = true;
   function memoizedFunction() {
     var _a;
-    const debugEnabled = process.env.NODE_ENV !== "production" && !!opts.key && !!((_a = opts.debug) == null ? void 0 : _a.call(opts));
+    const debugEnabled = "production" !== "production" && !!opts.key && !!((_a = opts.debug) == null ? void 0 : _a.call(opts));
     let depTime = 0;
     if (debugEnabled) depTime = Date.now();
     const newDeps = getDeps();

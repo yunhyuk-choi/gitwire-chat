@@ -111,7 +111,8 @@ function boot(options) {
 
   const context = {
     document: doc,
-    TanStackVirtual: virtual,
+    /* 기본은 **진짜** 엔진. 격하 경로를 보는 테스트만 여기에 다른 것을 넣는다. */
+    TanStackVirtual: ('virtual' in opts) ? opts.virtual : virtual,
     fetch: fetchStub,
     EventSource: StubEventSource,
     IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
@@ -665,6 +666,71 @@ await test('레포 만들기(링크): 프리필 링크를 주고, 만들고 오�
   assert.equal(posted.length, 1);
   assert.equal(JSON.parse(posted[0].init.body).repo_url,
     'https://github.com/yunhyuk-choi/our-room.git');
+});
+
+/* ------------------------------------------- 가상화가 없거나 못 돌 때 */
+
+/* ⭐ 실제로 당한 사고의 축소판.
+   벤더 번들이 브라우저에 없는 Node 전역을 참조해 **`Virtualizer` 생성자에서**
+   터졌다. 모듈 평가는 성공했으므로 `window.TanStackVirtual` 은 멀쩡해 보였고,
+   "라이브러리가 없으면 알린다"는 방어는 그대로 통과했다. 그 예외가 boot() 을
+   끊어 `wire()` 에 도달하지 못했고 — 화면의 모든 버튼이 죽었다.
+   요구는 하나다: **가상화가 실패해도 채팅은 돌아야 한다.** */
+const brokenVirtual = Object.assign({}, virtual, {
+  Virtualizer: function () { throw new ReferenceError('process is not defined'); }
+});
+
+async function assertChatStillWorks(what, injected) {
+  const { doc, chat, context } = await boot({ virtual: injected });
+
+  /* 1. 배선이 살아 있다 — 이것이 '버튼이 죽었다'의 반대말이다. */
+  assert.ok(context.fetch.calls.some((c) => c.path === '/api/rooms'),
+    what + ': /api/rooms 를 부르지 않았다 = wire() 에 도달하지 못했다');
+  const addRoom = doc.getElementById('add-room');
+  const wasHidden = addRoom.hidden;
+  doc.getElementById('toggle-add').dispatch('click');   /* 사용자가 누른 그 ＋ */
+  assert.notEqual(addRoom.hidden, wasHidden,
+    what + ': ＋ 버튼에 핸들러가 안 붙었다 (이번 사고의 증상 그 자체)');
+
+  /* 2. 격하됐고, 그 사실이 **조용하지 않다.** */
+  assert.equal(chat.state.degraded, true, what + ': 격하되지 않았다');
+  const status = doc.getElementById('status');
+  assert.ok(status.textContent.indexOf('가상 스크롤 없이') >= 0,
+    what + ': 상태줄에 격하 사실이 안 남았다 — ' + JSON.stringify(status.textContent));
+  assert.ok(doc.getElementById('messages').classList.contains('plain'),
+    what + ': 타임라인이 격하 배치로 바뀌지 않았다 (메시지가 겹쳐 쌓인다)');
+
+  /* 3. 채팅이 실제로 그려진다 — 가상화가 아니라 전부 그리기로. */
+  const list = doc.getElementById('messages');
+  assert.equal(list.children.length, 3, what + ': 메시지가 안 그려졌다');
+  const before = list.children.slice();
+
+  StubEventSource.current.emit('message', msg(4));
+  assert.equal(list.children.length, 4, what + ': 새 메시지가 안 붙었다');
+  /* 4. 격하돼도 리렌더 규율은 그대로다 — 기존 노드는 같은 객체로 남는다. */
+  for (let i = 0; i < before.length; i++) {
+    assert.equal(list.children[i], before[i], what + ': ' + i + '번 노드가 교체됐다');
+  }
+  assert.equal(chat.stats.rebuiltInView, 0, what + ': 창 안 노드를 다시 만들었다');
+  assert.equal(chat.stats.innerHTML, 0);
+  return { doc, chat };
+}
+
+await test('⭐ 가상화 엔진이 못 돌아도(생성자 예외) 채팅은 계속된다 — 실사고 재현', async () => {
+  await assertChatStillWorks('생성자 예외', brokenVirtual);
+});
+
+await test('⭐ 가상화 라이브러리가 아예 없어도 채팅은 계속된다', async () => {
+  await assertChatStillWorks('라이브러리 없음', null);
+});
+
+await test('격하 안내는 일상적인 빈 status 로 지워지지 않는다', async () => {
+  const { doc, chat } = await boot({ virtual: null, rooms: [] });
+  /* 방이 0개면 boot 이 마지막에 status('') 로 상태줄을 비운다.
+     그때 격하 사실까지 지워지면 그 순간부터 다시 조용한 실패가 된다. */
+  assert.equal(chat.state.degraded, true);
+  assert.ok(doc.getElementById('status').textContent.indexOf('가상 스크롤 없이') >= 0,
+    '격하 안내가 지워졌다 — ' + JSON.stringify(doc.getElementById('status').textContent));
 });
 
 /* -------------------------------------------------------------- 보고 */
