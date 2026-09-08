@@ -39,6 +39,8 @@ import sys
 import threading
 from dataclasses import dataclass, field
 
+from . import winspawn
+
 log = logging.getLogger(__name__)
 
 #: 알림 합치기 창(초)
@@ -61,9 +63,8 @@ def _run(args: list[str], *, input_text: str | None = None) -> bool:
         kwargs["stdin"] = subprocess.DEVNULL
     else:
         kwargs["input"] = input_text.encode("utf-8")
-    if os.name == "nt":
-        # 콘솔 창이 깜빡이지 않게 한다.
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 콘솔 창이 깜빡이지 않게 한다 (Windows 전용 — `winspawn` 단일 원천).
+    kwargs.update(winspawn.quiet_kwargs())
     try:
         return subprocess.run(args, **kwargs).returncode == 0
     except BaseException as exc:  # noqa: BLE001

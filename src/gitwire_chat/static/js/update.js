@@ -138,6 +138,24 @@ export function createUpdate(env) {
     return hint ? ' (' + hint + ')' : '';
   }
 
+  /* 함께 쓰는 git 라이브러리(gitwire)가 밀렸으면 그것도 말해 준다.
+
+     ⚠️ 이게 없으면 "앱은 최신인데 갱신할 것이 있다"가 설명 없는 화면이 된다 —
+     앱 커밋이 그대로라 `installed → remote` 가 **같은 값**으로 보인다. 무엇이
+     왜 갱신되는지 사용자가 알아야 한다. 서버가 주는 `deps` 가 그 원천이다. */
+  function depsText(list) {
+    var out = [];
+    var i;
+    var dep;
+    for (i = 0; i < (list || []).length; i += 1) {
+      dep = list[i] || {};
+      if (dep.behind) {
+        out.push(dep.name + ' ' + short(dep.installed) + ' → ' + short(dep.remote));
+      }
+    }
+    return out.join(' · ');
+  }
+
   function render(data) {
     last = data || {};
     if (!last.behind) {
@@ -149,8 +167,17 @@ export function createUpdate(env) {
       return;
     }
     phase = 'asked';
-    say('새 버전이 있다 — ' + short(last.installed) + ' → ' + short(last.remote) +
-        '. 「지금 갱신」을 누르면 멈추고 · 갈아치우고 · 다시 뜬다. ' +
+    var deps = depsText(last.deps);
+    var head;
+    if (last.self_behind === false) {
+      /* 앱은 최신이고 라이브러리만 밀린 경우 — 커밋 두 개를 나란히 보여주면
+         같은 값이라 오히려 혼란스럽다. 무엇이 밀렸는지만 말한다. */
+      head = '앱은 최신이지만 함께 쓰는 라이브러리가 밀렸다';
+    } else {
+      head = '새 버전이 있다 — ' + short(last.installed) + ' → ' + short(last.remote);
+    }
+    if (deps) { head += ' (' + deps + ')'; }
+    say(head + '. 「지금 갱신」을 누르면 멈추고 · 갈아치우고 · 다시 뜬다. ' +
         '터미널에서 직접 하려면 아래 명령이다.', 'new');
     showCommand(commandText());
     showCompare(last.compare);
@@ -183,7 +210,11 @@ export function createUpdate(env) {
   function ask() {
     if (phase !== 'asked' || busy || !last) { return; }
     phase = 'confirm';
-    say('정말 갱신한다 — ' + short(last.installed) + ' → ' + short(last.remote) + '. ' +
+    var deps = depsText(last.deps);
+    var what = last.self_behind === false
+      ? '정말 갱신한다 — 함께 쓰는 라이브러리를 올린다'
+      : '정말 갱신한다 — ' + short(last.installed) + ' → ' + short(last.remote);
+    say(what + (deps ? ' (' + deps + ')' : '') + '. ' +
         '앱이 잠깐 멈추고 새 버전으로 다시 뜬다 (보통 수십 초). ' +
         '이 화면은 기다렸다가 알아서 새 화면으로 간다. 보내던 말이 있으면 먼저 끝내라.',
         'new');

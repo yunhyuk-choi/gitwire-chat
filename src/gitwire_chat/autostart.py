@@ -80,10 +80,12 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from xml.sax.saxutils import escape as _xml_escape
 
+from . import winspawn
 from .config import DEFAULT_PORT, os_data_dir
 
 #: 등록 파일 안에 넣는 표식. "이 파일은 우리가 만든 것인가"를 이걸로 판정한다.
@@ -192,17 +194,17 @@ def _quote_display(part: str) -> str:
 def _windows_python(explicit: str | None) -> tuple[str, bool]:
     """Windows 용 인터프리터 — 콘솔이 뜨지 않는 ``pythonw.exe`` 를 우선한다.
 
-    로그인마다 검은 콘솔 창이 뜨면 쓸 수 없는 기능이 된다. 다만 *있다고 가정하지
-    않는다* — 임베디드 배포판이나 일부 스토어 파이썬에는 없다. 실제로 파일을
-    확인하고, 없으면 ``python.exe`` 로 폴백하되 그 사실을 보고한다.
+    ⚠️ 판정은 `winspawn.console_free_python` 에 있다 — **콘솔 창 억제의 단일
+    원천**이다(갱신 쪽도 같은 모듈을 쓴다). 여기서 다시 구현하면 한쪽만 고쳐지고
+    다른 쪽이 창을 띄운다. 이 함수는 그 호출을 이 모듈의 이름으로 부르는 얇은
+    껍데기다.
+
+    시작 폴더의 ``.cmd`` 는 ``creationflags`` 를 줄 방법이 없어서 ``pythonw.exe``
+    가 유일한 수단이다. 그 대가는 "콘솔이 아예 없음"이라 이 앱이 부르는
+    ``git`` 이 자기 창을 띄운다는 것인데, 그건 git 을 부르는 쪽
+    (``gitwire`` 의 ``CREATE_NO_WINDOW``)에서 막는다 — `winspawn` 도크 참조.
     """
-    base = Path(explicit or sys.executable)
-    if base.name.lower() == "pythonw.exe":
-        return str(base), True
-    candidate = base.with_name("pythonw.exe")
-    if candidate.is_file():
-        return str(candidate), True
-    return str(base), False
+    return winspawn.console_free_python(explicit)
 
 
 def _preview_home(platform: str) -> str:
@@ -236,6 +238,31 @@ def default_log_path(platform: str, *, preview: bool = False) -> str:
     return str(os_data_dir("windows") / "logs" / LOG_NAME)
 
 
+def _interpreter(
+    platform: str, python: str | None, *, preview: bool
+) -> tuple[str, bool]:
+    """⭐ **이 앱을 백그라운드로 띄울 인터프리터** — 단일 원천.
+
+    자동 시작 등록도, 갱신 뒤 재기동도 여기서 나온 답을 쓴다
+    (`background_command` → `start_app`). 이 판정이 두 곳에 있으면 한쪽만
+    고쳐지고 다른 쪽이 콘솔 창을 띄운다 — 실측된 그 고장이다.
+    """
+    if python:
+        return _windows_python(python) if platform == "windows" else (python, True)
+    if preview:
+        # 다른 OS 미리보기 — 그 머신의 인터프리터를 알 수 없으므로 관례적인
+        # 자리를 채운다. 실제 등록은 그 머신에서 하며, 그때 sys.executable 이 박힌다.
+        if platform == "windows":
+            return (
+                rf"{_preview_home('windows')}\AppData\Local\Programs\Python\Python312\pythonw.exe",
+                True,
+            )
+        return "/usr/bin/python3", True
+    if platform == "windows":
+        return _windows_python(None)
+    return sys.executable, True
+
+
 def build_spec(
     platform: str,
     options: ServeOptions | None = None,
@@ -248,22 +275,7 @@ def build_spec(
         raise ValueError(f"알 수 없는 대상 OS: {platform}")
     options = options or ServeOptions()
     preview = platform != host_platform()
-    console_free = True
-    if python:
-        executable = python
-        if platform == "windows":
-            executable, console_free = _windows_python(python)
-    elif preview:
-        # 다른 OS 미리보기 — 그 머신의 인터프리터를 알 수 없으므로 관례적인
-        # 자리를 채운다. 실제 등록은 그 머신에서 하며, 그때 sys.executable 이 박힌다.
-        if platform == "windows":
-            executable = rf"{_preview_home('windows')}\AppData\Local\Programs\Python\Python312\pythonw.exe"
-        else:
-            executable = "/usr/bin/python3"
-    elif platform == "windows":
-        executable, console_free = _windows_python(None)
-    else:
-        executable = sys.executable
+    executable, console_free = _interpreter(platform, python, preview=preview)
     return LaunchSpec(
         platform=platform,
         executable=executable,
@@ -272,6 +284,24 @@ def build_spec(
         console_free=console_free,
         preview=preview,
     )
+
+
+def background_command(
+    args: Sequence[str], *, python: str | None = None
+) -> tuple[list[str], bool]:
+    """⭐ **지금 이 OS 에서** 이 앱을 백그라운드로 띄우는 명령 — 단일 원천.
+
+    ``(명령, 콘솔_없는_인터프리터인가)``. 자동 시작 등록 파일에 박히는 명령과
+    **같은 계산**을 쓴다 (`_interpreter`) — 그래서 "로그인할 때 뜨는 방식"과
+    "갱신 뒤 다시 뜨는 방식"이 어긋날 수 없다.
+
+    ⚠️ 콘솔 스크립트(``gitwire-chat.exe``)로 부르지 않는다 — Windows 에서 pip 가
+    그 파일을 갈아치우려 할 때 실행 중이면 잠긴다.
+    """
+    executable, console_free = _interpreter(
+        host_platform(), python, preview=False
+    )
+    return [executable, "-m", "gitwire_chat", *args], console_free
 
 
 # ------------------------------------------------------------------ 렌더링
@@ -886,3 +916,137 @@ def make_backend(
     """대상 OS 의 백엔드 하나를 만든다."""
     spec = build_spec(platform, options, python=python, log_path=log_path)
     return BACKENDS[platform](spec, directory)
+
+
+# ==================================================== ⭐ 지금 띄우기 (단일 원천)
+#
+# "이 앱을 백그라운드로 어떻게 띄우나"의 **단 하나의** 답이 여기 있다.
+#
+# 왜 여기인가: 이 모듈이 이미 그 지식을 갖고 있다 — OS 별 수단(Windows
+# ``pythonw.exe`` · macOS LaunchAgent · Linux systemd), 인터프리터 탐색과 폴백
+# (`_interpreter`), 그리고 "감독자가 이 인스턴스를 소유하나"(`Backend.supervises`
+# · `registered_port`). 갱신(`updater.py`)은 예전에 **자기만의 기동 방식**
+# (``DETACHED_PROCESS`` + ``python.exe``)을 새로 만들었고, 그래서 로그인할 때
+# 뜨는 앱과 갱신 뒤 뜨는 앱이 **다른 방식으로** 떴다 — 창이 뜬 원인이 그
+# 중복이었다. 지금은 갱신이 `start_app` 을 **호출만** 한다.
+
+
+@dataclass(frozen=True)
+class Started:
+    """`start_app` 한 번의 결과 — 무엇으로 어떻게 띄웠나."""
+
+    ok: bool
+    command: tuple[str, ...] = ()
+    console_free: bool = True
+    via: str = ""
+    """``"감독자:<라벨>"`` 또는 ``"직접"``. 보고·테스트가 이걸로 경로를 가른다."""
+
+    error: str = ""
+
+
+def supervisor_for(port: int | None) -> Backend | None:
+    """이 포트의 인스턴스를 **감독자가 띄웠나.** 그렇다면 그 백엔드.
+
+    판정: (1) 이 OS 의 자동 시작 수단이 죽은 프로세스를 되살리는 종류이고
+    (2) 실제로 등록돼 있고 (3) 등록된 포트가 이 인스턴스의 포트와 같다.
+
+    되살리는 수단(macOS ``KeepAlive`` · systemd) 아래에서 직접 띄우면 감독자와
+    경합한다 — 그래서 그런 경우 기동을 감독자에게 넘긴다. 이 판정도 기동
+    방식의 일부이므로 **여기 한 곳에만** 있다 (예전에는 `updater._supervisor`
+    가 같은 판정을 따로 갖고 있었다).
+    """
+    if port is None:
+        return None
+    try:
+        backend = make_backend(host_platform())
+    except Exception:  # noqa: BLE001 — 낯선 플랫폼
+        return None
+    if not backend.supervises:
+        return None
+    if backend.registered_port() != port:
+        return None
+    return backend
+
+
+def start_app(
+    args: Sequence[str],
+    *,
+    python: str | None = None,
+    port: int | None = None,
+    log_path: str | os.PathLike | None = None,
+    cwd: str | os.PathLike | None = None,
+    env: Mapping[str, str] | None = None,
+    say: Callable[[str], None] | None = None,
+) -> Started:
+    """⭐ 이 앱을 **지금** 백그라운드로 띄운다 — 자동 시작과 같은 방식으로.
+
+    순서가 규율 그 자체다:
+
+    1. **감독자가 이 포트를 소유하면 감독자에게 맡긴다** (`supervisor_for`).
+       옵션 보존도 공짜로 얻는다 — 등록 파일에 박힌 값이 그대로 쓰인다.
+    2. 아니면 **직접** 띄운다: 등록 파일에 박히는 것과 같은 명령
+       (`background_command`)으로, 콘솔 창을 만들지 않고(`winspawn`), 출력을
+       로그 파일로 돌린다.
+
+    ⚠️ **출력을 버리지 않는다.** 백그라운드 프로세스는 실패해도 화면에 아무것도
+    남기지 않는다 — 로그 파일이 유일한 단서다. 파일을 열 수 없으면 그 사실을
+    말하고(조용한 실패 금지) ``DEVNULL`` 로 진행한다.
+    """
+    def tell(text: str) -> None:
+        if say is not None:
+            say(text)
+
+    supervisor = supervisor_for(port)
+    if supervisor is not None:
+        tell(f"  감독자({supervisor.label})에게 띄우라고 한다")
+        proxy = Report()
+        ok = supervisor.start_service(proxy)
+        for line in proxy.lines:
+            tell(line)
+        if ok:
+            return Started(ok=True, via=f"감독자:{supervisor.label}")
+        tell("  ⚠ 감독자가 띄우지 못했다 — 직접 띄운다")
+
+    command, console_free = background_command(args, python=python)
+    handle = None
+    if log_path is not None:
+        try:
+            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+            handle = open(
+                log_path, "a", encoding="utf-8", errors="replace", newline="\n"
+            )
+        except OSError as exc:
+            tell(f"    ⚠ 로그 파일을 열지 못했다 ({exc}) — 출력을 버리고 띄운다")
+            handle = None
+    if not console_free and host_platform() == "windows":
+        # 한 겹이 없다는 사실을 숨기지 않는다. 그래도 창은 뜨지 않는다 —
+        # `winspawn.detached_kwargs` 의 CREATE_NO_WINDOW 가 받쳐 준다.
+        tell("    ⚠ pythonw.exe 를 찾지 못했다 — python.exe 로 띄운다")
+
+    child_env = dict(os.environ)
+    child_env["PYTHONUNBUFFERED"] = "1"
+    child_env.update(env or {})
+    try:
+        subprocess.Popen(  # noqa: S603 — 명령은 우리가 만든 것이다
+            command,
+            stdout=handle or subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if handle else subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=str(cwd) if cwd else None,
+            env=child_env,
+            **winspawn.detached_kwargs(),
+        )
+    except OSError as exc:
+        return Started(
+            ok=False,
+            command=tuple(command),
+            console_free=console_free,
+            via="직접",
+            error=str(exc),
+        )
+    finally:
+        if handle is not None:
+            handle.close()
+    return Started(
+        ok=True, command=tuple(command), console_free=console_free, via="직접"
+    )

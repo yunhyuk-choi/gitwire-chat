@@ -56,13 +56,12 @@ import json
 import logging
 import os
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import runstate
+from . import runstate, winspawn
 
 log = logging.getLogger(__name__)
 
@@ -178,7 +177,12 @@ class Launcher:
     ) -> None:
         self._home = Path(home)
         self._directory = directory
-        self._python = python or sys.executable
+        #: ⚠️ **콘솔 서브시스템 인터프리터**(``python.exe``)를 고른다 — 이 서버가
+        #: ``pythonw.exe`` 로 떠 있어도(자동 시작 경로가 그렇다) 갱신 CLI 는
+        #: ``python.exe`` 로 띄운다. ``pythonw`` 는 콘솔을 *아예* 갖지 않아서
+        #: 그것이 부르는 ``git``·``pip`` 가 **각자 창을 띄운다.** 창 없는 콘솔을
+        #: 갖고 손자에게 물려주는 쪽이 조용하다 — `winspawn` 도크.
+        self._python, self._console_python = winspawn.hidden_console_python(python)
         #: 갱신 CLI 에 덧붙일 인자. 테스트가 ``--dry-run`` 을 넣어 **실제 프로세스
         #: 왕복**(띄움·로그·자물쇠 해제)을 pip 없이 검증한다.
         self._extra = tuple(extra_args)
@@ -345,6 +349,13 @@ class Launcher:
         우리를 죽일 프로세스가 우리와 함께 죽으면 갱신이 반쪽에서 멈춘다. 그래서
         프로세스 그룹·세션을 떼고, 출력은 파일로 돌린다(버리면 "왜 안 됐나"가
         사라진다 — `updater.start_instance` 와 같은 이유).
+
+        ⚠️ **창 억제는 `winspawn.detached_kwargs` 단일 원천을 쓴다.** 예전에는
+        여기서 ``DETACHED_PROCESS`` 를 직접 줬는데, 그건 "창을 안 띄운다"가
+        아니라 "콘솔을 아예 주지 않는다"는 뜻이어서 **갱신 CLI 가 부르는
+        ``git``·``pip`` 가 각자 빈 창을 띄웠다.** 실사용에서 사용자가 그 창을
+        닫았고 앱이 함께 죽었다. 지금은 창 없는 콘솔을 주고, 손자들이 그것을
+        물려받는다.
         """
         handle = None
         try:
@@ -354,6 +365,12 @@ class Launcher:
             )
             handle.write(f"\n{RUN_MARK} {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             handle.write(f"{' '.join(argv)}\n")
+            if not self._console_python:
+                # 창 억제의 한 겹이 없다 — 숨기지 않는다. 갱신 자체는 진행한다.
+                handle.write(
+                    "⚠ python.exe 를 찾지 못해 pythonw.exe 로 띄운다 — 갱신이 부르는 "
+                    "git·pip 이 빈 콘솔 창을 띄울 수 있다.\n"
+                )
             handle.flush()
         except OSError as exc:
             log.warning("갱신 기록 파일을 열지 못했다 (%s) — 출력을 버리고 띄운다", exc)
@@ -361,14 +378,7 @@ class Launcher:
                 handle.close()
             handle = None
 
-        kwargs: dict = {}
-        if os.name == "nt":
-            kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            )
-        else:
-            kwargs["start_new_session"] = True
+        kwargs = winspawn.detached_kwargs()
 
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
