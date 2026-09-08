@@ -327,6 +327,11 @@ html, body {
 .update-note { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .update-note.new { color: var(--ink); font-weight: 600; }
 .update-note.bad { color: var(--danger); }
+/* 갱신 버튼 자리. 상태에 따라 안의 버튼이 갈린다 — 「지금 갱신」 / 「갱신한다」·
+   「취소」 / 갱신 중에는 아무것도 없음. 숨은 버튼은 자리를 차지하지 않으므로
+   전부 숨으면 이 줄의 높이가 0 이 된다. */
+.update-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.update-actions button[hidden] { display: none; }
 .update-cmd {
   /* 명령은 사람이 그대로 골라 복사한다 — 고정폭이면 오타를 눈으로 잡는다.
      `user-select: all` 로 한 번 클릭에 전체가 잡힌다(복사 버튼이 없는 환경 대비). */

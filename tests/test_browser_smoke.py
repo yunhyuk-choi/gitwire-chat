@@ -106,14 +106,28 @@ class RecordingServer:
 
     def __init__(self, app) -> None:
         self.paths: list[str] = []
+        #: 메서드·쿼리·응답 코드까지 남긴 기록. 드라이브바이 방어를 재려면
+        #: "왔나"가 아니라 **무슨 메서드로 와서 몇 번으로 끝났나**가 필요하다.
+        self.calls: list[dict] = []
         self._app = app
         self._server = make_server("127.0.0.1", 0, self._wsgi, threaded=True)
         self.port = self._server.server_port
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     def _wsgi(self, environ, start_response):
-        self.paths.append(environ.get("PATH_INFO", ""))
-        return self._app(environ, start_response)
+        path = environ.get("PATH_INFO", "")
+        method = environ.get("REQUEST_METHOD", "")
+        query = environ.get("QUERY_STRING", "")
+        self.paths.append(path)
+
+        def record(status, headers, exc_info=None):
+            self.calls.append({
+                "method": method, "path": path, "query": query,
+                "status": int(str(status).split()[0]),
+            })
+            return start_response(status, headers, exc_info)
+
+        return self._app(environ, record)
 
     @property
     def url(self) -> str:
@@ -770,3 +784,266 @@ def test_같은_버전으로_재배포해도_브라우저가_새_파일을_받�
     )
     # 셸은 매번 새로 받는다 — 그 안에 새 도장이 들어 있어야 하니까.
     assert "/" in served_copy.paths
+
+
+# ------------------------- ⭐ 드라이브바이 방어 (진짜 브라우저로 두들긴다)
+#
+# 이 절이 존재하는 이유는 한 문장이다 — **예전 판단을 뒤집었기 때문이다.**
+# 한때 "누르면 앱을 죽이고 갈아치우는 엔드포인트는 아무 웹페이지의 폼 전송
+# 하나로 트리거되고 막을 수단이 없다"고 보고 그 엔드포인트를 두지 않았다.
+# 뒤집은 근거(커스텀 헤더 + `Sec-Fetch-Site` + `Origin`)는 논리일 뿐이라,
+# **실제로 막히는지 브라우저로 두들겨서** 남긴다.
+#
+# `tests/test_updater.py` 의 헤더 단위 테스트와 서로를 대체하지 않는다:
+# 거기서는 *우리 문이 무엇을 거절하나*를 보고, 여기서는 *브라우저가 실제로
+# 무엇을 보내나*를 본다. 후자가 없으면 "폼은 헤더를 못 붙인다" 같은 문장이
+# 검증되지 않은 가정으로 남는다.
+
+#: 공격자 페이지. **다른 오리진**에서 서빙되고 네 가지로 두들긴다.
+ATTACK_PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<title>드라이브바이</title></head><body>
+<!-- (a) 숨은 폼 자동 전송. 응답을 읽을 필요도 없다 — 예전 판단이 두려워한 바로
+     그 모양이다. 폼은 **커스텀 헤더를 붙일 수 없다.** -->
+<form id="f" method="POST" action="%(target)s/api/update/run?probe=a-form" target="sink"></form>
+<iframe name="sink" style="display:none"></iframe>
+<pre id="out"></pre>
+<script>
+var target = '%(target)s';
+var log = {};
+function done(name, text) {
+  log[name] = text;
+  document.getElementById('out').textContent = JSON.stringify(log);
+}
+
+try { document.getElementById('f').submit(); done('a_form', 'sent'); }
+catch (e) { done('a_form', 'throw: ' + e); }
+
+/* (b) 커스텀 헤더를 붙인 fetch — 그러면 단순 요청이 아니게 되어 브라우저가
+   preflight 를 먼저 보낸다. 우리는 CORS 를 켜지 않으므로 본 요청이 안 나간다. */
+fetch(target + '/api/update/run?probe=b-header', {
+  method: 'POST', mode: 'cors', headers: { 'X-Gitwire-Chat': 'update' }
+}).then(function (r) { done('b_header', 'reached: ' + r.status); },
+        function (e) { done('b_header', 'blocked: ' + e.name); });
+
+/* (c) 헤더 없는 단순 요청 — 나가긴 한다. 서버가 거절해야 한다. */
+fetch(target + '/api/update/run?probe=c-simple', { method: 'POST', mode: 'cors' })
+  .then(function (r) { done('c_simple', 'reached: ' + r.status); },
+        function (e) { done('c_simple', 'blocked: ' + e.name); });
+
+/* (d) 응답을 아예 안 읽는 fire-and-forget. 응답을 못 읽어도 **효과**만 나면
+   공격은 성공이다 — 그래서 이 모양을 따로 본다. */
+fetch(target + '/api/update/run?probe=d-nocors', { method: 'POST', mode: 'no-cors' })
+  .then(function () { done('d_nocors', 'sent'); },
+        function (e) { done('d_nocors', 'blocked: ' + e.name); });
+</script></body></html>"""
+
+#: 우리 앱과 **같은 오리진**에서 도는 페이지. 정상 경로가 통과하는지 본다.
+#: (앱의 실제 화면은 확인 → 확인받기 → 실행이라 브라우저 한 번으로 몰기 어렵다.
+#:  여기서는 `update.js` 가 보내는 그 요청 모양만 그대로 흉내 낸다.)
+SAME_ORIGIN_PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<title>정상 경로</title></head><body><pre id="out"></pre>
+<script>
+var log = {};
+function done(name, text) {
+  log[name] = text;
+  document.getElementById('out').textContent = JSON.stringify(log);
+}
+/* (e) 우리 화면이 실제로 보내는 그대로 — 통과해야 한다. */
+fetch('/api/update/run?probe=e-ui', {
+  method: 'POST', headers: { 'X-Gitwire-Chat': 'update' }
+}).then(function (r) { done('e_ui', 'reached: ' + r.status); },
+        function (e) { done('e_ui', 'blocked: ' + e.name); });
+/* (f) 같은 출처인데 **헤더만** 뺐다 — 그 헤더가 실제로 문을 지키나. */
+fetch('/api/update/run?probe=f-noheader', { method: 'POST' })
+  .then(function (r) { done('f_noheader', 'reached: ' + r.status); },
+        function (e) { done('f_noheader', 'blocked: ' + e.name); });
+</script></body></html>"""
+
+
+class RecordingLauncher:
+    """`updaterun.Launcher` 자리에 끼우는 기록기 — **아무것도 띄우지 않는다.**
+
+    이 테스트에서 진짜 갱신이 돌면 브라우저 연기 테스트가 사용자 환경을 바꾼다.
+    그리고 "몇 번 띄웠나" 가 이 절의 가장 강한 증거다: 거절이 사유만 다르게
+    말하고 실행은 됐다면 여기 숫자가 올라간다.
+    """
+
+    def __init__(self, home: Path) -> None:
+        self.home = Path(home)
+        self.launches = 0
+
+    def launch(self):
+        from gitwire_chat import updaterun
+
+        self.launches += 1
+        return updaterun.Run(
+            launcher_pid=os.getpid(),
+            started_at=0.0,
+            log=str(self.home / updaterun.LOG_NAME),
+            pid=999999,
+        )
+
+
+class PageServer:
+    """HTML 한 장만 주는 서버. **다른 오리진**을 만드는 데 쓴다."""
+
+    def __init__(self, body: str) -> None:
+        self._body = body.encode("utf-8")
+        self._server = make_server("127.0.0.1", 0, self._wsgi, threaded=True)
+        self.port = self._server.server_port
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def _wsgi(self, environ, start_response):
+        start_response("200 OK", [("Content-Type", "text/html; charset=utf-8")])
+        return [self._body]
+
+    @property
+    def url(self) -> str:
+        # ⚠️ 앱은 `127.0.0.1` 로 열고 이 페이지는 `localhost` 로 연다 —
+        # 호스트가 다르므로 브라우저에게 **cross-site** 다 (포트만 다르면
+        # same-site 로 잡혀서 `Sec-Fetch-Site` 값이 약해진다).
+        return f"http://localhost:{self.port}/"
+
+    def __enter__(self) -> "PageServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=10)
+        self._server.server_close()
+
+
+@pytest.fixture
+def guarded(tmp_path, monkeypatch):
+    """갱신 실행 엔드포인트를 브라우저로 두들겨 볼 준비 한 벌.
+
+    갱신은 **띄우지 않고**(실행기를 기록기로 갈아끼운다) 원격도 **보지 않는다**
+    ("새 것이 있다"를 고정한다). 즉 이 테스트가 보는 것은 오직 **문**이다.
+    """
+    from gitwire_chat import updater
+
+    monkeypatch.setattr(
+        updater,
+        "_direct_url",
+        lambda: {
+            "url": "https://example.invalid/gitwire-chat.git",
+            "vcs_info": {"vcs": "git", "commit_id": "a" * 40},
+        },
+    )
+    monkeypatch.setattr(updater, "remote_commit", lambda url, ref="HEAD": "b" * 40)
+
+    settings = Settings(
+        home=tmp_path / "chats", author="문지기테스트", poll_interval=0.5,
+        notifications=False,
+    )
+    app = create_app(settings)
+    launcher = RecordingLauncher(tmp_path / "chats")
+    app.extensions["gitwire_chat_update"] = launcher
+
+    def page(name: str):
+        from flask import Response
+
+        return Response(SAME_ORIGIN_PAGE, mimetype="text/html")
+
+    app.add_url_rule("/__test__/samesite/<name>", "test_samesite", page)
+    try:
+        with RecordingServer(app) as server:
+            server.launcher = launcher
+            yield server
+    finally:
+        app.extensions["gitwire_chat"].stop()
+
+
+def update_posts(calls, probe: str) -> list[dict]:
+    return [
+        c for c in calls
+        if c["method"] == "POST" and c["path"] == "/api/update/run" and probe in c["query"]
+    ]
+
+
+def update_options(calls, probe: str) -> list[dict]:
+    return [
+        c for c in calls
+        if c["method"] == "OPTIONS" and c["path"] == "/api/update/run" and probe in c["query"]
+    ]
+
+
+@needs_browser
+def test_다른_페이지는_갱신을_시작시킬_수_없고_우리_화면은_통과한다(guarded, tmp_path):
+    """⭐ 예전 판단을 뒤집은 근거를 **실증**한다.
+
+    두 번 연다:
+
+      ① 다른 오리진(`localhost:B`)의 공격 페이지 → 네 가지로 두들긴다.
+         숨은 폼 · 커스텀 헤더 fetch · 헤더 없는 단순 요청 · no-cors.
+      ② 같은 오리진(`127.0.0.1:A`)의 페이지 → 우리 화면이 보내는 모양 하나와
+         **헤더만 뺀** 모양 하나.
+
+    판정 기준 셋:
+      · 다른 오리진에서 온 POST 는 하나도 통과하지 못한다 (전부 403).
+      · 커스텀 헤더를 붙인 크로스 오리진 요청은 **POST 자체가 도달하지 못한다**
+        (preflight 에서 죽는다) — 커스텀 헤더 요구가 실제로 문이라는 증거.
+      · 갱신은 **딱 한 번** 시작된다 — 같은 오리진 + 헤더가 있는 그 하나.
+    """
+    target = f"http://127.0.0.1:{guarded.port}"
+
+    # --- ① 다른 오리진에서 두들긴다 -----------------------------------
+    with PageServer(ATTACK_PAGE % {"target": target}) as attacker:
+        dom, console = open_headless(attacker.url, tmp_path / "profile-evil")
+    attack_calls = list(guarded.calls)
+    table = "\n".join(
+        f"  {c['method']:>7} {c['path']}?{c['query']} → {c['status']}"
+        for c in attack_calls if c["path"] == "/api/update/run"
+    )
+    print("공격 페이지가 만든 요청:\n" + (table or "  (없음)"))
+    print("공격 페이지가 본 결과: " + (re.search(r"<pre id=\"out\">(.*?)</pre>", dom, re.S).group(1) if "id=\"out\"" in dom else "?"))
+
+    reached = [c for c in attack_calls if c["path"] == "/api/update/run" and c["status"] != 403]
+    assert not [c for c in reached if c["method"] == "POST"], (
+        "다른 오리진의 POST 가 문을 통과했다:\n" + table
+    )
+    assert guarded.launcher.launches == 0, "다른 페이지가 갱신을 시작시켰다"
+    assert not uncaught_lines(console), console[-2000:]
+
+    # ⭐ 커스텀 헤더를 붙이려 하면 본 요청이 **나가지도 못한다.**
+    assert not update_posts(attack_calls, "b-header"), (
+        "커스텀 헤더를 붙인 크로스 오리진 POST 가 서버까지 왔다 = preflight 가 안 막았다:\n"
+        + table
+    )
+    assert update_options(attack_calls, "b-header"), (
+        "preflight(OPTIONS)도 안 왔다 — 이 브라우저가 무엇을 했는지 확인해야 한다:\n"
+        + table
+    )
+
+    # 숨은 폼 전송은 서버까지 오고, 거기서 403 으로 죽는다.
+    form_posts = update_posts(attack_calls, "a-form")
+    assert form_posts, "폼 전송이 서버에 도달하지 않았다 (브라우저 동작 확인 필요):\n" + table
+    assert all(c["status"] == 403 for c in form_posts), table
+
+    # --- ② 같은 오리진 = 우리 화면 -------------------------------------
+    guarded.calls.clear()
+    dom2, console2 = open_headless(
+        f"{guarded.url}__test__/samesite/x", tmp_path / "profile-ui"
+    )
+    ui_calls = list(guarded.calls)
+    ui_table = "\n".join(
+        f"  {c['method']:>7} {c['path']}?{c['query']} → {c['status']}"
+        for c in ui_calls if c["path"] == "/api/update/run"
+    )
+    print("같은 오리진 페이지가 만든 요청:\n" + (ui_table or "  (없음)"))
+    assert not uncaught_lines(console2), console2[-2000:]
+
+    ok = update_posts(ui_calls, "e-ui")
+    assert ok, "우리 화면 모양의 요청이 서버에 도달하지 않았다:\n" + ui_table
+    assert all(c["status"] == 202 for c in ok), (
+        "⚠️ 방어가 정상 사용을 막았다 — 그것도 실패다:\n" + ui_table
+    )
+
+    # 같은 출처인데 헤더만 빼면 막힌다 = 그 헤더가 실제로 문이다.
+    bare = update_posts(ui_calls, "f-noheader")
+    assert bare and all(c["status"] == 403 for c in bare), ui_table
+
+    assert guarded.launcher.launches == 1, (
+        f"갱신이 {guarded.launcher.launches} 번 시작됐다 (정상 경로 하나만이어야 한다)"
+    )

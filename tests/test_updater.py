@@ -669,6 +669,20 @@ def test_Sec_Fetch_를_안_보내는_클라이언트도_통과한다():
     ) == ""
 
 
+def test_화면과_서버가_같은_헤더를_쓴다():
+    """두 곳이 어긋나면 "버튼이 403 만 받는다"는 사고가 된다.
+
+    파이썬과 JS 가 같은 상수를 공유할 수는 없으니 문자열이 같은지를 **기계로**
+    확인한다 — 테마 키를 템플릿↔모듈 사이에서 맞춰 보는 `test_theme.py` 와
+    같은 종류의 계약 검사다.
+    """
+    js = (ROOT / "src" / "gitwire_chat" / "static" / "js" / "update.js").read_text(
+        encoding="utf-8"
+    )
+    assert f"'{csrf.HEADER}'" in js, "update.js 가 다른 헤더 이름을 쓴다"
+    assert f"'{csrf.HEADER_VALUE}'" in js, "update.js 가 다른 헤더 값을 쓴다"
+
+
 # =================================== ⭐ 누르면 갱신이 시작된다 (엔드포인트)
 
 

@@ -272,7 +272,8 @@ export const ELEMENT_IDS = [
   'outbox', 'outbox-text', 'outbox-retry',
   'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',
   'layout-select', 'layout-note',
-  'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd'
+  'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd',
+  'update-compare', 'run-update', 'confirm-update', 'cancel-update'
 ];
 
 /* IntersectionObserver 대역.
@@ -345,6 +346,12 @@ export function makeFetch(routes) {
     const raw = handler
       ? (typeof handler === 'function' ? handler(path, init) : handler)
       : { error: 'stub 라우트 없음: ' + path };
+    /* ⭐ 응답에 `__down` 을 넣으면 **거절**한다 — 갱신 중에 서버가 죽은 구간을
+       흉내 내는 유일한 정직한 방법이다. 진짜 fetch 도 그때 예외를 던지는 게
+       아니라 거절된 프로미스를 준다(그래서 `.catch` 로만 잡힌다). */
+    if (raw && raw.__down) {
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
     const code = raw && raw.__http ? raw.__http : (key ? 200 : 404);
     const body = Object.assign({}, raw);
     delete body.__http;

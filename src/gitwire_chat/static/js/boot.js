@@ -198,7 +198,14 @@ export function createApp(runtime) {
     connect: function (id) { if (modules.stream) { modules.stream.connect(id); } },
     disconnect: function () { if (modules.stream) { modules.stream.disconnect(); } },
     checkUpdate: function () { return modules.update ? modules.update.check() : undefined; },
-    copyUpdateCommand: function () { return modules.update ? modules.update.copyCommand() : undefined; }
+    copyUpdateCommand: function () { return modules.update ? modules.update.copyCommand() : undefined; },
+    askUpdate: function () { return modules.update ? modules.update.ask() : undefined; },
+    cancelUpdate: function () { return modules.update ? modules.update.cancel() : undefined; },
+    runUpdate: function () { return modules.update ? modules.update.run() : undefined; },
+    /* 갱신 중 "새 서버가 떴나" 한 번 물어보기. 실제로는 타이머가 부르지만,
+       그 시점을 테스트가 쥐어야 **서버를 잃는 구간**을 셀 수 있다. */
+    pollUpdate: function () { return modules.update ? modules.update.poll() : undefined; },
+    updatePhase: function () { return modules.update ? modules.update.phase() : null; }
   };
 
   /* 타임라인이 소유한 상태를 그대로 들여다보는 창 (별도 사본이 아니다 —

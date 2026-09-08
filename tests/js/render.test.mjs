@@ -56,6 +56,12 @@ const themeMod = await import(
   url.pathToFileURL(path.join(STATIC, 'js', 'theme.js')).href
 );
 
+/* 갱신 모듈의 상수(주기·포기 횟수·화면 표식 헤더)를 **원천에서** 읽는다 —
+   테스트가 숫자를 베끼면 둘이 어긋나도 통과한다. */
+const updateMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'update.js')).href
+);
+
 const results = [];
 function test(name, fn) {
   return Promise.resolve()
@@ -2006,6 +2012,251 @@ await test('복사할 수 없는 브라우저면 직접 복사하라고 말한�
   assert.ok(note.textContent.indexOf('직접 골라 복사') >= 0, note.textContent);
   /* 명령은 그대로 남아 있어야 한다 (직접 복사할 대상이니까). */
   assert.equal(doc.getElementById('update-cmd').hidden, false);
+});
+
+/* ------------------------------------------- 갱신 실행 (누르면 끝까지) */
+
+/* 갱신 시나리오 한 벌. 서버 응답을 **테스트가 쥔다** — 갱신 중에는 서버가 죽고
+   다시 뜨므로, 응답이 도중에 바뀌는 것 자체가 검증 대상이다. */
+function updateRoutes(state) {
+  return {
+    '/api/update/check': () => state.check,
+    '/api/update/run': () => state.run,
+    '/api/version': () => state.version
+  };
+}
+
+function behind(extra) {
+  return Object.assign({
+    behind: true,
+    installed: 'a'.repeat(40),
+    remote: 'b'.repeat(40),
+    command: 'python -m gitwire_chat update',
+    compare: 'https://example.invalid/compare/aaa...bbb'
+  }, extra || {});
+}
+
+/* 서버가 "띄웠다"고 답한 모양 (202). `serving.pid` 는 **지금** 서빙 중인
+   프로세스다 — 화면은 이 값이 달라지는 것으로 새 서버를 가른다. */
+function started(pid) {
+  return {
+    __http: 202,
+    started: true,
+    run: { log: 'C:/chats/update-run.log', pid: 4242, started_at: 1 },
+    check: behind(),
+    serving: { pid: pid || 111, version: '0.2.0', asset_stamp: 'abc123' }
+  };
+}
+
+/* 갱신을 시작시킨 직후까지 진행한다 (확인 → 지금 갱신 → 갱신한다). */
+async function upToRunning(state) {
+  const ctx = await boot({ routes: updateRoutes(state) });
+  await ctx.chat.checkUpdate();
+  ctx.chat.askUpdate();
+  await ctx.chat.runUpdate();
+  return ctx;
+}
+
+await test('처음에는 갱신 버튼도 비교 링크도 숨어 있다 (템플릿이 정한다)', async () => {
+  const { doc, fetchStub } = await boot();
+  for (const id of ['run-update', 'confirm-update', 'cancel-update', 'update-compare']) {
+    assert.ok(new RegExp('id="' + id + '"[^>]*hidden').test(indexHtml),
+      id + ' 이 처음부터 보인다');
+    assert.equal(doc.getElementById(id).textContent, '');
+  }
+  const went = fetchStub.calls.filter((c) => c.path.indexOf('/api/update') === 0);
+  assert.equal(went.length, 0, '누르지 않았는데 나갔다: ' + JSON.stringify(went));
+});
+
+await test('새 것이 있으면 「지금 갱신」과 비교 링크가 뜬다 (확인은 아직 아무것도 안 한다)', async () => {
+  const state = { check: behind(), run: started(111), version: { pid: 111 } };
+  const { doc, chat, fetchStub } = await boot({ routes: updateRoutes(state) });
+  await chat.checkUpdate();
+  assert.equal(chat.updatePhase(), 'asked');
+  assert.equal(doc.getElementById('run-update').hidden, false);
+  assert.equal(doc.getElementById('confirm-update').hidden, true);
+  const link = doc.getElementById('update-compare');
+  assert.equal(link.hidden, false);
+  assert.equal(link.href, 'https://example.invalid/compare/aaa...bbb');
+  /* 칠 명령은 그대로 남아 있다 — CLI 가 여전히 정본이다. */
+  assert.equal(doc.getElementById('update-cmd').textContent, 'python -m gitwire_chat update');
+  assert.equal(fetchStub.calls.filter((c) => c.path === '/api/update/run').length, 0);
+});
+
+await test('「지금 갱신」은 무엇이 바뀌는지 보여주고 **확인을 받는다** (아직 안 나간다)', async () => {
+  const state = { check: behind(), run: started(111), version: { pid: 111 } };
+  const { doc, chat, fetchStub } = await boot({ routes: updateRoutes(state) });
+  const runs = () => fetchStub.calls.filter((c) => c.path === '/api/update/run').length;
+  await chat.checkUpdate();
+  chat.askUpdate();
+  assert.equal(chat.updatePhase(), 'confirm');
+  const note = doc.getElementById('update-note');
+  assert.ok(note.textContent.indexOf('정말 갱신한다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('aaaaaaaaaaaa') >= 0, '무엇이 바뀌는지 안 보여줬다');
+  assert.equal(doc.getElementById('confirm-update').hidden, false);
+  assert.equal(doc.getElementById('cancel-update').hidden, false);
+  assert.equal(doc.getElementById('run-update').hidden, true);
+  assert.equal(runs(), 0, '확인 전에 갱신이 나갔다');
+
+  /* 취소하면 원래대로. 아무것도 시작되지 않았다. */
+  chat.cancelUpdate();
+  assert.equal(chat.updatePhase(), 'asked');
+  assert.equal(doc.getElementById('run-update').hidden, false);
+  assert.equal(doc.getElementById('confirm-update').hidden, true);
+  assert.equal(runs(), 0);
+});
+
+await test('⭐ 확인하면 갱신을 시작시키고 화면 표식 헤더를 붙여 보낸다', async () => {
+  const state = { check: behind(), run: started(111), version: { pid: 111 } };
+  const { doc, chat, fetchStub, context } = await upToRunning(state);
+  const went = fetchStub.calls.filter((c) => c.path === '/api/update/run');
+  assert.equal(went.length, 1);
+  assert.equal(went[0].init.method, 'POST');
+  /* ⭐ 이 헤더가 드라이브바이를 막는 그 헤더다 (서버 쪽은 csrf.py). */
+  assert.equal(went[0].init.headers[updateMod.GUARD_HEADER], updateMod.GUARD_VALUE);
+  assert.equal(chat.updatePhase(), 'running');
+  const note = doc.getElementById('update-note');
+  assert.ok(note.textContent.indexOf('갱신 중') >= 0, note.textContent);
+  assert.equal(note.className.indexOf('bad'), -1);
+  /* 버튼은 전부 사라지고, 새 서버를 물어볼 타이머가 걸린다. */
+  assert.equal(doc.getElementById('run-update').hidden, true);
+  assert.equal(doc.getElementById('confirm-update').hidden, true);
+  assert.ok(context.win.pendingTimers().indexOf(updateMod.POLL_MS) >= 0,
+    '기다릴 타이머를 걸지 않았다: ' + JSON.stringify(context.win.pendingTimers()));
+});
+
+await test('⭐ 서버를 잃는 구간을 버틴다 — 기다렸다가 새 버전이 답하면 새 화면으로 간다', async () => {
+  const state = { check: behind(), run: started(111), version: { pid: 111 } };
+  const { doc, chat, context } = await upToRunning(state);
+  const note = doc.getElementById('update-note');
+
+  /* ① 아직 옛 서버가 답한다 — 도착으로 착각하지 않는다. */
+  await chat.pollUpdate();
+  assert.equal(chat.updatePhase(), 'running');
+  assert.ok(note.textContent.indexOf('옛 서버') >= 0, note.textContent);
+  assert.equal(context.win.reloads, 0);
+
+  /* ② 서버가 죽었다 — 요청이 전부 실패한다. 오류로 띄우고 끝내지 않는다. */
+  state.version = { __down: true };
+  await chat.pollUpdate();
+  assert.equal(chat.updatePhase(), 'running');
+  assert.ok(note.textContent.indexOf('기다린다') >= 0, note.textContent);
+  assert.equal(note.className.indexOf('bad'), -1, '기다리는 구간을 오류로 띄웠다');
+  assert.equal(context.win.reloads, 0);
+
+  /* ③ 새 서버가 떴다 (pid 가 달라졌다) → 알아서 새 화면으로. */
+  state.version = { pid: 222, version: '0.2.0', asset_stamp: 'zzz' };
+  await chat.pollUpdate();
+  assert.equal(chat.updatePhase(), 'done');
+  assert.equal(context.win.reloads, 1, '새 버전이 떴는데 화면이 그대로다');
+});
+
+await test('⭐ 안 돌아오면 포기하고 칠 명령과 기록 위치를 알려준다 (무한 대기 금지)', async () => {
+  const state = { check: behind(), run: started(111), version: { __down: true } };
+  const { doc, chat, context } = await upToRunning(state);
+  for (let i = 0; i < updateMod.GIVE_UP_TRIES; i += 1) { await chat.pollUpdate(); }
+
+  assert.equal(chat.updatePhase(), 'stuck');
+  const note = doc.getElementById('update-note');
+  assert.ok(note.className.indexOf('bad') >= 0, note.className);
+  assert.ok(note.textContent.indexOf('그만둔다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('update-run.log') >= 0, '어디를 보라고 안 말했다');
+  assert.equal(doc.getElementById('update-cmd').textContent, 'python -m gitwire_chat update');
+  assert.equal(doc.getElementById('update-cmd').hidden, false);
+  assert.equal(context.win.reloads, 0);
+
+  /* 남아 있던 타이머가 터져도 다시 기다리기 시작하지 않는다. */
+  context.win.runTimers(updateMod.POLL_MS);
+  assert.equal(chat.updatePhase(), 'stuck');
+  assert.equal(context.win.reloads, 0);
+});
+
+await test('⭐ 두 번 눌러도 한 번만 나간다 · 서버의 "이미 돌고 있다"도 드러낸다', async () => {
+  const state = { check: behind(), run: started(111), version: { pid: 111 } };
+  const { chat, fetchStub } = await boot({ routes: updateRoutes(state) });
+  const runs = () => fetchStub.calls.filter((c) => c.path === '/api/update/run').length;
+  await chat.checkUpdate();
+  chat.askUpdate();
+  const first = chat.runUpdate();
+  chat.runUpdate();                       /* 연타 — 응답도 오기 전에 한 번 더 */
+  await first;
+  assert.equal(runs(), 1, '연타가 두 번 나갔다');
+  /* 갱신이 도는 중에는 눌러도 아무 일이 없다. */
+  chat.askUpdate();
+  await chat.runUpdate();
+  assert.equal(runs(), 1);
+  assert.equal(chat.updatePhase(), 'running');
+
+  /* 다른 탭이 먼저 시작했으면 서버가 409 로 거절한다 — 그 사유를 드러낸다. */
+  const busy = {
+    check: behind(),
+    run: {
+      __http: 409, code: 'busy',
+      error: '이미 갱신이 돌고 있다 — 한 번에 하나만 돈다',
+      hint: '5초 전에 시작했다. 진행 상황: C:/chats/update-run.log'
+    }
+  };
+  const other = await boot({ routes: updateRoutes(busy) });
+  await other.chat.checkUpdate();
+  other.chat.askUpdate();
+  await other.chat.runUpdate();
+  const note = other.doc.getElementById('update-note');
+  assert.ok(note.className.indexOf('bad') >= 0, note.className);
+  assert.ok(note.textContent.indexOf('이미 갱신이 돌고 있다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('update-run.log') >= 0, '서버 힌트를 버렸다');
+  /* 다시 시도할 길이 남아 있어야 한다. */
+  assert.equal(other.chat.updatePhase(), 'asked');
+  assert.equal(other.doc.getElementById('run-update').hidden, false);
+});
+
+await test('바뀔 게 없으면 아무것도 하지 않고 그렇게 말한다', async () => {
+  /* 확인한 뒤 누군가 이미 갱신해 버린 경우 — 서버가 "띄우지 않았다"고 답한다. */
+  const state = {
+    check: behind(),
+    run: {
+      started: false, code: 'current',
+      check: { behind: false, installed: 'b'.repeat(40) }
+    },
+    version: { pid: 111 }
+  };
+  const { doc, chat, context } = await upToRunning(state);
+  assert.equal(chat.updatePhase(), 'idle');
+  const note = doc.getElementById('update-note');
+  assert.ok(note.textContent.indexOf('최신이다') >= 0, note.textContent);
+  assert.equal(doc.getElementById('update-cmd').hidden, true);
+  assert.equal(doc.getElementById('run-update').hidden, true);
+  assert.equal(context.win.pendingTimers().indexOf(updateMod.POLL_MS), -1,
+    '기다릴 것이 없는데 기다린다');
+});
+
+await test('⭐ 서버가 거절하면 사유와 힌트가 화면에 드러난다 (조용한 실패 금지)', async () => {
+  const state = {
+    check: behind(),
+    run: {
+      __http: 403, code: 'forbidden',
+      error: '우리 화면이 붙이는 요청 헤더가 없다 (X-Gitwire-Chat: update).',
+      hint: '터미널에서 갱신하려면: python -m gitwire_chat update'
+    },
+    version: { pid: 111 }
+  };
+  const { doc, chat, context } = await upToRunning(state);
+  const note = doc.getElementById('update-note');
+  assert.ok(note.className.indexOf('bad') >= 0, note.className);
+  assert.ok(note.textContent.indexOf('시작하지 못했다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('X-Gitwire-Chat') >= 0, '서버 사유를 버렸다');
+  assert.ok(note.textContent.indexOf('python -m gitwire_chat update') >= 0, '서버 힌트를 버렸다');
+  assert.equal(context.win.pendingTimers().indexOf(updateMod.POLL_MS), -1,
+    '시작도 못 했는데 기다린다');
+  assert.equal(doc.getElementById('run-update').hidden, false, '다시 시도할 길이 없다');
+});
+
+await test('갱신 버튼 배선이 터져도 나머지 화면은 산다', async () => {
+  const { doc, chat } = await boot({
+    sabotage: (doc) => breakWiring(doc, 'run-update', '갱신 버튼 배선 실패')
+  });
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  assert.deepEqual(chat.failures().map((f) => f.unit), ['갱신 알림']);
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
 });
 
 await test('갱신 알림이 못 서도 나머지 화면은 산다 (배선 실패로 실증)', async () => {
