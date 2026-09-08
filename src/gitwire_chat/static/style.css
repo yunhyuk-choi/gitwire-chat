@@ -11,7 +11,36 @@
  * overflow-wrap 을 건다 (긴 URL 한 줄이 레이아웃을 깨는 것이 가장 흔한 사고다).
  */
 
+/* ═════════════════════════════════════════════════════════════════════════
+ * 색 팔레트 — **이 파일에서 색이 적혀 있는 유일한 구역**이다.
+ *
+ * 「팔레트 끝」 밑에는 색 리터럴이 하나도 없다. 전부 `var(--…)` 로 이 구역을
+ * 가리킨다. 그래서 테마를 하나 더 넣는 일이 **토큰 값을 갈아끼우는 일**로 끝나고,
+ * "이 부분만 테마를 안 따라간다"는 사고가 생길 자리가 아예 없다.
+ * (기계 검사: `tests/test_theme.py` — 잔존 색 리터럴 0 · 팔레트별 토큰 누락 0 ·
+ *  대비를 매 실행 확인한다.)
+ *
+ * 토큰 이름은 **역할**이다. `--green-500` 같은 색 이름은 금지 — 팔레트를 갈면
+ * 그 이름이 곧바로 거짓말이 된다.
+ *
+ *   --bg           앱 바닥              --panel         패널·남의 말풍선 바닥
+ *   --line         경계선               --ink           본문 글자
+ *   --muted        보조 글자(시각·상태)  --accent        강조(선택된 방·주 버튼·링크)
+ *   --accent-ink   강조 위 글자          --accent-muted  강조 위 보조 글자
+ *   --mine         내 말풍선 바닥        --mine-line     내 말풍선 경계
+ *   --mine-ink     내 이름              --theirs-ink    남의 이름
+ *   --danger       오류                 --focus         키보드 초점 링
+ *   --warn-bg · --warn-ink · --warn-line   못 나간 말 띠 (오류와 **다른 사건**이다)
+ *
+ * **`기본`(속성 없음)만 시스템 라이트/다크를 따른다.** 터미널 팔레트는 전부 다크
+ * 계열이고, 고른 순간 그 색으로 간다 — 억지 라이트 대응을 만들지 않는다.
+ * 값을 고른 근거·대비 수치는 README 「색 테마」에 적어 두었다.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/* PALETTE:BEGIN */
+
 :root {
+  /* 기본 · 라이트 (시스템 추종) */
   --bg: #f6f7f9;
   --panel: #ffffff;
   --line: #e3e6ea;
@@ -19,22 +48,137 @@
   --muted: #6b7280;
   --accent: #2f6feb;
   --accent-ink: #ffffff;
+  --accent-muted: rgba(255, 255, 255, 0.8);
   --mine: #dcf0d8;
+  --mine-line: #e3e6ea;
+  --mine-ink: #1b1f24;
+  --theirs-ink: #1b1f24;
+  --danger: #c0392b;
+  --warn-bg: #fff4e0;
+  --warn-ink: #8a4b00;
+  --warn-line: #f0d3a0;
+  --focus: #2f6feb;
+  /* 색이 아닌 것 (팔레트를 갈아도 같다) */
   --radius: 12px;
   --gap: 10px;
+  color-scheme: light dark;
 }
 
+/* 기본 · 다크 (시스템 추종). 터미널 팔레트를 고르면 이 블록은 비켜난다. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-chat-theme]) {
     --bg: #14171a;
     --panel: #1c2024;
     --line: #2b3138;
     --ink: #e8eaed;
     --muted: #9aa3ad;
     --accent: #4d8dff;
+    --accent-ink: #ffffff;
+    --accent-muted: rgba(255, 255, 255, 0.8);
     --mine: #24402c;
+    --mine-line: #2b3138;
+    --mine-ink: #e8eaed;
+    --theirs-ink: #e8eaed;
+    /* ⚠️ #c0392b 는 이 다크 바닥에서 3.0:1 이라 11px 글씨로는 못 읽는다.
+       같은 색상(hue)·채도에서 **명도만** 올렸다 (5.9:1). */
+    --danger: #e08076;
+    --warn-bg: #fff4e0;
+    --warn-ink: #8a4b00;
+    --warn-line: #f0d3a0;
+    --focus: #4d8dff;
   }
 }
+
+/* log — 로그 뷰어. 중성 어두운 회색. */
+:root[data-chat-theme="log"] {
+  --bg: #101215;
+  --panel: #171a1f;
+  --line: #22262d;
+  --ink: #cbd1d8;
+  --muted: #88909b;
+  --accent: #7fa0c4;
+  --accent-ink: #101215;
+  --accent-muted: #262e38;
+  --mine: #202a2a;
+  --mine-line: #456b59;
+  --mine-ink: #6fbf8f;
+  --theirs-ink: #7fa0c4;
+  --danger: #dd7065;
+  --warn-bg: #2f2c28;
+  --warn-ink: #e0b06a;
+  --warn-line: #6d5a3f;
+  --focus: #7fa0c4;
+  color-scheme: dark;
+}
+
+/* ide — 에디터 통합 터미널. 가장 얌전하고 장시간 가독성이 좋다. */
+:root[data-chat-theme="ide"] {
+  --bg: #1b1e23;
+  --panel: #22262c;
+  --line: #2e333a;
+  --ink: #d3d8de;
+  --muted: #959da7;
+  --accent: #82aedb;
+  --accent-ink: #1b1e23;
+  --accent-muted: #303b48;
+  --mine: #2c3637;
+  --mine-line: #567666;
+  --mine-ink: #86c79b;
+  --theirs-ink: #82aedb;
+  --danger: #e1847a;
+  --warn-bg: #2e2621;
+  --warn-ink: #e0b06a;
+  --warn-line: #6c563b;
+  --focus: #82aedb;
+  color-scheme: dark;
+}
+
+/* tty — 인광 초록 콘솔. 내 말이 더 밝다(형광체가 그렇다). */
+:root[data-chat-theme="tty"] {
+  --bg: #05060a;
+  --panel: #0c0f14;
+  --line: #161b22;
+  --ink: #b6c2b0;
+  --muted: #7c8e79;
+  --accent: #7fa86a;
+  --accent-ink: #05060a;
+  --accent-muted: #1d261d;
+  --mine: #1d2124;
+  --mine-line: #737a74;
+  --mine-ink: #e4efd8;
+  --theirs-ink: #7fa86a;
+  --danger: #da6559;
+  --warn-bg: #221e19;
+  --warn-ink: #c08a3e;
+  --warn-line: #594426;
+  --focus: #7fa86a;
+  color-scheme: dark;
+}
+
+/* tui — tmux 계열. 파란 강조 블록. */
+:root[data-chat-theme="tui"] {
+  --bg: #0e1116;
+  --panel: #171b21;
+  --line: #2a313b;
+  --ink: #c4cbd4;
+  --muted: #8a939f;
+  --accent: #7ba7d9;
+  --accent-ink: #0e1116;
+  --accent-muted: #242f3d;
+  --mine: #232d2e;
+  --mine-line: #57766c;
+  --mine-ink: #8fcba8;
+  --theirs-ink: #7ba7d9;
+  --danger: #dd7469;
+  --warn-bg: #2f2d2a;
+  --warn-ink: #e0b06a;
+  --warn-line: #6d5b40;
+  --focus: #7ba7d9;
+  color-scheme: dark;
+}
+
+/* PALETTE:END */
+/* ─────────── 팔레트 끝 — 아래에는 색 리터럴이 하나도 없다 ─────────── */
 
 * { box-sizing: border-box; }
 
@@ -95,9 +239,15 @@ html, body {
 .room.active .room-btn { background: var(--accent); color: var(--accent-ink); }
 .room-name { font-weight: 600; }
 .room-url { font-size: 11px; color: var(--muted); }
-.room.active .room-url { color: rgba(255, 255, 255, 0.8); }
+.room.active .room-url { color: var(--accent-muted); }
 
 .empty, .hint { margin: 8px 12px; color: var(--muted); font-size: 12px; }
+
+/* 색 테마 고르는 자리 — 설정 성격이라 평소엔 접혀 있고 ◐ 로 펼친다. */
+.theme-bar { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.theme-bar[hidden] { display: none; }
+.theme-bar select { width: 100%; }
+.theme-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
 
 .add-room { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .field { display: block; margin-bottom: 8px; }
@@ -162,10 +312,10 @@ html, body {
 .broken {
   margin: 12px;
   padding: 12px;
-  border: 1px solid #c0392b;
+  border: 1px solid var(--danger);
   border-radius: var(--radius);
   background: var(--panel);
-  color: #c0392b;
+  color: var(--danger);
   display: grid;
   gap: 6px;
 }
@@ -180,14 +330,19 @@ html, body {
   background: var(--panel);
   border: 1px solid var(--line);
 }
-.msg.mine { margin-left: auto; margin-right: 0; background: var(--mine); }
+.msg.mine {
+  margin-left: auto;
+  margin-right: 0;
+  background: var(--mine);
+  border-color: var(--mine-line);
+}
 .msg.unknown { opacity: 0.7; border-style: dashed; }
 
 /* 낙관적 전송 — 아직 서버가 받았다고 말하지 않은 말풍선.
    '흐리게' 로만 구분한다. 자리를 차지하는 별도 요소를 넣으면 그 순간
    가상 스크롤의 높이 계산이 흔들려 화면이 튄다. */
 .msg.pending { opacity: 0.55; }
-.msg.failed { border-color: #c0392b; opacity: 1; }
+.msg.failed { border-color: var(--danger); opacity: 1; }
 
 .msg-state[hidden] { display: none; }
 .msg-state {
@@ -198,11 +353,14 @@ html, body {
   font-size: 11px;
   color: var(--muted);
 }
-.msg.failed .msg-state .state-text { color: #c0392b; }   /* .error 와 같은 색 */
+.msg.failed .msg-state .state-text { color: var(--danger); }   /* .error 와 같은 색 */
 .msg-state .retry { color: var(--accent); text-decoration: underline; }
 
 .msg-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: var(--muted); }
-.msg-head .author { font-weight: 600; color: var(--ink); }
+/* 이름 색으로 누가 말했는지 갈린다 — 터미널 팔레트에서는 좌우 정렬보다 이게 먼저
+   눈에 들어온다. `기본` 은 두 토큰이 --ink 와 같은 값이라 지금 모습 그대로다. */
+.msg .msg-head .author { font-weight: 600; color: var(--theirs-ink); }
+.msg.mine .msg-head .author { color: var(--mine-ink); }
 .msg .body { white-space: pre-wrap; }
 .msg .quote {
   margin: 3px 0;
@@ -244,9 +402,9 @@ html, body {
   align-items: center;
   padding: 6px 10px;
   font-size: 12px;
-  color: #8a4b00;
-  background: #fff4e0;
-  border-top: 1px solid #f0d3a0;
+  color: var(--warn-ink);
+  background: var(--warn-bg);
+  border-top: 1px solid var(--warn-line);
 }
 .outbox[hidden] { display: none; }
 .outbox .link {
@@ -290,7 +448,7 @@ html, body {
 .reply-chip button { border: 0; background: none; color: var(--muted); cursor: pointer; }
 
 .status { margin: 0; padding: 3px 10px 6px; font-size: 11px; color: var(--muted); min-height: 16px; }
-.status.error, .error { color: #c0392b; }
+.status.error, .error { color: var(--danger); }
 
 /* -------------------------------------------------------------- 검색 */
 
@@ -313,13 +471,22 @@ html, body {
 
 /* -------------------------------------------------------------- 공통 */
 
-input, textarea, button {
+input, textarea, button, select {
   font: inherit;
   color: inherit;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 7px 9px;
   background: var(--bg);
+}
+/* 브라우저 기본 placeholder 색은 팔레트를 따라오지 않는다 (UA 가 정한다).
+   토큰으로 못 박아 어두운 팔레트에서도 대비가 지켜지게 한다. */
+::placeholder { color: var(--muted); opacity: 1; }
+/* ⭐ 어두운 바닥에서 초점 링이 사라지는 것은 흔한 사고다. 팔레트마다 강조색으로
+   또렷하게 그린다 (키보드로만 쓰는 사람에게는 이것이 커서다). */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 button { cursor: pointer; background: var(--panel); }
 button:disabled { opacity: 0.6; cursor: default; }
@@ -352,7 +519,7 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 /* --- 방 연결 상태 · 레포 만들기 거들기 ------------------------------- */
 
 .room-state { font-size: 11px; color: var(--muted); }
-.room-state.failed { color: #c0392b; }   /* .error 와 같은 색 */
+.room-state.failed { color: var(--danger); }   /* .error 와 같은 색 */
 .room-row { display: flex; align-items: center; gap: 6px; }
 .room-row .link { flex: none; }
 

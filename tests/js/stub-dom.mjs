@@ -190,6 +190,14 @@ export class Node {
     }
   }
   getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attrs, name) ? this.attrs[name] : null; }
+  /* 색 테마의 `기본` 은 속성을 **지워서** 표현한다 (값으로 남기지 않는다). */
+  removeAttribute(name) {
+    delete this.attrs[name];
+    if (name.indexOf('data-') === 0) {
+      const key = name.slice(5).replace(/-([a-z])/g, (m, c) => c.toUpperCase());
+      delete this.dataset[key];
+    }
+  }
 
   addEventListener(type, fn) {
     (this.listeners[type] = this.listeners[type] || []).push(fn);
@@ -217,6 +225,8 @@ export class StubDocument {
     this.visibilityState = 'visible';
     this.listeners = {};
     this.body = new Node('body', this);
+    /* 색 토큰은 루트에서 상속돼 내려간다 — 테마가 속성을 찍는 곳이 여기다. */
+    this.documentElement = new Node('html', this);
     /* ResizeObserver 는 일부러 두지 않는다 — 없으면 라이브러리가 offsetHeight
        폴백을 쓰고, 그래야 테스트가 높이를 **결정론적으로** 통제할 수 있다. */
     this.window = {
@@ -259,7 +269,8 @@ export const ELEMENT_IDS = [
   'new-repo-toggle', 'new-repo-form', 'new-repo-owner', 'new-repo-name',
   'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
   'new-repo-use', 'new-repo-error',
-  'outbox', 'outbox-text', 'outbox-retry'
+  'outbox', 'outbox-text', 'outbox-retry',
+  'toggle-theme', 'theme-bar', 'theme-select', 'theme-note'
 ];
 
 /* IntersectionObserver 대역.

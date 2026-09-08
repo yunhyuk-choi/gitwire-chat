@@ -36,6 +36,7 @@ import { createTimeline } from './timeline.js';
 import { createSearch } from './search.js';
 import { createStream } from './stream.js';
 import { createPresence } from './presence.js';
+import { createTheme } from './theme.js';
 
 export function createApp(runtime) {
   var dom = createDom(runtime.doc);
@@ -116,7 +117,10 @@ export function createApp(runtime) {
 
     setup('오류 감시', function () { return { mount: watchCrashes }; });
 
-    /* 여기부터는 서로 **무관한** 단위들이다. 안전장치는 순서가 아니라 격리다. */
+    /* 여기부터는 서로 **무관한** 단위들이다. 안전장치는 순서가 아니라 격리다.
+       색 테마를 먼저 세운다 — 뒤의 단위가 하나 넘어져도 화면은 고른 색으로 뜬다
+       (반대로 테마가 넘어져도 나머지는 그대로 선다. 색만 기본으로 간다). */
+    modules.theme = setup('색 테마', createTheme);
     modules.roomlist = setup('방 목록', createRoomList);
     modules.addroom = setup('방 추가', createAddRoom);
     env.roomDraft = function () {
@@ -165,6 +169,8 @@ export function createApp(runtime) {
     clearTimeline: function () { if (modules.timeline) { modules.timeline.clear(); } },
     loadOlder: function () { return modules.timeline ? modules.timeline.loadOlder() : undefined; },
     watchOlder: function () { if (modules.timeline) { modules.timeline.watchOlder(); } },
+    theme: function () { return modules.theme ? modules.theme.current() : null; },
+    setTheme: function (id) { return modules.theme ? modules.theme.set(id) : null; },
     switchRoom: function (id) { if (modules.roomlist) { return modules.roomlist.select(id); } },
     renderRooms: function (l) { if (modules.roomlist) { modules.roomlist.render(l); } },
     retryRoom: function (id) { if (modules.roomlist) { return modules.roomlist.retryRoom(id); } },

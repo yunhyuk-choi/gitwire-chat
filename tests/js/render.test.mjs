@@ -160,8 +160,10 @@ function boot(options) {
     fetch: fetchStub,
     EventSource: StubEventSource,
     IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
+    /* `opts.stored` 로 초기값을 심는다 — "재기동 후에도 유지되나"는 저장소에
+       값이 남아 있는 상태로 다시 부팅해 보는 것으로만 증명된다. */
     localStorage: {
-      _v: {},
+      _v: Object.assign({}, opts.stored || {}),
       getItem(k) { return this._v[k] || null; },
       setItem(k, v) { this._v[k] = v; }
     },
@@ -1197,6 +1199,169 @@ await test("검색 결과도 같은 표식을 단다", async () => {
   const hits = doc.getElementById('search-list').children;
   assert.equal(hits.length, 2);
   assert.deepEqual(hits.map((h) => String(h.className)), ['hit mine', 'hit']);
+});
+
+/* ------------------------------------------------------------ 색 테마 */
+
+/*
+ * ⭐ 여기서 지키는 것은 색이 예쁜가가 아니라 **테마 전환이 화면을 건드리지
+ * 않는가**다. 색은 CSS 토큰으로 흐르므로 DOM 을 손댈 이유가 없다 — 노드를 다시
+ * 만드는 구현이면 가상 스크롤의 측정값이 낡고 읽던 자리가 튄다. 그래서 노드
+ * 동일성(===)·`rebuiltInView`·`scrollTop`·DOM 조작 횟수를 전부 수치로 본다.
+ */
+
+const THEME_KEY = 'gitwire-chat.theme';
+const THEME_ATTR = 'data-chat-theme';
+
+function themeAttr(doc) {
+  return doc.documentElement.getAttribute(THEME_ATTR);
+}
+
+await test('첫 방문 기본값은 `기본` — 루트에 아무 속성도 찍지 않는다', async () => {
+  const { doc, chat } = await boot();
+  assert.equal(themeAttr(doc), null, '고르지도 않았는데 테마가 찍혔다');
+  assert.equal(chat.theme(), 'default');
+  /* 고르지 않았으면 저장도 하지 않는다 (다음 배포에서 기본값을 바꿀 여지를 남긴다). */
+  assert.equal(chat.modules.theme.current(), 'default');
+});
+
+await test('테마를 고르면 즉시 루트에 찍히고 이 기기에 남는다', async () => {
+  const { doc, chat, context } = await boot();
+  for (const id of ['log', 'ide', 'tty', 'tui']) {
+    chat.setTheme(id);
+    assert.equal(themeAttr(doc), id, id + ' 가 찍히지 않았다');
+    assert.equal(context.localStorage.getItem(THEME_KEY), id);
+  }
+  /* 기본으로 되돌리면 **속성을 지운다** = 시스템 라이트/다크 추종으로 복귀. */
+  chat.setTheme('default');
+  assert.equal(themeAttr(doc), null, '기본인데 속성이 남았다 (시스템 추종이 깨진다)');
+  assert.equal(context.localStorage.getItem(THEME_KEY), 'default');
+});
+
+await test('고르는 UI(select)가 실제로 테마를 바꾼다', async () => {
+  const { doc, chat } = await boot();
+  const bar = doc.getElementById('theme-bar');
+  assert.equal(bar.hidden, true, '설정 칸이 처음부터 펼쳐져 있다');
+
+  doc.getElementById('toggle-theme').dispatch('click');
+  assert.equal(bar.hidden, false, '◐ 를 눌렀는데 펼쳐지지 않았다');
+
+  const select = doc.getElementById('theme-select');
+  select.value = 'tui';
+  select.dispatch('change');
+  assert.equal(themeAttr(doc), 'tui');
+  assert.equal(chat.theme(), 'tui');
+  /* 무엇을 고른 상태인지 칸에 남는다 (다시 열었을 때 현재 값이 보여야 한다). */
+  assert.equal(select.value, 'tui');
+  assert.ok(doc.getElementById('theme-note').textContent.length > 0, '설명이 비었다');
+
+  doc.getElementById('toggle-theme').dispatch('click');
+  assert.equal(bar.hidden, true, '다시 누르면 접혀야 한다');
+});
+
+await test('⭐ 재기동해도 고른 테마가 유지된다 (첫 페인트 전에 찍힌다)', async () => {
+  const stored = {};
+  stored[THEME_KEY] = 'tty';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(themeAttr(doc), 'tty', '저장된 테마가 되살아나지 않았다');
+  assert.equal(chat.theme(), 'tty');
+  assert.equal(doc.getElementById('theme-select').value, 'tty');
+});
+
+await test('모르는 저장값은 조용히 기본으로 떨어진다 (검은 화면 사고 방지)', async () => {
+  const stored = {};
+  stored[THEME_KEY] = 'solarized-없는테마';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(themeAttr(doc), null);
+  assert.equal(chat.theme(), 'default');
+});
+
+await test('⭐ 테마를 바꿔도 메시지 노드를 다시 만들지 않는다 (rebuiltInView 0)', async () => {
+  const { doc, chat } = await boot({ messages: manyMessages(200), viewport: 300 });
+  const list = doc.getElementById('messages');
+  await settle();
+
+  /* 위로 조금 올라가 "읽던 자리"를 만든다 (맨 아래면 보존됐는지 알 수 없다). */
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 3000;
+  timeline.dispatch('scroll');
+  await settle();
+
+  const nodesBefore = list.children.slice();
+  const idsBefore = nodesBefore.map((n) => n.dataset.id);
+  const snapshot = {
+    created: chat.stats.created,
+    appended: chat.stats.appended,
+    recycled: chat.stats.recycled,
+    cleared: chat.stats.cleared,
+    measured: chat.stats.measured,
+    createElement: doc.counts.createElement,
+    appendChild: doc.counts.appendChild,
+    removeChild: doc.counts.removeChild,
+    replaceChildren: doc.counts.replaceChildren
+  };
+  const topBefore = timeline.scrollTop;
+  const heightBefore = timeline.scrollHeight;
+
+  for (const id of ['log', 'ide', 'tty', 'tui', 'default']) { chat.setTheme(id); }
+  await settle();
+
+  console.log('      테마 5번 전환 · DOM 노드 ' + list.children.length +
+    '개 · created ' + snapshot.created + '→' + chat.stats.created +
+    ' · rebuiltInView ' + chat.stats.rebuiltInView +
+    ' · scrollTop ' + topBefore + '→' + timeline.scrollTop);
+
+  /* (1) 노드를 하나도 만들지 않았다 — 색은 CSS 로 흐른다. */
+  assert.equal(chat.stats.created, snapshot.created, '메시지 노드를 다시 만들었다');
+  assert.equal(chat.stats.appended, snapshot.appended);
+  assert.equal(chat.stats.recycled, snapshot.recycled, '창 밖으로 걷어낸 것이 생겼다');
+  assert.equal(chat.stats.cleared, snapshot.cleared, '타임라인을 비웠다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+
+  /* (2) DOM 조작 자체가 0 이다 (테마는 루트 속성 한 줄이 전부다). */
+  assert.equal(doc.counts.createElement, snapshot.createElement);
+  assert.equal(doc.counts.appendChild, snapshot.appendChild);
+  assert.equal(doc.counts.removeChild, snapshot.removeChild);
+  assert.equal(doc.counts.replaceChildren, snapshot.replaceChildren);
+  assert.equal(doc.counts.innerHTML, 0);
+
+  /* (3) 같은 객체가 같은 자리에 그대로 있다. */
+  assert.equal(list.children.length, nodesBefore.length);
+  for (let i = 0; i < nodesBefore.length; i++) {
+    assert.equal(list.children[i], nodesBefore[i], i + '번 노드가 교체됐다');
+  }
+  assert.deepEqual(list.children.map((n) => n.dataset.id), idsBefore);
+
+  /* (4) 높이 측정도, 읽던 자리도 그대로다 — 색만 바꾸면 높이는 변하지 않는다.
+     (폰트·행간·여백을 함께 건드리면 여기가 깨진다. 그래서 이번 범위는 색뿐이다.) */
+  assert.equal(chat.stats.measured, snapshot.measured, '높이를 다시 쟀다');
+  assert.equal(timeline.scrollHeight, heightBefore, '전체 높이가 변했다');
+  assert.equal(timeline.scrollTop, topBefore, '테마를 바꿨는데 읽던 자리를 잃었다');
+});
+
+await test('⭐ 테마 모듈이 못 서도 나머지 화면은 산다 (배선 실패로 실증)', async () => {
+  const { doc, chat, consoleErrors } = await boot({
+    sabotage: (doc2) => breakWiring(doc2, 'toggle-theme', '테마 배선 실패')
+  });
+  /* 대화·방 목록은 그대로 뜬다. */
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  assert.ok(doc.getElementById('rooms').children.length > 0);
+  /* 색은 기본으로 간다 (속성이 안 찍힌다) — 조용히는 아니고 드러난다. */
+  assert.equal(themeAttr(doc), null);
+  assert.equal(chat.failures().length, 1);
+  assert.equal(chat.failures()[0].unit, '색 테마');
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+  assert.ok(consoleErrors.join(' ').indexOf('색 테마') >= 0);
+});
+
+await test('테마가 죽어도 저장된 값은 첫 페인트 조각이 살려 둔다 (계약 일치)', () => {
+  /* 모듈과 템플릿이 **같은 키·같은 속성**을 써야 이 폴백이 성립한다.
+     (파이썬 쪽 test_theme.py 가 문자열 일치를 다시 확인한다.) */
+  const mod = fs.readFileSync(path.join(STATIC, 'js', 'theme.js'), 'utf8');
+  assert.ok(mod.includes("'" + THEME_KEY + "'"), 'theme.js 의 저장 키가 다르다');
+  assert.ok(mod.includes("'" + THEME_ATTR + "'"), 'theme.js 의 루트 속성이 다르다');
+  assert.ok(indexHtml.includes("'" + THEME_KEY + "'"), 'index.html 의 저장 키가 다르다');
+  assert.ok(indexHtml.includes("'" + THEME_ATTR + "'"), 'index.html 의 루트 속성이 다르다');
 });
 
 /* -------------------------------------------------------------- 보고 */

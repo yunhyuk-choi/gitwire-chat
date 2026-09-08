@@ -5,6 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>gitwire-chat</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+
+<!-- ⭐ 고른 색 테마를 **첫 페인트 전에** 심는다. 모듈 스크립트는 HTML 파싱이
+     끝난 뒤에 돌아서, 여기서 심지 않으면 어두운 테마를 쓰는 사람이 새로고침마다
+     흰 화면 번쩍임을 본다.
+
+     ⚠️ 여기 있는 것은 그 한 가지뿐이다 — 검증·저장·UI·전환은 전부
+     `static/js/theme.js` 가 소유한다. 이 조각이 그 모듈과 같은 키·같은 속성을
+     쓰는지는 `tests/test_theme.py` 가 기계로 확인한다(두 곳이 어긋나면
+     "새로고침하면 테마가 풀린다"는 사고가 된다). -->
+<script>
+  try {
+    var saved = localStorage.getItem('gitwire-chat.theme');
+    if (saved && saved !== 'default') {
+      document.documentElement.setAttribute('data-chat-theme', saved);
+    }
+  } catch (e) { /* 저장소를 못 읽는 환경 — 기본 테마로 뜨면 된다 */ }
+</script>
 </head>
 <body data-view="rooms" data-default-author="{{ default_author }}" data-recent-limit="{{ recent_limit }}">
 
@@ -13,7 +30,25 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
       <h1 class="brand">gitwire-chat</h1>
+      <button type="button" class="icon-btn" id="toggle-theme" title="색 테마">◐</button>
       <button type="button" class="icon-btn" id="toggle-add" title="방 추가">＋</button>
+    </div>
+
+    <!-- 색 테마. 값은 이 기기에만 남는다(localStorage) — 루프백 전용 개인 앱이라
+         서버로 올릴 이득이 없다. 목록은 style.css 의 팔레트와 짝이며 그 일치는
+         tests/test_theme.py 가 확인한다. -->
+    <div class="theme-bar" id="theme-bar" hidden>
+      <label class="field" for="theme-select">
+        <span>색 테마</span>
+        <select id="theme-select">
+          <option value="default">기본</option>
+          <option value="log">log</option>
+          <option value="ide">ide</option>
+          <option value="tty">tty</option>
+          <option value="tui">tui</option>
+        </select>
+      </label>
+      <p class="theme-note" id="theme-note"></p>
     </div>
 
     <form class="add-room" id="add-room" hidden>

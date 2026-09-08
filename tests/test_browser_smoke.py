@@ -127,6 +127,84 @@ class RecordingServer:
         self._server.server_close()
 
 
+#: ⭐ **테스트 전용** 두 경로. 앱에는 없다 — 여기서 붙인다.
+#:
+#: 왜 필요한가: 헤드리스 브라우저에 "이 테마로 열어라"를 시킬 방법이 없다. 선택은
+#: `localStorage` 에 있고 그건 **같은 출처의 페이지에서만** 쓸 수 있다. 그래서 같은
+#: 서버에 씨앗 페이지를 하나 달고, 그 페이지가 값을 심은 뒤 앱으로 넘긴다.
+#: (앱에 `?theme=` 같은 뒷문을 뚫지 않는다 — 뒷문은 남고 테스트는 끝난다.)
+SEED_PAGE = """<!doctype html><html lang="ko"><meta charset="utf-8"><body><script>
+try {
+  if (%(name)s === 'none') { localStorage.removeItem('gitwire-chat.theme'); }
+  else { localStorage.setItem('gitwire-chat.theme', %(name)s); }
+} catch (e) {}
+location.replace('/');
+</script></body></html>"""
+
+#: 팔레트가 **실제로 계산되는 색**을 재는 페이지. 진짜 `style.css` 를 그대로 물고
+#: 화면에 있는 것과 같은 클래스 조합을 세워, `getComputedStyle` 값을 DOM 에 적어
+#: 놓는다(`--dump-dom` 으로 회수한다).
+#:
+#: "적용했다"는 클레임이 아니라 **브라우저가 계산한 값**을 근거로 남기는 것이
+#: 목적이다. 앱 페이지 쪽 증거(속성이 찍혔나 · 예외 0 · `/api/rooms` 호출)는 아래
+#: 다른 테스트가 따로 본다 — 둘이 합쳐져야 증명이 닫힌다.
+PROBE_PAGE = """<!doctype html><html lang="ko"%(attr)s><head><meta charset="utf-8">
+<link rel="stylesheet" href="/static/style.css"></head><body>
+<div class="app"><aside class="sidebar"><ul class="rooms">
+<li class="room active"><button class="room-btn"><span class="room-name">방</span>
+<span class="room-url" id="p-activeurl">주소</span></button></li></ul></aside>
+<main class="chat"><div class="timeline" id="p-timeline"><div class="messages">
+<article class="msg" id="p-theirs"><div class="msg-head">
+<span class="author" id="p-theirs-author">남</span></div>
+<div class="body">남의 말</div></article>
+<article class="msg mine" id="p-mine"><div class="msg-head">
+<span class="author" id="p-mine-author">나</span></div>
+<div class="body">내 말</div></article>
+<article class="msg mine failed" id="p-failed"><div class="msg-state">
+<span class="state-text" id="p-failed-text">보내지 못했다</span></div></article>
+</div></div>
+<div class="outbox" id="p-outbox"><span>못 나갔다</span></div>
+<p class="status error" id="p-error">오류</p>
+</main></div>
+<pre id="out"></pre>
+<script>
+function cs(id) { return getComputedStyle(document.getElementById(id)); }
+document.getElementById('out').textContent = JSON.stringify({
+  token_bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+  body_bg: getComputedStyle(document.body).backgroundColor,
+  panel_bg: cs('p-theirs').backgroundColor,
+  ink: cs('p-theirs').color,
+  theirs_author: cs('p-theirs-author').color,
+  mine_bg: cs('p-mine').backgroundColor,
+  mine_border: cs('p-mine').borderTopColor,
+  mine_author: cs('p-mine-author').color,
+  danger: cs('p-error').color,
+  failed_text: cs('p-failed-text').color,
+  outbox_bg: cs('p-outbox').backgroundColor,
+  outbox_ink: cs('p-outbox').color,
+  active_url: cs('p-activeurl').color,
+  scheme: getComputedStyle(document.documentElement).colorScheme
+});
+</script></body></html>"""
+
+
+def attach_test_routes(app) -> None:
+    """씨앗·측정 페이지를 붙인다. **테스트 안에서만** 존재한다."""
+    import json as _json
+
+    from flask import Response
+
+    def seed(name: str):
+        return Response(SEED_PAGE % {"name": _json.dumps(name)}, mimetype="text/html")
+
+    def probe(name: str):
+        attr = "" if name == "default" else f' data-chat-theme="{name}"'
+        return Response(PROBE_PAGE % {"attr": attr}, mimetype="text/html")
+
+    app.add_url_rule("/__test__/seed/<name>", "test_seed", seed)
+    app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
+
+
 @pytest.fixture
 def served(tmp_path):
     """빈 상태의 앱을 임의 포트로 띄운다 (방 0개 = 네트워크·git 을 안 탄다)."""
@@ -137,6 +215,7 @@ def served(tmp_path):
         notifications=False,
     )
     app = create_app(settings)
+    attach_test_routes(app)
     try:
         with RecordingServer(app) as server:
             yield server
@@ -245,6 +324,140 @@ def test_진입점이_ES_모듈로_실린다(served, tmp_path):
     dom, _ = open_headless(served.url, tmp_path / "profile")
     assert 'type="module"' in dom
     assert "/static/app.js" in dom
+
+
+# ------------------------------------------------------------- 색 테마
+
+#: 고를 수 있는 팔레트 전부. `기본` 을 포함한다 — 첫 방문에 검은 화면이 되지
+#: 않는다는 것도 브라우저에서 확인해야 하는 사실이다.
+THEME_IDS = ["default", "log", "ide", "tty", "tui"]
+
+
+def rgb(hex_or_rgba: str) -> str:
+    """CSS 값을 브라우저가 `getComputedStyle` 로 되돌려 주는 표기로 바꾼다."""
+    value = hex_or_rgba.strip()
+    if value.startswith("#"):
+        h = value.lstrip("#")
+        return "rgb(%d, %d, %d)" % tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return value.replace("rgba(", "rgba(").replace(",", ", ").replace("  ", " ")
+
+
+def palette(name: str) -> dict[str, str]:
+    """`style.css` 의 팔레트 정의 (단일 원천 — 여기서 값을 베끼지 않는다)."""
+    from test_theme import palettes
+
+    key = "기본-라이트" if name == "default" else name
+    return palettes()[key]["__decls__"]
+
+
+@needs_browser
+@pytest.mark.parametrize("theme", THEME_IDS)
+def test_각_팔레트가_실제_브라우저에서_예외_없이_뜬다(theme, served, tmp_path):
+    """⭐ "테스트는 통과하는데 앱은 죽어 있다"를 팔레트마다 되풀이해 막는다.
+
+    씨앗 페이지가 선택을 심고 앱으로 넘긴다. 그 뒤 보는 것은 이 프로젝트가
+    실제로 당한 사고의 판정 기준 그대로다 — 콘솔 `Uncaught` 0, `/api/rooms`
+    호출됨(=배선까지 갔다), 결함 표시 없음. 여기에 "고른 팔레트가 루트에 찍혔나"
+    하나가 더 붙는다.
+    """
+    dom, console = open_headless(
+        f"{served.url}__test__/seed/{theme}", tmp_path / "profile"
+    )
+
+    bad = uncaught_lines(console)
+    assert not bad, f"[{theme}] 콘솔에 예외가 있다:\n  " + "\n  ".join(bad)
+
+    # 앱까지 넘어갔나 (씨앗 페이지에 머물러 있으면 아래 전부 무의미하다).
+    assert 'id="composer"' in dom, f"[{theme}] 앱으로 넘어가지 않았다"
+    assert "/api/rooms" in served.paths, (
+        f"[{theme}] /api/rooms 를 부르지 않았다 = boot() 이 배선까지 못 갔다.\n"
+        f"들어온 요청: {served.paths}\n콘솔:\n{console[-1500:]}"
+    )
+    assert 'id="rooms-empty"' in dom
+
+    # 고른 팔레트가 루트에 찍혔나. `기본` 은 **찍히지 않아야** 한다(시스템 추종).
+    # ⚠️ 문자열 포함으로 보면 첫 페인트 조각의 **소스**가 걸린다 — 여는 `<html>`
+    # 태그만 본다 (실제로 이 오탐에 한 번 걸렸다).
+    import re as re_mod
+
+    root_tag = re_mod.search(r"<html[^>]*>", dom)
+    assert root_tag, "루트 태그를 찾지 못했다"
+    if theme == "default":
+        assert "data-chat-theme" not in root_tag.group(0), (
+            f"고르지 않았는데 테마가 찍혔다: {root_tag.group(0)}"
+        )
+    else:
+        assert f'data-chat-theme="{theme}"' in root_tag.group(0), (
+            f"[{theme}] 루트에 팔레트가 찍히지 않았다 — 색이 바뀌지 않는다: "
+            f"{root_tag.group(0)}"
+        )
+    # 고르는 UI 도 실제로 그려져 있나 (select 가 없으면 바꿀 방법이 없다).
+    assert 'id="theme-select"' in dom
+    assert f'<option value="{theme}"' in dom
+
+    # 초기화 실패·가상 스크롤 결함이 팔레트 때문에 생기지 않았나.
+    assert "초기화 실패" not in dom, f"[{theme}] 초기화 단위 하나가 못 섰다"
+    assert "메시지를 그릴 수 없다" not in dom
+
+
+@needs_browser
+@pytest.mark.parametrize("theme", THEME_IDS)
+def test_각_팔레트의_계산된_색이_정의와_같다(theme, served, tmp_path):
+    """⭐ "적용했다"가 아니라 **브라우저가 계산한 값**으로 확인한다.
+
+    토큰을 하나 빼먹으면 그 자리만 다른 팔레트 색이 나온다. 그건 `style.css` 를
+    읽어서는 못 잡는다 — 실제로 상속·특이도를 거쳐 나온 값을 봐야 잡힌다.
+    """
+    import html as html_mod
+    import json
+    import re as re_mod
+
+    dom, console = open_headless(
+        f"{served.url}__test__/probe/{theme}", tmp_path / "profile"
+    )
+    assert not uncaught_lines(console), console[-1500:]
+
+    found = re_mod.search(r'<pre id="out">(.*?)</pre>', dom, re_mod.S)
+    assert found, f"[{theme}] 측정값을 회수하지 못했다:\n{dom[-1500:]}"
+    got = json.loads(html_mod.unescape(found.group(1)))
+    print(f"  [{theme}] 브라우저가 계산한 색: {json.dumps(got, ensure_ascii=False)}")
+
+    tokens = palette(theme)
+    if theme == "default":
+        # 헤드리스는 보통 라이트로 뜨지만 환경에 따라 다크일 수 있다. `기본` 이
+        # 지켜야 하는 것은 **시스템을 따른다**는 사실이므로 둘 다 통과시킨다.
+        dark = palette_dark()
+        assert got["body_bg"] in (rgb(tokens["--bg"]), rgb(dark["--bg"])), got["body_bg"]
+        assert got["scheme"].strip() in ("light dark", "normal"), got["scheme"]
+        return
+
+    assert got["scheme"].strip() == "dark", f"[{theme}] color-scheme 이 dark 가 아니다"
+    expected = {
+        "token_bg": tokens["--bg"],
+        "body_bg": rgb(tokens["--bg"]),
+        "panel_bg": rgb(tokens["--panel"]),
+        "ink": rgb(tokens["--ink"]),
+        "theirs_author": rgb(tokens["--theirs-ink"]),
+        "mine_bg": rgb(tokens["--mine"]),
+        "mine_border": rgb(tokens["--mine-line"]),
+        "mine_author": rgb(tokens["--mine-ink"]),
+        "danger": rgb(tokens["--danger"]),
+        "failed_text": rgb(tokens["--danger"]),
+        "outbox_bg": rgb(tokens["--warn-bg"]),
+        "outbox_ink": rgb(tokens["--warn-ink"]),
+        "active_url": rgb(tokens["--accent-muted"]),
+    }
+    wrong = {k: (got[k], v) for k, v in expected.items() if got[k] != v}
+    assert not wrong, (
+        f"[{theme}] 계산된 색이 팔레트 정의와 다르다 (실제, 기대):\n  "
+        + "\n  ".join(f"{k}: {a} ≠ {b}" for k, (a, b) in wrong.items())
+    )
+
+
+def palette_dark() -> dict[str, str]:
+    from test_theme import palettes
+
+    return palettes()["기본-다크"]["__decls__"]
 
 
 def test_브라우저가_없으면_건너뛴다는_사실이_드러난다():
