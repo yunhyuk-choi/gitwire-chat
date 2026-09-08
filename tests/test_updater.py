@@ -345,18 +345,57 @@ def test_윈도우_시작_폴더는_감독자가_아니라_아무것도_하지_�
 @pytest.fixture
 def no_network(monkeypatch):
     """원격 조회·설치·기본 포트 탐지를 갈아끼운다 (흐름만 본다)."""
-    state = {"remote": "b" * 40, "installed": "a" * 40, "pip": [], "unmanaged": []}
+    state = {
+        "remote": "b" * 40,
+        "installed": "a" * 40,
+        "pip": [],
+        "unmanaged": [],
+        #: git 에서 오는 의존(gitwire)들. 기본은 없음 — 흐름만 보는 테스트는
+        #: 그대로 돌고, 동반 갱신 테스트가 이 값을 채운다.
+        "deps": [],
+        #: pip 가 **실제로** 넣은 커밋 (name → commit). 설치 뒤 확인의 근거.
+        "landed": {},
+    }
     monkeypatch.setattr(
         updater,
         "_direct_url",
-        lambda: direct_url(vcs_info={"vcs": "git", "commit_id": state["installed"]}),
+        lambda name=updater.DIST_NAME: direct_url(
+            vcs_info={"vcs": "git", "commit_id": state["installed"]}
+        ),
     )
     monkeypatch.setattr(updater, "remote_commit", lambda url, ref="HEAD": state["remote"])
-    monkeypatch.setattr(
-        updater,
-        "pip_install",
-        lambda req, report, **kw: state["pip"].append(req) or True,
-    )
+    monkeypatch.setattr(updater, "companions", lambda **kw: list(state["deps"]))
+
+    def fake_pip(requirement: str, report, **kw) -> bool:
+        """pip 대역 — **무엇이 실제로 들어갔는지**까지 흉내 낸다.
+
+        갱신은 설치 뒤 `direct_url.json` 을 다시 읽어 확인한다. 그 확인이
+        의미를 가지려면 대역도 "설치되면 커밋이 바뀐다"를 지켜야 한다.
+        """
+        state["pip"].append(requirement)
+        name = requirement.split(" @ ", 1)[0]
+        for dep in state["deps"]:
+            if dep.name == name:
+                state["landed"][name] = dep.remote
+        return True
+
+    monkeypatch.setattr(updater, "pip_install", fake_pip)
+
+    def fake_installed_dep(name: str):
+        for dep in state["deps"]:
+            if dep.name != name:
+                continue
+            was = dep.installed.commit if dep.installed else ""
+            commit = state["landed"].get(name, was)
+            if not commit:
+                return None, "0.2.0"
+            return (
+                updater.Source(url=dep.declared.url, commit=commit, name=name),
+                "0.2.0",
+            )
+        return None, ""
+
+    monkeypatch.setattr(updater, "_installed_dep", fake_installed_dep)
     # ⚠️ 사용자가 8770 에 앱을 띄워 두고 있을 수 있다 — 그 포트를 보지 않게 한다.
     monkeypatch.setattr(updater, "_find_unmanaged", lambda known, ports: state["unmanaged"])
     return state
@@ -1142,3 +1181,197 @@ def test_서버가_스스로를_대장에_적고_그것으로_멈추고_다시_�
         assert runstate.probe(port, timeout=1.0) is None, (
             f"테스트가 띄운 앱이 포트 {port} 에 살아 있다 — 프로세스가 샌다"
         )
+
+
+# ============================== ⭐ git 에서 오는 의존 (gitwire) 동반 갱신
+
+
+def companion(
+    *,
+    name: str = "gitwire",
+    url: str = "https://github.com/yunhyuk-choi/gitwire.git",
+    installed: str | None = "c" * 40,
+    remote: str = "d" * 40,
+    revision: str = "",
+    installed_url: str | None = None,
+) -> updater.Companion:
+    """의존 하나 — 선언된 곳 · 설치된 커밋 · 원격 최신."""
+    return updater.Companion(
+        declared=updater.Source(url=url, revision=revision, name=name),
+        installed=None if installed is None else updater.Source(
+            url=installed_url or url, commit=installed, name=name
+        ),
+        remote=remote,
+        version="0.2.0",
+    )
+
+
+def test_선언된_git_의존을_메타데이터에서_읽는다(monkeypatch):
+    """⭐ URL 을 코드에 박지 않는다 — `pyproject.toml` → wheel METADATA 가 원천.
+
+    박으면 레포를 옮길 때 고칠 곳이 둘이 되고, 한쪽만 고치면 조용히 옛 곳을
+    본다. 설치본에는 `pyproject.toml` 이 없지만 METADATA 는 있다.
+    """
+    class FakeDist:
+        requires = [
+            "gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git",
+            "flask>=3",
+            "pytest>=7; extra == \"dev\"",
+            "other @ git+ssh://git@example.invalid/x.git@release",
+            "wheel @ https://example.invalid/wheel.whl",   # git 이 아니다
+        ]
+
+    monkeypatch.setattr(
+        "importlib.metadata.distribution", lambda name: FakeDist()
+    )
+    found = updater.declared_git_deps()
+    assert [d.name for d in found] == ["gitwire", "other"]
+    assert found[0].url == "https://github.com/yunhyuk-choi/gitwire.git"
+    assert found[0].revision == "" and found[0].ref == "HEAD"
+    # ⚠️ `@` 는 URL 안(user@host)에도 있다 — 마지막 `/` 뒤에서만 ref 를 가른다.
+    assert found[1].url == "ssh://git@example.invalid/x.git"
+    assert found[1].revision == "release"
+    assert found[1].requirement == "other @ git+ssh://git@example.invalid/x.git@release"
+
+
+def test_git_이_아닌_의존은_판정_불가라고_말한다():
+    """조용히 "최신이다"로 넘기지 않는다 — 모르는 것은 모른다고 말한다."""
+    dep = companion(installed=None)
+    assert dep.behind is False
+    assert "git 설치가 아니다" in dep.unknown
+    blind = companion(remote="")
+    assert blind.behind is False
+    assert "원격을 읽지 못했다" in blind.unknown
+
+
+def test_의존만_밀렸어도_갱신이_필요하다고_판정한다(no_network, tmp_path):
+    """⭐ 정확히 사용자에게 일어난 그 상황 — 앱은 최신, 전송 계층은 밀림.
+
+    지금까지는 앱 커밋만 보고 "최신이다"로 끝냈다. 그러면 그 라이브러리에서
+    이미 고친 버그를 사용자가 계속 겪는다 (실측: 콘솔 창 깜빡임 수정).
+    """
+    no_network["remote"] = no_network["installed"]      # 앱은 최신
+    no_network["deps"] = [companion()]                  # gitwire 는 밀렸다
+    report = updater.update(directory=tmp_path, stop_timeout=1.0)
+    assert report.ok and report.changed
+    assert no_network["pip"] == [
+        "gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git"
+    ], "gitwire 만 설치해야 한다 (앱은 최신이라 다시 설치하지 않는다)"
+    text = "\n".join(report.lines)
+    assert "최신이다 — 바뀔 것이 없다" not in text
+    assert "라이브러리가 밀렸다" in text
+
+
+def test_둘_다_최신이면_아무것도_하지_않는다(no_network, tmp_path):
+    no_network["remote"] = no_network["installed"]
+    no_network["deps"] = [companion(installed="d" * 40)]
+    report = updater.update(directory=tmp_path, stop_timeout=1.0)
+    assert report.ok and not report.changed
+    assert no_network["pip"] == []
+    text = "\n".join(report.lines)
+    assert "최신이다 — 바뀔 것이 없다 (의존까지 봤다)" in text
+    assert "[최신]" in text, "무엇을 보고 최신이라 했는지 드러나야 한다"
+
+
+def test_앱만_밀렸으면_앱만_설치한다(no_network, tmp_path):
+    no_network["deps"] = [companion(installed="d" * 40)]     # 의존은 최신
+    report = updater.update(directory=tmp_path, stop_timeout=1.0)
+    assert report.ok and report.changed
+    assert no_network["pip"] == ["gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git"]
+
+
+def test_둘_다_밀렸으면_둘_다_설치하고_보고에_드러난다(no_network, tmp_path):
+    no_network["deps"] = [companion()]
+    report = updater.update(directory=tmp_path, stop_timeout=1.0)
+    assert report.ok and report.changed
+    assert no_network["pip"] == [
+        "gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git",
+        "gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git",
+    ], "앱을 먼저, 그다음 의존"
+    text = "\n".join(report.lines)
+    assert "gitwire" in text and "cccccccccccc" in text, "의존의 before 가 안 보인다"
+
+
+def test_의존_설치가_실패하면_섞인_상태라고_말하고_되돌리기를_준다(
+    no_network, tmp_path, monkeypatch
+):
+    """⚠️ 한쪽만 되돌리면 섞인 상태가 남는다 — 두 명령을 함께 준다."""
+    no_network["deps"] = [companion()]
+
+    def flaky(requirement, report, **kw):
+        no_network["pip"].append(requirement)
+        if requirement.startswith("gitwire "):
+            report.fail("pip 이 1 로 끝났다 (테스트)")
+            return False
+        return True
+
+    monkeypatch.setattr(updater, "pip_install", flaky)
+    monkeypatch.setattr(updater, "stop_instance", lambda inst, report, **kw: True)
+    restarted: list[int] = []
+    monkeypatch.setattr(
+        updater,
+        "start_instance",
+        lambda inst, report, **kw: restarted.append(inst.port) or True,
+    )
+    monkeypatch.setattr(runstate, "alive", lambda inst, **kw: True)
+    monkeypatch.setattr(runstate, "wait_until_up", lambda port, **kw: {"pid": 1})
+    runstate.record(sample(8899), directory=tmp_path)
+
+    report = updater.update(directory=tmp_path)
+    assert not report.ok
+    text = "\n".join(report.lines)
+    assert "섞인 상태" in text
+    assert "gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git@" + "a" * 40 in text
+    assert "갈아치우지 못했으므로 그대로다" in text
+    assert restarted == [8899], "멈춘 것은 되살려야 한다"
+
+
+def test_다시_뜨지_않으면_의존까지_되돌리는_명령을_준다(
+    no_network, tmp_path, monkeypatch
+):
+    """갱신은 됐지만 앱이 안 뜬 경우 — 되돌릴 범위가 **두 패키지**다."""
+    no_network["deps"] = [companion()]
+    monkeypatch.setattr(updater, "stop_instance", lambda inst, report, **kw: True)
+    monkeypatch.setattr(updater, "start_instance", lambda inst, report, **kw: True)
+    monkeypatch.setattr(runstate, "alive", lambda inst, **kw: True)
+    monkeypatch.setattr(runstate, "wait_until_up", lambda port, **kw: None)
+    monkeypatch.setattr(
+        updater, "_installed_dep", lambda name: (companion().installed, "0.2.0")
+    )
+    home = tmp_path / "chats"
+    home.mkdir()
+    runstate.record(sample(8899, home=str(home)), directory=tmp_path)
+
+    report = updater.update(directory=tmp_path)
+    assert not report.ok
+    text = "\n".join(report.lines)
+    assert "되돌리는 방법" in text
+    assert "gitwire-chat @ git+https://github.com/yunhyuk-choi/gitwire-chat.git@" + "a" * 40 in text
+    assert "gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git@" + "c" * 40 in text
+
+
+def test_설치_결과를_pip_기록으로_다시_읽어_확인한다(no_network, tmp_path, monkeypatch):
+    """⭐ "설치했다"는 우리 주장이 아니라 `direct_url.json` 이 증거다."""
+    no_network["deps"] = [companion()]
+    monkeypatch.setattr(updater, "stop_instance", lambda inst, report, **kw: True)
+    # pip 는 성공했다고 하지만 실제로 들어간 커밋은 옛 것이다 (조용한 실패).
+    monkeypatch.setattr(
+        updater, "_installed_dep", lambda name: (companion().installed, "0.2.0")
+    )
+    report = updater.update(directory=tmp_path, stop_timeout=1.0)
+    assert not report.ok, "설치 결과가 원격과 다른데 성공으로 보고했다"
+    assert any("원격과 다르다" in line for line in report.lines)
+
+
+def test_확인_응답에_의존_상태가_실린다(no_network, monkeypatch):
+    """화면(`update.js`)이 무엇이 왜 갱신되는지 말할 수 있어야 한다."""
+    no_network["remote"] = no_network["installed"]
+    no_network["deps"] = [companion()]
+    found = updater.check()
+    assert found.behind is True and found.self_behind is False
+    data = found.to_json()
+    assert data["behind"] is True and data["self_behind"] is False
+    assert data["deps"][0]["name"] == "gitwire"
+    assert data["deps"][0]["behind"] is True
+    assert data["deps"][0]["installed"] == "c" * 40
+    assert data["deps"][0]["remote"] == "d" * 40

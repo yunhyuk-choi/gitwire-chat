@@ -2313,6 +2313,52 @@ await test('최신이면 명령을 보여주지 않는다 (칠 것이 없다)', 
   assert.equal(doc.getElementById('update-cmd').hidden, true);
 });
 
+await test('⭐ 앱이 최신이어도 라이브러리가 밀렸으면 그렇게 말한다', async () => {
+  /* 조용한 실패 방지 — 이 문장이 없으면 화면은 같은 커밋 두 개를 나란히
+     보여주며 "새 버전이 있다"고 말한다(앱 커밋은 그대로다). 무엇이 왜
+     갱신되는지 사용자가 알 수 없다. */
+  const same = 'a'.repeat(40);
+  const { doc, chat } = await boot({
+    routes: checkRoute({
+      behind: true, self_behind: false, installed: same, remote: same,
+      command: 'python -m gitwire_chat update',
+      deps: [{
+        name: 'gitwire', behind: true,
+        installed: 'c'.repeat(40), remote: 'd'.repeat(40)
+      }]
+    })
+  });
+  await chat.checkUpdate();
+  const note = doc.getElementById('update-note');
+  assert.equal(note.hidden, false);
+  assert.ok(note.textContent.indexOf('라이브러리가 밀렸다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('gitwire') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('cccccccccccc') >= 0, '의존 커밋을 안 보여준다');
+  /* 확인 단계에서도 무엇이 올라가는지 그대로 말해야 한다. */
+  chat.askUpdate();
+  assert.ok(note.textContent.indexOf('gitwire') >= 0, note.textContent);
+  assert.equal(doc.getElementById('update-cmd').hidden, false);
+});
+
+await test('앱이 밀렸으면 의존도 함께 한 줄에 실린다', async () => {
+  const { doc, chat } = await boot({
+    routes: checkRoute({
+      behind: true, self_behind: true,
+      installed: 'a'.repeat(40), remote: 'b'.repeat(40),
+      command: 'python -m gitwire_chat update',
+      deps: [
+        { name: 'gitwire', behind: true, installed: 'c'.repeat(40), remote: 'd'.repeat(40) },
+        { name: 'quiet', behind: false, installed: 'e'.repeat(40), remote: 'e'.repeat(40) }
+      ]
+    })
+  });
+  await chat.checkUpdate();
+  const note = doc.getElementById('update-note');
+  assert.ok(note.textContent.indexOf('새 버전이 있다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('gitwire') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('quiet') < 0, '최신인 의존까지 늘어놓는다');
+});
+
 await test('⭐ 확인이 실패하면 사유와 힌트가 화면에 드러난다', async () => {
   const { doc, chat } = await boot({
     routes: checkRoute({
