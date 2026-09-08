@@ -6,6 +6,9 @@
  * 타임라인의 append-only 규율은 **메시지**에 대한 것이라 여기엔 적용되지 않는다.
  * 그 둘이 한 파일에 있으면 이 구분을 매번 설명해야 한다 — 그래서 갈랐다.
  *
+ * 방마다 **내가 안 읽은 개수**를 뱃지로 그린다. 그 값은 서버가 방 목록에 실어
+ * 보내므로(`/api/rooms` · SSE `rooms`) 여기서 따로 물어보는 배관이 없다.
+ *
  * ⚠️ 실패한 방을 목록에서 **지우지 않는다.** 사용자가 왜 안 됐는지 볼 수 있어야
  * 하고, 재시도도 거기서 한다.
  */
@@ -63,6 +66,16 @@ export function createRoomList(env) {
         btn.setAttribute('type', 'button');
         btn.appendChild(dom.make('span', 'room-name', room.name || room.repo_url));
         btn.appendChild(dom.make('span', 'room-url', room.repo_url));
+        /* ⭐ **내가** 안 읽은 개수. 발행이 없는 값이다 — 서버가 내 로컬 커서와
+           캐시된 레코드 나열로 세어 목록에 함께 실어 보낸다 (git 왕복 0회,
+           `gitwire_chat/reads.py`). 방 **안**에는 이 숫자를 두지 않는다:
+           보고 있는 동안은 내가 읽었다는 것을 내가 이미 안다. */
+        if (room.unread) {
+          var badge = dom.make('span', 'room-unread',
+            room.unread > 999 ? '999+' : String(room.unread));
+          badge.setAttribute('title', '안 읽은 메시지 ' + room.unread + '건');
+          btn.appendChild(badge);
+        }
         var label = stateLabel(room.status);
         if (label) {
           var cls = room.status.state === 'failed' ? 'room-state failed' : 'room-state';

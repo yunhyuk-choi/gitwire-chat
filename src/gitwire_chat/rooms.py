@@ -39,9 +39,10 @@ from typing import Any, Callable, Iterable
 import gitwire
 
 # 이 앱은 기반의 **새 표면**에 의존한다: 설치본 식별자(installation_id),
-# keyset 역방향 페이징(Channel.history_page), 그리고 **로컬 전용 읽기**
-# (`fresh=`). 낮은 gitwire 로 돌면 한참 뒤에 엉뚱한 곳에서 터지므로, 여기서
-# 즉시 분명하게 실패한다 (조용한 실패 금지).
+# keyset 역방향 페이징(Channel.history_page), **로컬 전용 읽기**(`fresh=`),
+# 그리고 **참가자 상태 예약 경로**(write_state/read_states — 읽음 커서가 여기
+# 산다). 낮은 gitwire 로 돌면 한참 뒤에 엉뚱한 곳에서 터지므로, 여기서 즉시
+# 분명하게 실패한다 (조용한 실패 금지).
 def _has_local_read_mode() -> bool:
     try:
         return "fresh" in inspect.signature(gitwire.Channel.history_page).parameters
@@ -49,17 +50,30 @@ def _has_local_read_mode() -> bool:
         return False
 
 
+def _has_cycle_hook() -> bool:
+    """폴 한 틱이 끝났음을 알리는 훅 — 레코드가 아닌 변화(읽음 커서)를 그것으로 안다."""
+    try:
+        return "on_cycle" in inspect.signature(gitwire.Channel.subscribe).parameters
+    except (TypeError, ValueError):  # pragma: no cover
+        return False
+
+
 if (
     not hasattr(gitwire, "installation_id")
     or not hasattr(gitwire.Channel, "history_page")
     or not _has_local_read_mode()
+    or not hasattr(gitwire.Channel, "write_state")
+    or not hasattr(gitwire, "git_email")
+    or not _has_cycle_hook()
 ):  # pragma: no cover - 설치 환경 문제
     raise ImportError(
-        "gitwire 가 너무 낮다 — 로컬 전용 읽기(history_page(fresh=...))를 주는 "
-        "gitwire 가 필요하다 (pip install --force-reinstall "
+        "gitwire 가 너무 낮다 — 참가자 상태 예약 경로(write_state/read_states)와 "
+        "폴 틱 훅(subscribe(on_cycle=...))을 주는 gitwire 가 필요하다 "
+        "(pip install --force-reinstall "
         '"gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git")'
     )
 
+from . import reads as _reads
 from . import schema
 from .config import Room, RoomStore, Settings, with_defaults
 from .events import EventBus
@@ -264,6 +278,12 @@ class RoomManager:
         # 방당 밀어내기 워커 하나 (`outbox.py`). 전송 응답이 push 를 기다리지
         # 않게 하는 장치이자, "아직 안 나갔다"를 말하는 단일 원천이다.
         self._outboxes: dict[str, Outbox] = {}
+        # 방당 읽음 커서 하나 (`reads.ReadTracker`). 내 로컬 커서와 발행값을
+        # 함께 쥔다 — 방·HTTP·SSE 를 모르는 물건이라 여기서 만들어 준다.
+        self._reads: dict[str, _reads.ReadTracker] = {}
+        # 마지막으로 **밀어 보낸** 읽음 스냅샷의 지문. 같은 값을 되풀이해 밀지
+        # 않는 근거다 (아웃박스의 `_publish_locked` 와 같은 규율).
+        self._read_prints: dict[str, tuple] = {}
         # 방 하나의 클론이 **동시에 두 번** 시작되지 않게 한다 (같은 디렉토리다).
         self._connecting: dict[str, threading.Lock] = {}
         self._workers: dict[str, threading.Thread] = {}
@@ -274,6 +294,13 @@ class RoomManager:
         """이 설치의 전송 수준 식별자. **gitwire 가 만들고 영속시킨다** — 같은
         머신의 두 인스턴스가 갈리고 재시작해도 유지된다. 표시 이름이 아니다
         (그건 payload 의 ``author``)."""
+
+        self.person = _reads.person_id(settings.home)
+        """이 **사람**의 식별자 (`git user.email`). 읽음 표시의 참가자 키다.
+
+        ⚠️ `instance` 와 다르다 — 그쪽은 설치본(노트북·데스크탑이 각각)이고
+        이쪽은 사람이다. 읽음 카운트를 설치본 단위로 세면 한 사람이 기기를 둘
+        쓸 때 카운트가 0 이 되지 않는다 (`reads` 모듈 도크)."""
 
         for room in self.store.load():
             self._rooms[room.id] = with_defaults(room, settings)
@@ -310,7 +337,11 @@ class RoomManager:
              # 아웃박스는 **변할 때** 자기 이벤트로 따로 흐른다. 여기에도 싣는 것은
              # *최초 그리기* 때문이다 — 방을 막 열었을 때 이미 stuck 이면 다음
              # 변화를 기다리지 말고 바로 보여야 한다. 값의 원천은 한 함수다.
-             "outbox": self.outbox_state(room.id).to_json()}
+             "outbox": self.outbox_state(room.id).to_json(),
+             # ⭐ 내가 안 읽은 개수. **발행이 없고 git 왕복도 없다** — 로컬 커서 +
+             # 캐시된 레코드 나열뿐이다 (`reads` 모듈 도크). 방 목록은 짧고 바뀔
+             # 때만 다시 그리므로 값과 함께 실어 보내면 배관이 늘지 않는다.
+             "unread": self.unread(room.id)}
             for room in rooms
         ]
 
@@ -590,6 +621,12 @@ class RoomManager:
         if before is None:
             # 최신 쪽을 보고 있다 = 신선도가 의미 있는 유일한 순간. 막지 않는다.
             self.refresh_async(room_id)
+            # ⭐ **방을 열었다** — 내 커서 파일이 없으면 여기서 만든다 (참가자
+            # 집합 = 커서 파일 집합. `enter_room` 도크).
+            try:
+                self.enter_room(room_id)
+            except Exception:  # noqa: BLE001 — 읽음 표시가 대화를 막지 않는다
+                log.debug("방 %s 읽음 커서 준비 실패", room_id, exc_info=True)
         return MessagePage(
             [schema.parse_record(r) for r in page.records], bool(page.has_more)
         )
@@ -652,6 +689,17 @@ class RoomManager:
             record = channel.append(payload)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"메시지를 보낼 수 없다: {exc}") from exc
+        # ⭐ 내가 보낸 말은 내가 읽은 말이다 — 커서를 그 자리까지 올린다. 그래야
+        # (1) 내 뱃지가 내 말 때문에 늘어나지 않고 (2) 남의 화면에서 **내가**
+        # 그 메시지를 안 읽은 사람으로 세어지지 않는다 (카운트 공식의 `p ≠ A`
+        # 가 여기서 자연히 성립한다). 발행 파일은 아래 아웃박스가 **같은 커밋**
+        # 으로 밀어낸다 — 읽음 발행이 메시지보다 앞서 끼어들 여지가 없다.
+        try:
+            tracker = self.reads(room_id)
+            if tracker.mark(record.id):
+                tracker.publish()
+        except Exception:  # noqa: BLE001 — 읽음 표시가 전송을 막지 않는다
+            log.debug("방 %s 전송 후 읽음 커서 전진 실패", room_id, exc_info=True)
         # 파일이 생긴 **뒤에** 센다. 순서가 반대면 append 가 실패한 건까지 세어
         # "안 나간 것이 있다"고 거짓말한다.
         self.outbox(room_id).add()
@@ -661,6 +709,125 @@ class RoomManager:
         message = schema.parse_record(record)
         self._deliver(room_id, message, own=True)
         return message
+
+    # ---------------------------------------------------------------- 읽음
+
+    def reads(self, room_id: str) -> _reads.ReadTracker:
+        """방의 읽음 커서. 없으면 만든다 (채널이 준비돼 있어야 한다)."""
+        with self._lock:
+            tracker = self._reads.get(room_id)
+            if tracker is not None:
+                return tracker
+        channel = self._ready_channel(room_id)      # 락 밖에서 (오래 걸릴 수 있다)
+        with self._lock:
+            tracker = self._reads.get(room_id)
+            if tracker is not None:
+                return tracker
+            tracker = _reads.ReadTracker(channel, self.person)
+            self._reads[room_id] = tracker
+        return tracker
+
+    def unread(self, room_id: str) -> int:
+        """내가 안 읽은 개수. **아직 안 붙은 방은 0** 이다 (모르는 것을 세지 않는다).
+
+        ⚠️ 여기서 채널을 열지 않는다 — 방 목록을 그리는 경로라 클론을 시작하거나
+        원격을 보면 안 된다. 이미 열려 있는 방만 센다.
+        """
+        with self._lock:
+            if room_id not in self._channels:
+                return 0
+        try:
+            # 뱃지는 **내 것**이라 남의 커서를 읽지 않는다 (`ReadTracker.unread`).
+            return self.reads(room_id).unread()[0]
+        except (RoomError, RoomNotReady):
+            return 0
+        except Exception:  # noqa: BLE001 — 뱃지 하나가 방 목록을 죽이지 않는다
+            log.debug("방 %s 안 읽은 개수 계산 실패", room_id, exc_info=True)
+            return 0
+
+    def read_view(self, room_id: str) -> _reads.ReadView:
+        """방 하나의 읽음 스냅샷 (API·SSE 가 같은 값을 쓴다)."""
+        return self.reads(room_id).view()
+
+    def enter_room(self, room_id: str) -> _reads.ReadView:
+        """⭐ **방을 열 때** 하는 일 — 내 커서 파일이 없으면 만든다.
+
+        참가자 집합 = 커서 파일 집합이므로, 파일이 없으면 나는 분모에 들어가지
+        않는다(= 남의 화면에서 내가 안 읽었다는 사실이 보이지 않는다). 판정은
+        로컬 stat 한 번이고 없을 때만 쓴다. 설치 스크립트가 아니라 여기 있는
+        이유: 나중에 추가한 방을 놓치지 않기 위해서다.
+        """
+        tracker = self.reads(room_id)
+        tracker.ensure_local()
+        if tracker.ensure_participant():
+            # 발행은 best-effort 다 — 아웃박스가 배칭·백그라운드로 민다.
+            self._nudge_outbox(room_id)
+        return tracker.view()
+
+    def mark_read(self, room_id: str, message_id: str) -> _reads.ReadView:
+        """"여기까지 읽었다" — 로컬 커서를 전진시키고 발행을 아웃박스에 맡긴다.
+
+        ⭐ **내 쪽은 낙관적이다**: 로컬 커서는 즉시 움직이고(그래서 뱃지가 바로
+        줄어든다), 남에게 알리는 push 는 뒤에서 나간다. 커서가 안 움직였으면
+        발행도 하지 않는다 — 같은 값을 되풀이해 push 하지 않는다.
+        """
+        tracker = self.reads(room_id)
+        moved = tracker.mark(message_id)
+        if moved:
+            if tracker.publish():
+                self._nudge_outbox(room_id)
+            # 뱃지(방 목록)와 방 안 카운트가 같은 사실의 두 표현이라 함께 알린다.
+            self._publish_reads(room_id, tracker.view())
+            self._publish_rooms()
+        return tracker.view()
+
+    def _nudge_outbox(self, room_id: str) -> None:
+        """디스크에 쓴 것을 밀어내라고 아웃박스를 깨운다 (건수는 세지 않는다).
+
+        ⚠️ `add()` 가 아니라 `kick()` 이다 — 아웃박스의 `pending` 은 **메시지**
+        건수이고, 읽음 커서는 메시지가 아니다. 그 숫자를 오염시키면 "아직 못
+        나간 말이 있다"가 거짓말이 된다.
+        """
+        try:
+            self.outbox(room_id).kick()
+        except (RoomError, RoomNotReady) as exc:
+            log.debug("방 %s 읽음 발행 밀어내기 실패: %s", room_id, exc)
+
+    def _publish_reads(self, room_id: str, view: _reads.ReadView) -> None:
+        """읽음 스냅샷을 SSE 로 민다 — **바뀐 순간에만.**"""
+        print_ = view.fingerprint()
+        with self._lock:
+            if self._read_prints.get(room_id) == print_:
+                return
+            self._read_prints[room_id] = print_
+        self.bus.publish(room_id, "reads", {"room": room_id, **view.to_json()})
+
+    def _reads_tick(self, room_id: str) -> None:
+        """폴 한 틱이 끝났다 — 남의 커서가 움직였는지 보고, 움직였으면 알린다.
+
+        ⭐ 이 훅이 필요한 이유: 읽음 커서는 **레코드가 아니다.** 상대가 읽기만
+        하면 새 메시지가 0건인 커밋이 올라오므로 구독 콜백은 한 번도 불리지
+        않는다. 기반이 틱을 알려 주지 않으면 소비자가 원격을 보는 스레드를 하나
+        더 두게 된다 (`gitwire.Channel.subscribe(on_cycle=...)`).
+
+        비용: 캐시된 나열뿐이라 **변화가 없으면 git 호출이 0회**다.
+        """
+        try:
+            with self._lock:
+                if room_id not in self._channels:
+                    return
+            view = self.reads(room_id).view()
+        except (RoomError, RoomNotReady):
+            return
+        except Exception:  # noqa: BLE001
+            log.debug("방 %s 읽음 갱신 실패", room_id, exc_info=True)
+            return
+        with self._lock:
+            changed = self._read_prints.get(room_id) != view.fingerprint()
+        if not changed:
+            return
+        self._publish_reads(room_id, view)
+        self._publish_rooms()               # 뱃지도 같은 사실의 표현이다
 
     # -------------------------------------------------------------- 아웃박스
 
@@ -812,8 +979,13 @@ class RoomManager:
             log.warning("방 %s 폴링 오류: %s", _rid, exc)
             self.bus.publish(_rid, "trouble", {"room": _rid, "detail": str(exc)})
 
+        def on_cycle(_head, _rid=room_id):
+            # 읽음 커서는 레코드가 아니라 폴링 콜백이 불리지 않는다 — 틱마다
+            # 남의 커서를 보고 **바뀐 순간에만** 화면에 알린다 (`_reads_tick`).
+            self._reads_tick(_rid)
+
         try:
-            sub = channel.subscribe(callback, on_error=on_error)
+            sub = channel.subscribe(callback, on_error=on_error, on_cycle=on_cycle)
         except Exception as exc:  # noqa: BLE001
             log.warning("방 %s 구독 실패: %s", room_id, exc)
             return
@@ -861,6 +1033,8 @@ class RoomManager:
             self._subs.clear()
             channels = list(self._channels.values())
             self._channels.clear()
+            self._reads.clear()
+            self._read_prints.clear()
         for sub in subs:
             try:
                 sub.stop()
@@ -928,6 +1102,8 @@ class RoomManager:
             channel.poll_once(callback)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"새로고침 실패: {exc}") from exc
+        # 사람이 누른 새로고침도 폴 한 틱이다 — 남의 커서가 움직였으면 알린다.
+        self._reads_tick(room_id)
         return delivered
 
     def info(self, room_id: str) -> dict:

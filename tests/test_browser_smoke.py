@@ -28,6 +28,7 @@ stub 하네스가 못 잡는 구간이 정확히 셋이다:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -384,6 +385,109 @@ frame.addEventListener('load', function () {
 </script></body></html>"""
 
 
+#: ⭐ **읽음 표시가 실제로 보이는지** 재는 페이지 (배치 3종 × 팔레트 × 좁은 폭).
+#:
+#: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라(네트워크·git 을 타지
+#: 않으려고) 메시지 줄이 그려지지 않는다. 그래서 `message-node.js` 가 만드는 것과
+#: **같은 구조**를 손으로 세우고 진짜 `style.css` 를 물린다 (구조가 어긋나면 stub
+#: DOM 테스트가 먼저 깨진다 — 조각·클래스 이름을 거기서 고정한다).
+#:
+#: 여기서 보려는 것은 클레임이 아니라 **브라우저가 계산한 값**이다:
+#:   · 카운트 뱃지가 바닥과 다른 색으로 칠해지나 (팔레트마다)
+#:   · 그 뱃지가 **자리를 차지하지 않나** (절대 위치 — 줄 높이가 그대로인가)
+#:   · 320px 에서 가로 스크롤이 생기지 않나
+#:   · 구분선이 보이나 (높이 > 0)
+#:   · 방 목록 뱃지가 보이나
+PROBE_READS_ROWS = """<!doctype html><html lang="ko"%(layout)s%(theme)s>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<link rel="stylesheet" href="/static/style.css"></head><body>
+<div class="app">
+<aside class="sidebar"><ul class="rooms">
+<li class="room"><button class="room-btn" id="rb"><span class="room-name">방</span>
+<span class="room-url">주소</span><span class="room-unread" id="badge">3</span></button></li>
+<li class="room active"><button class="room-btn" id="rb2"><span class="room-name">보는 방</span>
+<span class="room-url">주소</span><span class="room-unread" id="badge2">7</span></button></li>
+</ul></aside>
+<main class="chat"><div class="timeline"><div class="messages">
+<article class="msg" id="m0" data-row="even" data-sender="1" data-index="0">
+<time class="ts"><span class="hm">14:03</span><span class="sec">:22</span></time>
+<span class="author">앨리스</span>
+<div class="msg-head"><span class="author">앨리스</span><time class="ts">14:03</time></div>
+<div class="line"><div class="body">읽음 숫자가 붙는 줄 — 본문이 길어도 숫자와 겹치지
+않아야 한다 (오른쪽 여백을 미리 비워 둔다)</div></div>
+<span class="msg-reads" id="r0">2</span></article>
+<article class="msg" id="m1" data-row="odd" data-sender="3" data-index="1">
+<div class="new-mark" id="nm"><span class="new-mark-label">여기부터 새 메시지</span></div>
+<time class="ts"><span class="hm">14:04</span><span class="sec">:01</span></time>
+<span class="author">밥</span>
+<div class="msg-head"><span class="author">밥</span><time class="ts">14:04</time></div>
+<div class="line"><div class="body">구분선이 붙은 줄</div></div>
+<span class="msg-reads" id="r1" hidden></span></article>
+<article class="msg mine" id="m2" data-row="even" data-sender="2" data-index="2">
+<time class="ts"><span class="hm">14:05</span><span class="sec">:44</span></time>
+<span class="author">나</span>
+<div class="msg-head"><span class="author">나</span><time class="ts">14:05</time></div>
+<div class="line"><div class="body">내 말 — 여기에도 숫자가 붙는다</div></div>
+<span class="msg-reads" id="r2">99+</span></article>
+</div></div></main></div></body></html>"""
+
+#: 위 페이지를 정해진 폭의 iframe 에 넣고 계산된 값을 회수한다 (`log`·`ide` 와 같은
+#: 이유 — 이 환경의 헤드리스 Edge 는 뷰포트를 492px 아래로 못 내린다).
+PROBE_READS_FRAME = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+</head><body style="margin:0">
+<iframe id="f" src="/__test__/probereads/%(layout)s/%(theme)s/0"
+        style="width:%(width)dpx;height:640px;border:0"></iframe>
+<pre id="out"></pre>
+<script>
+var frame = document.getElementById('f');
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow;
+  var doc = frame.contentDocument;
+  function cs(id) { return win.getComputedStyle(doc.getElementById(id)); }
+  function box(id) { return doc.getElementById(id).getBoundingClientRect(); }
+  document.getElementById('out').textContent = JSON.stringify({
+    viewport: win.innerWidth,
+    /* 카운트 뱃지 — 보이나 · 색이 바닥과 다른가 · **자리를 차지하지 않나** */
+    reads_display: cs('r0').display,
+    reads_position: cs('r0').position,
+    reads_color: cs('r0').color,
+    mine_reads_color: cs('r2').color,
+    row_bg: cs('m0').backgroundColor,
+    reads_visible: box('r0').width > 0 && box('r0').height > 0,
+    reads_hidden_when_zero: cs('r1').display === 'none',
+    /* 절대 위치라 줄 높이에 영향이 없다 — 숫자가 있는 줄과 없는 줄의 높이가 같다
+       (본문이 다르면 비교가 안 되므로 여기서는 **숫자 칸의 흐름 점유**만 본다). */
+    reads_in_flow: (function () {
+      var line = doc.querySelector('#m0 .line').getBoundingClientRect();
+      var pill = box('r0');
+      return pill.top >= line.bottom;      /* 흐름을 차지하면 줄 아래로 밀린다 */
+    })(),
+    /* 숫자가 줄 **안**에 있나 (밖으로 삐져나가면 가로 스크롤이 된다) */
+    reads_inside_row: (function () {
+      var row = box('m0');
+      var pill = box('r0');
+      return pill.right <= row.right + 1 && pill.left >= row.left;
+    })(),
+    /* 본문과 겹치지 않나 — 오른쪽 여백을 미리 비워 뒀는지의 실측 */
+    body_right: Math.round(doc.querySelector('#m0 .body').getBoundingClientRect().right),
+    reads_left: Math.round(box('r0').left),
+    /* 구분선 — 보이나 */
+    mark_height: Math.round(box('nm').height),
+    mark_color: cs('nm').color,
+    /* 방 목록 뱃지 — 보이나 · 선택된 방에서도 대비가 남나 */
+    badge_bg: cs('badge').backgroundColor,
+    badge_color: cs('badge').color,
+    badge_visible: box('badge').width > 0 && box('badge').height > 0,
+    badge_inside: box('badge').right <= box('rb').right + 1,
+    active_badge_bg: cs('badge2').backgroundColor,
+    active_badge_color: cs('badge2').color,
+    /* 가로 스크롤이 생기지 않나 (320px 규율) */
+    overflow: doc.documentElement.scrollWidth > win.innerWidth + 1
+  });
+});
+</script></body></html>"""
+
+
 def attach_test_routes(app) -> None:
     """씨앗·측정 페이지를 붙인다. **테스트 안에서만** 존재한다."""
     import json as _json
@@ -414,11 +518,28 @@ def attach_test_routes(app) -> None:
         attr = "" if name == "default" else f' data-chat-theme="{name}"'
         return Response(PROBE_PAGE % {"attr": attr}, mimetype="text/html")
 
+    def probereads(layout: str, name: str, width: int):
+        if width <= 0:
+            theme = "" if name == "default" else f' data-chat-theme="{name}"'
+            box = "" if layout == "bubbles" else f' data-chat-layout="{layout}"'
+            return Response(
+                PROBE_READS_ROWS % {"layout": box, "theme": theme},
+                mimetype="text/html",
+            )
+        body = PROBE_READS_FRAME % {
+            "layout": layout, "theme": name, "width": width
+        }
+        return Response(body, mimetype="text/html")
+
     app.add_url_rule("/__test__/seed/<name>", "test_seed", seed)
     app.add_url_rule("/__test__/seed/<name>/<layout>", "test_seed2", seed)
     app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
     app.add_url_rule("/__test__/probelog/<name>/<int:width>", "test_probelog", probelog)
     app.add_url_rule("/__test__/probeide/<name>/<int:width>", "test_probeide", probeide)
+    app.add_url_rule(
+        "/__test__/probereads/<layout>/<name>/<int:width>",
+        "test_probereads", probereads,
+    )
 
 
 @pytest.fixture
@@ -1275,3 +1396,85 @@ def test_다른_페이지는_갱신을_시작시킬_수_없고_우리_화면은_
     assert guarded.launcher.launches == 1, (
         f"갱신이 {guarded.launcher.launches} 번 시작됐다 (정상 경로 하나만이어야 한다)"
     )
+
+
+# ------------------------------------------------------------- 읽음 표시
+
+#: 배치 × 팔레트 조합. 색과 배치는 직교하므로 둘을 섞어 본다.
+READS_CASES = [
+    ("bubbles", "default"), ("bubbles", "tty"),
+    ("log", "default"), ("log", "log"), ("log", "tui"),
+    ("ide", "default"), ("ide", "ide"), ("ide", "tty"),
+]
+
+
+def _reads_probe(served, tmp_path, layout: str, theme: str, width: int) -> dict:
+    import html as html_mod
+    import json
+    import re as re_mod
+
+    dom, console = open_headless(
+        f"{served.url}__test__/probereads/{layout}/{theme}/{width}",
+        tmp_path / f"profile-{layout}-{theme}-{width}",
+        window="1200,900",
+    )
+    assert not uncaught_lines(console), console[-1500:]
+    found = re_mod.search(r'<pre id="out">(.*?)</pre>', dom, re_mod.S)
+    assert found, f"[{layout}/{theme}/{width}] 측정값을 회수하지 못했다:\n{dom[-1500:]}"
+    return json.loads(html_mod.unescape(found.group(1)))
+
+
+@needs_browser
+@pytest.mark.parametrize("layout,theme", READS_CASES)
+def test_읽음_카운트가_세_배치_모든_팔레트에서_보인다(layout, theme, served, tmp_path):
+    """⭐ "붙였다"가 아니라 **브라우저가 계산한 값**으로 확인한다.
+
+    카운트는 팔레트 토큰(`--accent` · `--mine-ink`)으로 칠하므로, 어느 팔레트에서
+    바닥과 같은 색이 되면 숫자가 **보이지 않는다.** 그건 CSS 를 읽어서는 못 잡는다.
+    """
+    got = _reads_probe(served, tmp_path, layout, theme, 900)
+    print(f"  [{layout}/{theme}] {json.dumps(got, ensure_ascii=False)}")
+
+    assert got["reads_visible"], "카운트 뱃지가 그려지지 않았다"
+    assert got["reads_display"] != "none"
+    # ⭐ **자리를 차지하지 않는다** — 절대 위치라 카운트가 바뀌어도 높이가 그대로다.
+    assert got["reads_position"] == "absolute", got["reads_position"]
+    assert got["reads_in_flow"] is False, "카운트가 흐름을 차지한다 (줄이 밀린다)"
+    # 색이 바닥과 다르다 (보인다).
+    assert got["reads_color"] != got["row_bg"], (got["reads_color"], got["row_bg"])
+    assert got["mine_reads_color"] != got["row_bg"]
+    # 줄 안에 있고, 본문과 겹치지 않는다 (오른쪽 여백을 미리 비워 뒀다).
+    assert got["reads_inside_row"], "카운트가 줄 밖으로 나갔다"
+    assert got["body_right"] <= got["reads_left"] + 1, (
+        f"본문이 카운트 자리까지 뻗었다 (본문 right={got['body_right']} · "
+        f"카운트 left={got['reads_left']})"
+    )
+    # 0 이면 아예 그리지 않는다.
+    assert got["reads_hidden_when_zero"], "카운트 0 인데 자리가 남아 있다"
+    # 구분선도 보인다.
+    assert got["mark_height"] > 0, "'여기부터 새 메시지' 구분선이 보이지 않는다"
+    assert got["mark_color"] != got["row_bg"]
+    # 방 목록 뱃지 — 선택된 방에서도 대비가 남는다 (바닥이 강조색으로 바뀐다).
+    assert got["badge_visible"], "방 목록 뱃지가 그려지지 않았다"
+    assert got["badge_bg"] != got["badge_color"]
+    assert got["active_badge_bg"] != got["active_badge_color"]
+    assert got["badge_inside"], "뱃지가 방 버튼 밖으로 나갔다"
+
+
+@needs_browser
+@pytest.mark.parametrize("layout", ["bubbles", "log", "ide"])
+def test_320px_에서도_읽음_표시가_가로_스크롤을_만들지_않는다(layout, served, tmp_path):
+    """320px 규율 — 좁은 폭은 미디어 쿼리라 **실제 뷰포트**에서만 재진다.
+
+    iframe 을 쓰는 이유: 이 환경의 헤드리스 Edge 는 `--window-size` 를 줘도
+    뷰포트가 492px 아래로 내려가지 않는다 (`log`·`ide` 측정과 같은 함정).
+    """
+    got = _reads_probe(served, tmp_path, layout, "default", 320)
+    print(f"  [{layout}/320px] {json.dumps(got, ensure_ascii=False)}")
+    assert got["viewport"] == 320, got["viewport"]
+    assert got["overflow"] is False, "320px 에서 가로 스크롤이 생겼다"
+    assert got["reads_visible"], "320px 에서 카운트가 사라졌다"
+    assert got["reads_inside_row"], "320px 에서 카운트가 줄 밖으로 나갔다"
+    assert got["body_right"] <= got["reads_left"] + 1, "320px 에서 본문과 겹친다"
+    assert got["badge_visible"], "320px 에서 방 목록 뱃지가 사라졌다"
+    assert got["mark_height"] > 0, "320px 에서 구분선이 사라졌다"

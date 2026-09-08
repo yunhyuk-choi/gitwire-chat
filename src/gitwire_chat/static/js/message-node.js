@@ -16,6 +16,17 @@
  * 않고 그 자리만 숨긴다. 머리를 보일지 **정하는** 것은 여기가 아니라 모델을
  * 소유한 타임라인이다 (이 파일은 상태를 갖지 않는다).
  *
+ * ⭐ **읽음 카운트**(남이 안 읽은 수)도 같은 규율이다 (`paintReads`) — 그 숫자는
+ * *시간에 따라 변하는 파생값*이라(다른 사람의 커서가 움직이면 아래 메시지 전부가
+ * 함께 줄어든다) 노드를 다시 만들어 그리면 `rebuiltInView` 가 곧바로 깨진다.
+ * 그래서 "보내는 중/실패"와 똑같이 **같은 노드 위에 덧입힌다.**
+ *
+ * ⚠️ 그리고 이 자리는 **자리를 차지하지 않는다**(CSS 절대 위치 + 미리 비워 둔 오른쪽
+ * 여백). 숫자가 붙거나 떨어질 때 높이가 바뀌면 가상 스크롤이 그 항목을 매번 다시
+ * 재야 하고, 카운트는 자주 바뀌므로 그 재측정이 상시 비용이 된다. 반대로 '여기부터
+ * 새 메시지' 구분선(`paintNewFrom`)은 **방을 열 때 한 항목에 한 번**만 붙으므로
+ * 자리를 차지해도 되고, 그때는 머리와 같은 방식으로 그 항목만 다시 잰다.
+ *
  * ⚠️ 여기 두 상태는 **"앱이 이 말을 받았나"** 까지만 말한다 (POST 한 번).
  * 그 뒤 "내 기기를 떠나 상대에게 갔나"는 방 단위 사실이라 `outbox.js` 가 그린다.
  * 전송 응답이 원격 push 를 기다리지 않게 된 순간부터 이 둘은 다른 사건이다 —
@@ -64,12 +75,79 @@ export function itemGap(layout) {
   return GAPS[layout] === undefined ? GAPS.bubbles : GAPS[layout];
 }
 
+/* 카운트가 커도 뱃지가 줄을 밀지 않게 하는 상한. 사람 수라 실제로는 작다. */
+export var MAX_READ_COUNT = 99;
+
 export function buildMessage(dom, msg, hooks, layout) {
   var build = STRUCTURES[layout] || STRUCTURES.bubbles;
   var wrap = build(dom, msg, hooks);
+  /* 읽음 자리·구분선은 **구조와 무관하다** — 어느 배치든 같은 두 조각을 단다.
+     그래서 배치를 하나 더 붙일 때 읽음 표시를 다시 배선하지 않는다. */
+  readSlots(dom, wrap);
   /* 전송 상태는 구조와 무관하다 — 어느 구조든 같은 함수가 덧입힌다. */
   paintState(dom, wrap, msg, hooks);
+  paintReads(wrap, msg.reads);
+  paintNewFrom(dom, wrap, msg.newFrom === true);
   return wrap;
+}
+
+/* 읽음 카운트 자리를 노드에 만든다 (평소엔 숨음). 참조를 들고 있는 이유는
+   `paintState` 와 같다 — 나중에 **이 자리만** 갈아 끼우고 노드는 그대로 쓰기
+   위해서다. **마지막 자식**으로 붙인다: 절대 위치라 순서가 화면에 영향이 없고,
+   구조의 앞부분(각 배치가 정한 조각 순서)을 건드리지 않는다. */
+function readSlots(dom, wrap) {
+  var reads = dom.make('span', 'msg-reads');
+  reads.hidden = true;
+  /* 스크린 리더에는 숫자만으로는 뜻이 통하지 않는다 — 라벨을 붙인다. */
+  reads.setAttribute('title', '이 사람들이 아직 안 읽었다');
+  wrap.appendChild(reads);
+  wrap.readsSlot = reads;
+}
+
+/* 남이 안 읽은 수를 노드에 덧입힌다 — **노드를 새로 만들지 않는다.**
+
+   돌려주는 값은 "바뀌었나"다. 높이는 바뀌지 않으므로(절대 위치) 재측정은 필요
+   없다 — 그래서 카운트가 아무리 자주 바뀌어도 가상 스크롤이 흔들리지 않는다. */
+export function paintReads(node, count) {
+  if (!node || !node.readsSlot) { return false; }
+  var n = typeof count === 'number' && count > 0 ? count : 0;
+  var text = n === 0 ? '' : (n > MAX_READ_COUNT ? MAX_READ_COUNT + '+' : String(n));
+  if (node.readsSlot.textContent === text && node.readsSlot.hidden === (text === '')) {
+    return false;
+  }
+  node.readsSlot.textContent = text;
+  node.readsSlot.hidden = text === '';
+  return true;
+}
+
+/* '여기부터 새 메시지' 구분선을 켜고 끈다 — **메시지 노드는 그대로 쓴다.**
+   (다시 만드는 것은 그 안의 작은 줄 하나이고, 메시지 노드가 아니다 —
+   `rebuiltInView` 는 메시지 노드를 센다.)
+
+   ⭐ 카운트와 달리 **필요할 때만 만든다.** 이 줄이 붙는 항목은 방을 열 때 **하나**
+   뿐이라, 모든 메시지에 숨은 줄을 하나씩 달아 두면 그 방의 메시지 수만큼 헛노드가
+   생긴다. 게다가 이 줄은 각 배치가 정한 조각 순서의 **맨 앞**에 와야 해서, 상시
+   자식으로 두면 구조 계약(`.ts`·`.author`·`.line` …)이 모두 한 칸씩 밀린다.
+
+   돌려주는 값은 "바뀌었나"이고, 바뀌었으면 그 항목의 **높이가 달라졌다**는 뜻이다
+   (구분선은 자리를 차지한다). 그 하나만 다시 재는 판단은 모델을 소유한 타임라인이
+   한다 — 머리(`paintHead`)와 같은 규율이다. */
+export function paintNewFrom(dom, node, on) {
+  if (!node) { return false; }
+  var want = on === true;
+  var have = !!node.newMarkSlot;
+  if (have === want) { return false; }
+  if (!want) {
+    if (node.newMarkSlot.parentNode === node) { node.removeChild(node.newMarkSlot); }
+    node.newMarkSlot = null;
+    return true;
+  }
+  var mark = dom.make('div', 'new-mark');
+  mark.appendChild(dom.make('span', 'new-mark-label', '여기부터 새 메시지'));
+  /* 맨 위에 둔다 — 이 메시지가 '새 메시지 첫 줄'이라는 뜻이다. */
+  node.insertBefore(mark, node.firstChild);
+  node.newMarkSlot = mark;
+  return true;
 }
 
 /* 말풍선 구조 (지금까지의 모습). 좌우 정렬은 CSS 의 `.msg.mine` 이 정한다. */

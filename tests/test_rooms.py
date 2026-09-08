@@ -118,6 +118,20 @@ def test_등록은_클론을_기다리지_않고_즉시_돌아온다(settings):
         mgr.stop()
 
 
+def _events(sub, name: str) -> int:
+    """구독자 큐에서 **그 이름의** 이벤트만 센다 (큐를 비우면서).
+
+    아웃박스·방 목록·읽음 상태는 각자의 시점에 흐르는 별개 사건이다. 큐 길이로
+    세면 배경 스레드가 언제 도는지에 따라 결과가 갈린다.
+    """
+    found = 0
+    while not sub.queue.empty():
+        event = sub.queue.get_nowait()
+        if event is not None and event.name == name:
+            found += 1
+    return found
+
+
 def test_보내면_레코드가_남고_로컬_에코가_즉시_흐른다(manager, fake_opener):
     room = manager.register(REPO)
     sub = manager.bus.subscribe(room.id, client="tab")
@@ -125,7 +139,10 @@ def test_보내면_레코드가_남고_로컬_에코가_즉시_흐른다(manager
     message = manager.send(room.id, "안녕", author="최윤혁")
 
     assert message.author == "최윤혁" and message.text == "안녕"
-    assert sub.queue.qsize() == 1              # 폴 주기를 기다리지 않는다
+    # 폴 주기를 기다리지 않는다. ⚠️ 세는 것은 **message 이벤트**다 — 아웃박스
+    # 상태는 워커 스레드가 자기 시점에 미는 별개 사건이라, 전체 큐 길이로 세면
+    # 그 스레드가 언제 도는지에 따라 통과·실패가 갈린다.
+    assert _events(sub, "message") == 1
     channel = list(fake_opener.channels.values())[0]
     assert channel.records[-1].payload["text"] == "안녕"
     assert channel.records[-1].payload["kind"] == "msg"
@@ -141,7 +158,7 @@ def test_같은_메시지가_두_번_와도_한_번만_흐른다(manager, fake_o
     record = channel.records[-1]
     assert manager.on_record(room.id, record) is False   # 같은 ID → 무시
     assert manager.on_record(room.id, record) is False
-    assert sub.queue.qsize() == 1
+    assert _events(sub, "message") == 1
     assert message.id == record.id
 
 

@@ -63,10 +63,20 @@ class FakeChannel:
     def __init__(self, repo_url: str, **kwargs) -> None:
         self.repo_url = repo_url
         self.kwargs = kwargs
+        # 채널 디렉토리 — 기반은 여기에 소비자별 커서를 둔다. 읽음 커서(내 것)가
+        # 그 표면을 그대로 쓰므로 대역도 **진짜 디렉토리**를 하나 준다.
+        home = Path(kwargs.get("home") or ".")
+        self.dir = home / "channels" / f"fake-{abs(hash(repo_url)) % 999999:06d}"
+        (self.dir / "cursors").mkdir(parents=True, exist_ok=True)
+        # 참가자 상태 예약 경로의 대역 ({키: ParticipantState}). 기반에서는 커밋된
+        # 트리를 읽는 것이므로, 여기서도 **쓴 즉시 보이는** 사전으로 흉내 낸다.
+        self.states: dict[str, gitwire.ParticipantState] = {}
+        self.state_writes = 0
         # 이 앱은 이제 sender 를 넘기지 않는다 — 기반이 설치본 식별자를 준다.
         self.sender = kwargs.get("sender") or f"fake.host.{abs(hash(repo_url)) % 999999:06d}"
         self.records: list[gitwire.Record] = []
         self.subscribers: list = []
+        self.cycle_hooks: list = []
         self.closed = False
         self.skipped_to = 0
         # 읽기가 원격을 봤는지(=fresh) 그대로 기록한다. 테스트가 이 값을 본다.
@@ -171,8 +181,12 @@ class FakeChannel:
             delivered += 1
         return delivered
 
-    def subscribe(self, callback, *, interval=None, on_error=None):
+    def subscribe(self, callback, *, interval=None, on_error=None, on_cycle=None):
         self.subscribers.append(callback)
+        # 폴 한 틱 훅. 대역에는 폴링 루프가 없으므로 **테스트가 직접 부른다**
+        # (`channel.tick()`) — 언제 도는지를 손에 쥐어야 "레코드 0건인 변화"를
+        # 셀 수 있다.
+        self.cycle_hooks.append(on_cycle) if on_cycle else None
         channel = self
 
         class _Sub:
@@ -182,10 +196,45 @@ class FakeChannel:
 
         return _Sub()
 
+    # -- 참가자 상태 (예약 경로) ---------------------------------------
+    def state_exists(self, key: str) -> bool:
+        return gitwire.state_key(key) in self.states
+
+    def write_state(self, key, value, *, identity=None, flush=False) -> str:
+        who = gitwire.state_key(key)
+        self.state_writes += 1
+        self.states[who] = gitwire.ParticipantState(
+            key=who,
+            identity=identity if identity is not None else key,
+            value=value,
+            updated_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+        )
+        return gitwire.state_path(who)
+
+    def read_state(self, key: str, *, fresh: bool = False):
+        return self.states.get(gitwire.state_key(key))
+
+    def read_states(self, *, fresh: bool = False) -> dict:
+        return dict(self.states)
+
+    def inject_state(self, key: str, value) -> None:
+        """다른 참가자가 자기 커서를 올린 것처럼 밀어 넣는다."""
+        who = gitwire.state_key(key)
+        self.states[who] = gitwire.ParticipantState(
+            key=who, identity=key, value=value,
+            updated_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
+        )
+
     def skip_to_now(self) -> None:
         with self._lock:
             self.skipped_to = len(self.records)
             self._cursor = len(self.records)
+
+    def tick(self) -> int:
+        """폴 한 틱이 끝난 것처럼 훅을 부른다 (레코드가 0건이어도 불린다)."""
+        for hook in list(self.cycle_hooks):
+            hook("head")
+        return len(self.cycle_hooks)
 
     def info(self) -> dict:
         return {"repo": self.repo_url, "records": len(self.records)}

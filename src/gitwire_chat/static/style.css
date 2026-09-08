@@ -313,6 +313,27 @@ html, body {
 .room-url { font-size: 11px; color: var(--muted); }
 .room.active .room-url { color: var(--accent-muted); }
 
+/* ⭐ **내가** 안 읽은 개수. 방 이름 줄을 밀지 않게 절대 위치로 얹는다 (버튼은
+   세로 flex 라 그냥 붙이면 아래 줄로 내려간다). 이름은 오른쪽 여백을 미리
+   비워 두므로 숫자가 붙거나 떨어져도 줄이 흔들리지 않는다. */
+.room-btn { position: relative; padding-right: 44px; }
+.room-unread {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+/* 선택된 방은 바닥이 이미 강조색이다 — 뱃지는 반대로 뒤집어 대비를 남긴다. */
+.room.active .room-unread { background: var(--accent-ink); color: var(--accent); }
+
 .empty, .hint { margin: 8px 12px; color: var(--muted); font-size: 12px; }
 
 /* 색 테마 고르는 자리 — 설정 성격이라 평소엔 접혀 있고 ◐ 로 펼친다. */
@@ -515,6 +536,48 @@ html, body {
   font-size: 12px;
   color: var(--muted);
 }
+/* ⭐ **남이 안 읽은 수** — 시간에 따라 변하는 파생값이다 (`static/js/reads.js`).
+   ⚠️ **자리를 차지하지 않는다**: 절대 위치 + 미리 비워 둔 오른쪽 여백. 숫자가
+   붙거나 떨어질 때 높이가 바뀌면 가상 스크롤이 그 항목을 매번 다시 재야 하고,
+   카운트는 자주 바뀌므로 그 재측정이 상시 비용이 된다. (`.messages > .msg` 가
+   이미 `position: absolute` 라 그 자체가 기준 상자다 — 새 규칙이 필요 없다.) */
+.msg { padding-right: 34px; }
+.msg-reads[hidden] { display: none; }
+.msg-reads {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  min-width: 16px;
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--accent);
+}
+/* 내 말풍선 위에서도 읽힌다 — 강조색이 바닥과 같은 팔레트가 있어 대비를 잡는다. */
+.msg.mine .msg-reads { color: var(--mine-ink); }
+
+/* '여기부터 새 메시지' — 방을 열 때 **한 항목에 한 번**만 붙는다. 그래서 이건
+   자리를 차지해도 된다(높이 변화는 그 항목만 다시 재면 끝이다 — timeline.js). */
+.new-mark[hidden] { display: none; }
+.new-mark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  color: var(--danger);
+  font-size: 11px;
+}
+.new-mark::before,
+.new-mark::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--danger);
+  opacity: 0.55;
+}
+.new-mark-label { white-space: nowrap; }
+
 .msg-actions { margin-top: 2px; }
 .link {
   border: 0; background: none; padding: 0;
@@ -725,6 +788,13 @@ a.button {
   font-size: 13px;
 }
 
+/* 읽음 카운트 자리 — 줄 배치에서도 **자리를 차지하지 않는다**(절대 위치).
+   오른쪽 여백을 미리 비워 둬 본문과 겹치지 않게 한다. */
+:root[data-chat-layout="log"] .msg { padding-right: 34px; }
+:root[data-chat-layout="log"] .msg-reads { top: 2px; font-size: 11px; }
+/* 구분선은 3열 그리드를 **가로질러야** 한다 (한 칸에 갇히면 시각 칸 폭이 된다). */
+:root[data-chat-layout="log"] .msg .new-mark { grid-column: 1 / -1; margin: 2px 0 4px; }
+
 /* 줄무늬 — **모델 인덱스** 기준. 아주 옅게(읽기를 방해하지 않을 만큼). */
 :root[data-chat-layout="log"] .msg[data-row="odd"] { background: var(--stripe); }
 
@@ -815,6 +885,12 @@ a.button {
 }
 :root[data-chat-layout="ide"] .msg.mine { background: transparent; }
 
+/* 읽음 카운트 — 묶인 줄(머리가 숨은 줄)에도 붙어야 하므로 머리 안이 아니라
+   메시지 노드에 절대 위치로 얹는다. 오른쪽 여백은 미리 비워 둔다. */
+:root[data-chat-layout="ide"] .msg { padding-right: 34px; }
+:root[data-chat-layout="ide"] .msg-reads { top: 3px; }
+:root[data-chat-layout="ide"] .msg .new-mark { margin: 2px 0 2px 9px; }
+
 /* 머리 — 발신자 + 시각. 묶음의 첫 줄에만 있고(숨김은 전역 `[hidden]` 규칙이 한다),
    위쪽 여백이 **묶음 사이의 간격**이 된다 (항목 사이 간격은 2px 로 좁혀 뒀다 —
    그 값은 가상화가 계산하므로 JS 가 안다: message-node.js 의 `GAPS`). */
@@ -864,6 +940,8 @@ a.button {
    세로를 덜 먹는다. 접을 것이 없으므로 여백만 줄인다 (`log` 은 3열이 성립하지
    않아 2열로 접어야 했다). */
 @media (max-width: 480px) {
-  :root[data-chat-layout="ide"] .msg { padding: 0 8px; }
+  /* ⚠️ 오른쪽 여백은 좁혀도 **없애지 않는다** — 읽음 카운트가 앉는 자리다
+     (`padding` 한 줄로 덮어쓰면 그 자리가 사라져 본문과 숫자가 겹친다). */
+  :root[data-chat-layout="ide"] .msg { padding: 0 30px 0 8px; }
   :root[data-chat-layout="ide"] .msg .line { padding-left: 7px; }
 }

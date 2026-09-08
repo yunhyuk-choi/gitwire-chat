@@ -35,6 +35,7 @@ import { createOutbox } from './outbox.js';
 import { createTimeline } from './timeline.js';
 import { createSearch } from './search.js';
 import { createStream } from './stream.js';
+import { createReads } from './reads.js';
 import { createPresence } from './presence.js';
 import { createTheme, fallbackToDefault, DEFAULT_LAYOUT } from './theme.js';
 import { createUpdate } from './update.js';
@@ -141,6 +142,10 @@ export function createApp(runtime) {
     modules.outbox = setup('아웃박스', createOutbox);
     modules.search = setup('검색', createSearch);
     modules.stream = setup('받기', createStream);
+    /* 읽음 모델. **타임라인보다 먼저** 세운다 — 타임라인이 카운트를 물어보기
+       때문이다. 이 단위가 넘어져도 대화는 그대로 뜬다 (카운트만 0 이 된다). */
+    modules.reads = setup('읽음', createReads);
+    env.reads = function () { return modules.reads; };
     modules.presence = setup('알림·가시성', createPresence);
     modules.update = setup('갱신 알림', createUpdate);
     modules.timeline = setup('타임라인', createTimeline, function (mod, err) {
@@ -193,6 +198,10 @@ export function createApp(runtime) {
     createNewRepo: function () { return modules.newrepo ? modules.newrepo.create() : undefined; },
     send: function () { return modules.composer ? modules.composer.send() : undefined; },
     outbox: function () { return modules.outbox ? modules.outbox.state() : null; },
+    reads: function () { return modules.reads ? modules.reads.model() : null; },
+    readsStats: function () { return modules.reads ? modules.reads.stats : null; },
+    markRead: function (id) { return modules.reads ? modules.reads.seen(id) : false; },
+    flushReads: function () { return modules.reads ? modules.reads.flushNow() : undefined; },
     retryOutbox: function () { return modules.outbox ? modules.outbox.retry() : undefined; },
     runSearch: function () { return modules.search ? modules.search.run() : undefined; },
     connect: function (id) { if (modules.stream) { modules.stream.connect(id); } },
