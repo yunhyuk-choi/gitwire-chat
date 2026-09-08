@@ -83,7 +83,10 @@ def palettes() -> dict[str, dict[str, str]]:
             key = "기본-다크"
         else:
             key = "기본-라이트"
-        decls = dict(re.findall(r"(--[a-z-]+)\s*:\s*([^;]+);", block))
+        # ⚠️ 토큰 이름에 **숫자**가 들어간다(`--sender-1`). `[a-z-]+` 로 두면
+        # 그 토큰들이 조용히 안 잡혀, 팔레트가 빠뜨려도 아무 테스트가 안 깨진다
+        # (실제로 한 번 그랬다).
+        decls = dict(re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", block))
         # 토큰(`--*`)이 아닌 일반 선언. 반드시 **글자로 시작**해야 한다 —
         # `[a-z-]+` 로 두면 `--bg` 의 첫 `-` 부터 잡혀 토큰까지 섞여 들어온다.
         extras = re.findall(r"(?<![-\w])([a-z][a-z-]*)\s*:\s*([^;]+);", block)
@@ -257,6 +260,18 @@ TEXT_PAIRS = [
     ("--focus", "--panel", 3.0, "초점 링(패널)"),
 ]
 
+#: 줄 기반 배치(`log`)가 더한 바닥과 글자색. 줄은 `--panel` 이 아니라
+#: `--bg` · `--stripe`(줄무늬) · `--mine` 위에 앉는다 — 그 세 바닥 전부를 본다.
+#: 발신자 색 6종은 **어느 바닥에서도** 읽혀야 한다 (색상만 돌리고 명도는 맞췄다).
+TEXT_PAIRS += [
+    ("--ink", "--stripe", 7.0, "본문(줄무늬)"),
+    ("--muted", "--stripe", 4.5, "보조 글자(줄무늬)"),
+    ("--danger", "--stripe", 4.5, "오류(줄무늬)"),
+]
+for _slot in range(1, 7):
+    for _surface in ("--bg", "--panel", "--stripe", "--mine"):
+        TEXT_PAIRS.append((f"--sender-{_slot}", _surface, 4.5, f"발신자 {_slot}"))
+
 #: 강조 블록(선택된 방·주 버튼) 위의 글자.
 #: 터미널 팔레트는 AA(4.5)를 지킨다. `기본` 은 예전부터 흰 글자를 파란 블록에
 #: 얹어 라이트 3.5~4.6 / 다크 2.6~3.2 인데, `기본` 은 지금 모습을 유지해야 하므로
@@ -285,6 +300,33 @@ def test_팔레트의_대비가_기준을_넘는다(name: str, capsys):
     print(f"  [{name}]")
     print("\n".join(lines))
     assert not bad, "대비 미달:\n  " + "\n  ".join(bad)
+
+
+def test_배치_규칙은_대화_영역에만_걸린다():
+    """⭐ 망가진 배치가 **되돌릴 UI 까지 먹으면** 안 된다.
+
+    배치 규칙이 사이드바·고르는 칸·상태줄에 손을 대면, 배치가 깨질 때 그것을
+    되돌릴 방법이 함께 사라진다 (저장값이 남아 새로고침해도 같은 상태로 뜬다).
+    그래서 `[data-chat-layout=…]` 규칙은 **대화 영역 안에서만** 산다.
+    """
+    css = strip_comments(css_text())
+    off_limits = (
+        ".sidebar", ".theme-bar", "#theme-select", "#layout-select", ".rooms",
+        ".room-btn", ".room-name", ".status", ".composer", ".brand", ".icon-btn",
+        ".add-room", ".search-bar",
+    )
+    allowed = (".msg", ".timeline", ".messages", ".older-sentinel", ".jump")
+    problems = []
+    for line in css.splitlines():
+        if "data-chat-layout" not in line:
+            continue
+        selector = line.split("{")[0]
+        for token in off_limits:
+            if token in selector:
+                problems.append(f"{token} 를 건드린다: {selector.strip()}")
+        if not any(token in selector for token in allowed):
+            problems.append(f"대화 영역 밖이다: {selector.strip()}")
+    assert not problems, "배치 규칙이 경계를 넘었다:\n  " + "\n  ".join(problems)
 
 
 # ------------------------------------------------- 5. 세 곳의 계약 일치

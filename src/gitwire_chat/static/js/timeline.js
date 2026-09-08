@@ -211,6 +211,12 @@ export function createTimeline(env) {
         stats.appended += 1;
       }
       node.setAttribute('data-index', String(vi.index));
+      /* ⭐ 줄무늬(홀짝)의 근거는 **모델 인덱스**다. CSS 의 `:nth-child` 로 하면
+         가상 스크롤이 노드를 걷어내고 다시 붙일 때 DOM 순서가 모델 순서와
+         달라져 **스크롤할 때마다 홀짝이 뒤집힌다.** 인덱스는 이미 여기 있으니
+         추가 배관도 없다. (className 이 아니라 속성으로 찍는다 — 상태 클래스를
+         paintState 가 통째로 다시 쓰기 때문이다.) */
+      node.setAttribute('data-row', vi.index % 2 === 0 ? 'even' : 'odd');
       if (node.style) { node.style.transform = 'translateY(' + vi.start + 'px)'; }
       v.measureElement(node);          /* 가변 높이 실측 */
     }

@@ -58,6 +58,18 @@
   --warn-ink: #8a4b00;
   --warn-line: #f0d3a0;
   --focus: #2f6feb;
+  /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+  --stripe: #fafbfc;
+  --sender-1: #185fe9;
+  --sender-2: #a218e9;
+  --sender-3: #ce1453;
+  --sender-4: #8d620e;
+  --sender-5: #30760b;
+  --sender-6: #0b7651;
   /* 색이 아닌 것 (팔레트를 갈아도 같다) */
   --radius: 12px;
   --gap: 10px;
@@ -86,6 +98,18 @@
     --warn-ink: #8a4b00;
     --warn-line: #f0d3a0;
     --focus: #4d8dff;
+    /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+    --stripe: #181c1f;
+    --sender-1: #71a4ff;
+    --sender-2: #d385ff;
+    --sender-3: #ff76a7;
+    --sender-4: #ffbf4d;
+    --sender-5: #8dff4d;
+    --sender-6: #4dffbf;
   }
 }
 
@@ -108,6 +132,18 @@
   --warn-ink: #e0b06a;
   --warn-line: #6d5a3f;
   --focus: #7fa0c4;
+  /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+  --stripe: #14161a;
+  --sender-1: #7fa0c4;
+  --sender-2: #a682c6;
+  --sender-3: #c47fa0;
+  --sender-4: #c4a37f;
+  --sender-5: #a0c47f;
+  --sender-6: #7fc4a3;
   color-scheme: dark;
 }
 
@@ -130,6 +166,18 @@
   --warn-ink: #e0b06a;
   --warn-line: #6c563b;
   --focus: #82aedb;
+  /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+  --stripe: #1e2228;
+  --sender-1: #82aedb;
+  --sender-2: #b48add;
+  --sender-3: #db82ae;
+  --sender-4: #dbaf82;
+  --sender-5: #aedb82;
+  --sender-6: #82dbaf;
   color-scheme: dark;
 }
 
@@ -152,6 +200,18 @@
   --warn-ink: #c08a3e;
   --warn-line: #594426;
   --focus: #7fa86a;
+  /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+  --stripe: #080a0f;
+  --sender-1: #7fa86a;
+  --sender-2: #6aa893;
+  --sender-3: #778ab0;
+  --sender-4: #9f7ab1;
+  --sender-5: #b0778a;
+  --sender-6: #a8936a;
   color-scheme: dark;
 }
 
@@ -174,6 +234,18 @@
   --warn-ink: #e0b06a;
   --warn-line: #6d5b40;
   --focus: #7ba7d9;
+  /* 줄 기반 배치가 쓰는 것들 (말풍선 배치는 안 쓴다).
+     --stripe 는 **바닥과 패널의 중간색**이다 — 그래서 그 둘에서 통과한 글자
+     대비가 줄무늬 위에서도 자동으로 성립한다(사이 값이므로).
+     --sender-N 은 남의 이름 색에서 **색상만 60도씩** 돌리고, 이 팔레트의 모든
+     바닥에 대해 4.5:1 이 되도록 명도만 맞춘 것이다. */
+  --stripe: #12161c;
+  --sender-1: #7ba7d9;
+  --sender-2: #af7fda;
+  --sender-3: #d97ba7;
+  --sender-4: #d9ad7b;
+  --sender-5: #a7d97b;
+  --sender-6: #7bd9ad;
   color-scheme: dark;
 }
 
@@ -544,4 +616,98 @@ a.button {
   font-size: 13px;
   text-decoration: none;
   color: inherit;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 배치: log — 말풍선 대신 **줄**이다 (터미널 로그처럼 훑어 읽는다).
+ *
+ * ⚠️ 여기서 바꾸는 것은 **배치와 색뿐**이고, 이 규칙들은 모두
+ * `:root[data-chat-layout="log"]` 안에 갇혀 있다. 사이드바·고르는 칸·상태줄은
+ * 건드리지 않는다 — 배치가 망가져도 되돌릴 UI 는 살아 있어야 한다
+ * (`tests/test_theme.py` 가 이 경계를 기계로 확인한다).
+ *
+ * 줄무늬(홀짝)를 `:nth-child` 로 칠하지 않는다. 가상 스크롤은 화면 밖 노드를
+ * 걷어내고 다시 붙이므로 **DOM 순서가 모델 순서가 아니다** — nth-child 로 하면
+ * 스크롤할 때마다 홀짝이 뒤집힌다. 대신 타임라인이 **모델 인덱스**를
+ * `data-row` 로 찍어 주고(추가 배관이 없다 — 인덱스는 이미 모델에 있다),
+ * 여기서는 그 값만 본다.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* 줄은 화면 폭을 다 쓴다 — 좌우 정렬은 줄 기반에서 성립하지 않는다.
+   (내 말은 위치가 아니라 **왼쪽 레일 + 옅은 바닥**으로 갈린다.) */
+:root[data-chat-layout="log"] .timeline { padding: 4px 0; }
+:root[data-chat-layout="log"] .older-sentinel { padding: 2px 10px 6px; }
+
+:root[data-chat-layout="log"] .msg {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 0 8px;
+  align-items: baseline;
+  max-width: none;
+  margin: 0;
+  padding: 2px 10px 2px 8px;
+  border: 0;
+  border-left: 2px solid transparent;   /* 내 것일 때만 색이 든다 */
+  border-radius: 0;
+  background: transparent;
+  font-size: 13px;
+}
+
+/* 줄무늬 — **모델 인덱스** 기준. 아주 옅게(읽기를 방해하지 않을 만큼). */
+:root[data-chat-layout="log"] .msg[data-row="odd"] { background: var(--stripe); }
+
+/* 내 말: 위치를 옮기지 않고 레일 + 옅은 바닥으로 표시한다.
+   (줄무늬 규칙보다 **뒤에** 둔다 — 홀짝과 겹칠 때 내 바닥이 이겨야 한다.) */
+:root[data-chat-layout="log"] .msg.mine {
+  border-left-color: var(--mine-ink);
+  background: var(--mine);
+}
+
+/* 시각 — 자릿수를 세로로 맞춘다(tabular-nums). 초까지 보인다. */
+:root[data-chat-layout="log"] .msg .ts {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 발신자 — 사람마다 고유 색. 이름은 그대로 보이므로 색은 **덧붙는 단서**다
+   (색만으로 구분하게 만들지 않는다). 슬롯은 이름에서 계산한다 — 같은 사람은
+   언제나 같은 색이다. */
+:root[data-chat-layout="log"] .msg .author {
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:root[data-chat-layout="log"] .msg[data-sender="1"] .author { color: var(--sender-1); }
+:root[data-chat-layout="log"] .msg[data-sender="2"] .author { color: var(--sender-2); }
+:root[data-chat-layout="log"] .msg[data-sender="3"] .author { color: var(--sender-3); }
+:root[data-chat-layout="log"] .msg[data-sender="4"] .author { color: var(--sender-4); }
+:root[data-chat-layout="log"] .msg[data-sender="5"] .author { color: var(--sender-5); }
+:root[data-chat-layout="log"] .msg[data-sender="6"] .author { color: var(--sender-6); }
+
+/* 본문 줄 — 답장 인용·전송 상태·답장 버튼이 **전부 이 안에서** 산다. */
+:root[data-chat-layout="log"] .msg .line { min-width: 0; }
+:root[data-chat-layout="log"] .msg .body { display: inline; }
+:root[data-chat-layout="log"] .msg .quote {
+  display: block;
+  margin: 0 0 2px;
+  padding: 1px 6px;
+}
+:root[data-chat-layout="log"] .msg .msg-actions { display: inline; margin: 0 0 0 6px; }
+:root[data-chat-layout="log"] .msg .msg-state { display: inline-flex; margin: 0 0 0 6px; }
+
+/* 좁은 폭(320px 안팎): 3열이 성립하지 않는다 — 발신자를 본문 **위**로 접어
+   2열로 만들고, 시각은 분까지만 보인다(초는 자리만 먹는다). */
+@media (max-width: 480px) {
+  :root[data-chat-layout="log"] .msg {
+    grid-template-columns: auto minmax(0, 1fr);
+    row-gap: 1px;
+  }
+  :root[data-chat-layout="log"] .msg .author { grid-column: 2; max-width: none; }
+  :root[data-chat-layout="log"] .msg .line { grid-column: 2; }
+  :root[data-chat-layout="log"] .msg .ts .sec { display: none; }
 }

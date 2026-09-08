@@ -19,11 +19,25 @@
  * 한 자리에 섞으면 "전송 실패"가 두 가지 전혀 다른 사고를 가리키게 된다.
  */
 
-import { timeLabel } from './dom.js';
+import { timeLabel, timeParts } from './dom.js';
+
+/* 발신자 → 색 슬롯(1~6). 이름에서 계산하므로 **같은 사람은 언제나 같은 색**이고,
+   서버에 색을 저장할 필요가 없다. 색은 이름 옆에 덧붙는 단서다 — 이름 자체가
+   그대로 보이므로 색만으로 구분하게 만들지 않는다. */
+export var SENDER_SLOTS = 6;
+
+export function senderSlot(name) {
+  var text = String(name == null ? '' : name);
+  var hash = 0;
+  for (var i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) % 1000003;
+  }
+  return (hash % SENDER_SLOTS) + 1;
+}
 
 /* 이름 → 구조. 레이아웃 테마의 열쇠는 `theme.js` 의 `LAYOUTS` 와 같아야 한다
    (그 일치는 `tests/test_theme.py` 가 확인한다). */
-export var STRUCTURES = { bubbles: buildBubble };
+export var STRUCTURES = { bubbles: buildBubble, log: buildLogRow };
 
 export function buildMessage(dom, msg, hooks, layout) {
   var build = STRUCTURES[layout] || STRUCTURES.bubbles;
@@ -66,6 +80,53 @@ function buildBubble(dom, msg, hooks) {
   var slot = dom.make('div', 'msg-state');
   wrap.appendChild(slot);
   wrap.stateSlot = slot;
+  return wrap;
+}
+
+/* 줄 구조 (배치 `log`) — 시각 · 발신자 · 본문 3열.
+ *
+ * 말풍선과 **같은 조각들**을 쓴다(`.body`·`.quote`·`.msg-actions`·`.msg-state`).
+ * 그래서 답장 인용·"보내는 중"·전송 실패·재시도가 배치와 무관하게 그대로 산다 —
+ * 상태를 덧입히는 함수(`paintState`)도 하나로 유지된다.
+ * 3열 배치·좁은 폭에서 2열로 접기·좁을 때 초 숨기기는 전부 CSS 가 한다.
+ */
+function buildLogRow(dom, msg, hooks) {
+  var wrap = dom.make('article', 'msg');
+  wrap.dataset.id = msg.id;
+  wrap.setAttribute('data-id', msg.id);
+  /* 발신자 색 슬롯. CSS 가 이 값으로 색을 고른다 (JS 는 색을 모른다 —
+     색은 팔레트가 갖고, 팔레트가 바뀌면 이 슬롯의 색도 따라 바뀐다). */
+  wrap.setAttribute('data-sender', String(senderSlot(msg.author)));
+
+  var parts = timeParts(msg.ts);
+  var when = dom.make('time', 'ts');
+  when.appendChild(dom.make('span', 'hm', parts ? parts.head : ''));
+  /* 초는 별도 조각 — 좁은 폭에서 CSS 가 이것만 숨긴다. */
+  when.appendChild(dom.make('span', 'sec', parts ? parts.sec : ''));
+  wrap.appendChild(when);
+
+  wrap.appendChild(dom.make('span', 'author', msg.author));
+
+  var line = dom.make('div', 'line');
+  if (msg.reply_to) {
+    var quote = dom.make('div', 'quote');
+    var target = hooks.lookup ? hooks.lookup(msg.reply_to) : null;
+    dom.setText(quote, '↩ ' + (target ? target.author + ': ' + target.text : '이전 메시지'));
+    line.appendChild(quote);
+  }
+  line.appendChild(dom.make('div', 'body', msg.text));
+
+  var actions = dom.make('div', 'msg-actions');
+  var reply = dom.make('button', 'link', '답장');
+  reply.setAttribute('type', 'button');
+  reply.addEventListener('click', function () { hooks.onReply(msg); });
+  actions.appendChild(reply);
+  line.appendChild(actions);
+
+  var slot = dom.make('div', 'msg-state');
+  line.appendChild(slot);
+  wrap.stateSlot = slot;
+  wrap.appendChild(line);
   return wrap;
 }
 

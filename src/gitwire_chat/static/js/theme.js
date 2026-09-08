@@ -61,7 +61,8 @@ export var DEFAULT_THEME = 'default';
    새로고침이면 세 위험이 **존재 자체가 사라진다.** 대신 읽던 자리는 픽셀이 아니라
    **앵커 메시지 id** 로 남겨 복원한다 (`timeline.js` 가 그 일을 소유한다). */
 export var LAYOUTS = [
-  { id: 'bubbles', label: '말풍선', note: '지금까지의 모습 — 좌우로 갈린 말풍선.' }
+  { id: 'bubbles', label: '말풍선', note: '지금까지의 모습 — 좌우로 갈린 말풍선.' },
+  { id: 'log', label: 'log', note: '줄 기반 — 시각·발신자·본문 3열. 내 말은 왼쪽 레일.' }
 ];
 
 export var DEFAULT_LAYOUT = 'bubbles';

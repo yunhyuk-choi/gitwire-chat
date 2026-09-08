@@ -1471,7 +1471,7 @@ function layoutAttr(doc) {
 
 await test('구조 분기는 한 곳이고, 모르는 레이아웃 이름은 기본으로 떨어진다', () => {
   const names = Object.keys(nodeMod.STRUCTURES);
-  assert.deepEqual(names, ['bubbles'], '출하하는 구조가 하나가 아니다: ' + names);
+  assert.deepEqual(names, ['bubbles', 'log'], '구조 표가 달라졌다: ' + names);
   /* 이름 → 구조 표와 고를 수 있는 목록이 **짝**이어야 한다. 어긋나면 "고를 수는
      있는데 구조가 없는" 이름이 생긴다. */
   assert.deepEqual(themeMod.LAYOUTS.map((l) => l.id).sort(), names.sort());
@@ -1603,6 +1603,170 @@ await test('⭐ 폴백: 테마가 못 서면 기본으로 떨어지고 **화면�
   /* 고르는 칸은 **대화 영역 밖**(사이드바)에 그대로 있다 — 갇히지 않는다. */
   assert.ok(doc.getElementById('theme-select'), '색 고르는 칸이 사라졌다');
   assert.ok(doc.getElementById('layout-select'), '배치 고르는 칸이 사라졌다');
+});
+
+await test('log 배치로 뜨면 줄 구조로 그려진다 (시각·발신자·본문 3조각)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc, chat } = await boot({
+    stored: stored,
+    messages: [msg(1, '첫 줄', '앨리스'), mineMsg(2, '내 줄')]
+  });
+  assert.equal(chat.layout(), 'log');
+  assert.equal(layoutAttr(doc), 'log', '루트 표식이 없다 — CSS 가 안 걸린다');
+
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows.length, 2);
+  const row = rows[0];
+  /* 3조각: `.ts` · `.author` · `.line`. 말풍선의 `.msg-head` 는 없다. */
+  assert.deepEqual(row.children.map((c) => String(c.className)), ['ts', 'author', 'line']);
+  assert.equal(row.children[1].textContent, '앨리스');
+  /* 시각은 초까지, 그리고 초는 **별도 조각**이다 (좁은 폭에서 CSS 가 이것만 숨긴다). */
+  const when = row.children[0];
+  assert.deepEqual(when.children.map((c) => String(c.className)), ['hm', 'sec']);
+  /* 오늘이면 HH:MM, 다른 날이면 M/D HH:MM — 어느 쪽이든 분까지가 이 조각이다. */
+  assert.ok(/\d{2}:\d{2}$/.test(when.children[0].textContent), when.children[0].textContent);
+  assert.ok(/^:\d{2}$/.test(when.children[1].textContent), when.children[1].textContent);
+  /* 내 것은 **위치가 아니라** 클래스로 갈린다 (줄 기반에서 좌우는 성립하지 않는다). */
+  assert.equal(isMine(rows[1]), true);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('발신자 색 슬롯은 이름에서 나온다 (같은 사람 = 언제나 같은 색)', async () => {
+  assert.equal(nodeMod.senderSlot('앨리스'), nodeMod.senderSlot('앨리스'));
+  const slots = ['앨리스', '밥', '캐럴', '데이브', '이브', '프랭크', '그레이스']
+    .map(nodeMod.senderSlot);
+  for (const s of slots) {
+    assert.ok(s >= 1 && s <= nodeMod.SENDER_SLOTS, '슬롯이 범위를 벗어났다: ' + s);
+  }
+  assert.ok(new Set(slots).size >= 4, '이름 7개가 색 4가지도 안 된다: ' + slots);
+
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc } = await boot({
+    stored: stored, messages: [msg(1, '하나', '앨리스'), msg(2, '둘', '밥')]
+  });
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows[0].getAttribute('data-sender'), String(nodeMod.senderSlot('앨리스')));
+  assert.equal(rows[1].getAttribute('data-sender'), String(nodeMod.senderSlot('밥')));
+});
+
+await test('⭐ 줄무늬는 **모델 인덱스** 기준이다 (스크롤해도 홀짝이 뒤집히지 않는다)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc, chat } = await boot({
+    stored: stored, messages: manyMessages(200), viewport: 300
+  });
+  const list = doc.getElementById('messages');
+  const timeline = doc.getElementById('timeline');
+
+  function check(where) {
+    const ids = chat.items().map((m) => m.id);
+    let domOrderDiffers = false;
+    let lastIndex = -1;
+    for (const node of list.children) {
+      const index = Number(node.getAttribute('data-index'));
+      /* 모델에서의 자리와 홀짝 표식이 맞나 */
+      assert.equal(ids[index], node.dataset.id, where + ': data-index 가 모델과 다르다');
+      assert.equal(node.getAttribute('data-row'), index % 2 === 0 ? 'even' : 'odd',
+        where + ': ' + index + '번의 홀짝이 틀렸다');
+      if (index < lastIndex) { domOrderDiffers = true; }
+      lastIndex = index;
+    }
+    return domOrderDiffers;
+  }
+
+  check('처음');
+  let sawShuffle = false;
+  /* ⚠️ 마지막 두 개가 요점이다: 창이 **겹치는** 상태로 위로 조금 올라가면
+     남아 있는 노드 뒤에 낮은 인덱스가 붙어 DOM 순서가 모델 순서와 어긋난다. */
+  for (const offset of [3000, 9000, 14000, 13600, 500]) {
+    timeline.scrollTop = offset;
+    timeline.dispatch('scroll');
+    await settle();
+    sawShuffle = check('scrollTop ' + offset) || sawShuffle;
+  }
+  /* ⭐ 대조군의 자리: 가상 스크롤은 노드를 걷어내고 **끝에 다시 붙인다.** 그래서
+     DOM 순서가 모델 순서와 실제로 어긋난다 — `:nth-child` 로 칠했다면 바로 여기서
+     홀짝이 뒤집혔을 것이다. 어긋남을 확인해 두는 것이 그 증거다. */
+  console.log('      DOM 순서가 모델 순서와 어긋난 적: ' + sawShuffle +
+    ' · 걷어낸 노드 ' + chat.stats.recycled + '개 · rebuiltInView ' +
+    chat.stats.rebuiltInView);
+  assert.equal(sawShuffle, true,
+    'DOM 순서가 한 번도 어긋나지 않았다 — 이 테스트가 무엇도 증명하지 못한다');
+  assert.ok(chat.stats.recycled > 0);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('log 배치에서도 답장 인용·보내는 중·재시도가 산다', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const quoted = msg(1, '원래 말', '앨리스');
+  const reply = msg(2, '답장이다', '밥');
+  reply.reply_to = quoted.id;
+  const { doc, chat, context } = await boot({
+    stored: stored, messages: [quoted, reply]
+  });
+  const rows = doc.getElementById('messages').children;
+  const line = rows[1].children[2];
+  assert.equal(String(line.children[0].className), 'quote');
+  assert.ok(line.children[0].textContent.includes('앨리스: 원래 말'), '인용이 비었다');
+  /* 답장 버튼도 줄 안에 있다 */
+  assert.ok(findByClass(rows[1], 'link'), '답장 버튼이 없다');
+
+  /* 낙관적 전송 → 실패 → 재시도가 같은 노드 위에서 돈다 (구조와 무관하다). */
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = '보내는 중이 보여야 한다';
+  const sending = chat.send();
+  await settle();
+  const bubble = doc.getElementById('messages').children[2];
+  assert.ok(bubble.textContent.includes('보내는 중'), '보내는 중이 안 보인다');
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+  assert.ok(bubble.textContent.includes('보내지 못했다'));
+  assert.ok(findByClass(bubble, 'retry'), '재시도가 없다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('⭐ 배치를 바꾸면 읽던 자리를 남기고 **새로고침한다** (즉시 전환하지 않는다)', async () => {
+  const { doc, chat, context } = await boot({
+    messages: manyMessages(120), viewport: 300
+  });
+  await settle();
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 2500;
+  timeline.dispatch('scroll');
+  await settle();
+  const nodesBefore = doc.getElementById('messages').children.slice();
+  const createdBefore = chat.stats.created;
+
+  assert.equal(chat.setLayout('log'), true, '전환이 일어나지 않았다');
+
+  /* (1) 저장됐다 — 새로고침 뒤에도 그 배치로 뜬다. */
+  assert.equal(context.localStorage.getItem(LAYOUT_KEY), 'log');
+  /* (2) 읽던 자리를 **앵커 메시지 id** 로 남겼다 (픽셀이 아니다). */
+  const saved = JSON.parse(context.localStorage.getItem(ANCHOR_KEY));
+  assert.equal(saved.room, 'r1');
+  assert.ok(saved.id, '앵커 id 가 없다');
+  /* (3) 새로고침을 불렀다. */
+  assert.equal(context.win.reloads, 1, '새로고침하지 않았다');
+  /* (4) ⭐ **즉시 전환하지 않았다** — 이 페이지의 노드는 하나도 손대지 않았다.
+     (즉시 전환하면 높이 캐시가 낡고 창 안 노드를 다시 만들어야 한다.) */
+  assert.equal(chat.stats.created, createdBefore, '전환하려고 노드를 만들었다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.deepEqual(doc.getElementById('messages').children, nodesBefore);
+  assert.ok(doc.getElementById('status').textContent.indexOf('다시 불러온다') >= 0,
+    '새로고침한다는 사실을 화면에 말하지 않았다');
+});
+
+await test('타임라인이 죽어 있어도 배치 전환은 진행된다 (앵커만 없다)', async () => {
+  const { chat, context } = await boot({
+    sabotage: (doc2) => breakWiring(doc2, 'timeline', '타임라인 배선 실패')
+  });
+  assert.equal(chat.setLayout('log'), true);
+  assert.equal(context.win.reloads, 1, '전환이 막혔다');
+  assert.equal(context.localStorage.getItem(ANCHOR_KEY), null);
 });
 
 /* ------------------------------------------------------------ 색 테마 */
