@@ -316,6 +316,28 @@ html, body {
 .empty, .hint { margin: 8px 12px; color: var(--muted); font-size: 12px; }
 
 /* 색 테마 고르는 자리 — 설정 성격이라 평소엔 접혀 있고 ◐ 로 펼친다. */
+/* 갱신 알림 띠 — 사이드바 맨 아래. 방 목록이 길어도 밀려 나가지 않게
+   `margin-top: auto` 로 바닥에 붙인다. */
+.update-bar {
+  margin-top: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+}
+.update-note { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.update-note.new { color: var(--ink); font-weight: 600; }
+.update-note.bad { color: var(--danger); }
+.update-cmd {
+  /* 명령은 사람이 그대로 골라 복사한다 — 고정폭이면 오타를 눈으로 잡는다.
+     `user-select: all` 로 한 번 클릭에 전체가 잡힌다(복사 버튼이 없는 환경 대비). */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 4px 6px; border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink);
+  user-select: all; overflow-wrap: anywhere;
+}
+
 .theme-bar { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .theme-bar[hidden] { display: none; }
 .theme-bar select { width: 100%; }

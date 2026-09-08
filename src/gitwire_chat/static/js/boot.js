@@ -37,6 +37,7 @@ import { createSearch } from './search.js';
 import { createStream } from './stream.js';
 import { createPresence } from './presence.js';
 import { createTheme, fallbackToDefault, DEFAULT_LAYOUT } from './theme.js';
+import { createUpdate } from './update.js';
 
 export function createApp(runtime) {
   var dom = createDom(runtime.doc);
@@ -141,6 +142,7 @@ export function createApp(runtime) {
     modules.search = setup('검색', createSearch);
     modules.stream = setup('받기', createStream);
     modules.presence = setup('알림·가시성', createPresence);
+    modules.update = setup('갱신 알림', createUpdate);
     modules.timeline = setup('타임라인', createTimeline, function (mod, err) {
       /* 타임라인의 실패는 **타임라인에 갇힌다.** 대신 그 자리에 결함을 그린다. */
       if (mod && mod.fail) {
@@ -194,7 +196,9 @@ export function createApp(runtime) {
     retryOutbox: function () { return modules.outbox ? modules.outbox.retry() : undefined; },
     runSearch: function () { return modules.search ? modules.search.run() : undefined; },
     connect: function (id) { if (modules.stream) { modules.stream.connect(id); } },
-    disconnect: function () { if (modules.stream) { modules.stream.disconnect(); } }
+    disconnect: function () { if (modules.stream) { modules.stream.disconnect(); } },
+    checkUpdate: function () { return modules.update ? modules.update.check() : undefined; },
+    copyUpdateCommand: function () { return modules.update ? modules.update.copyCommand() : undefined; }
   };
 
   /* 타임라인이 소유한 상태를 그대로 들여다보는 창 (별도 사본이 아니다 —

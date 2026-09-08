@@ -271,7 +271,8 @@ export const ELEMENT_IDS = [
   'new-repo-use', 'new-repo-error',
   'outbox', 'outbox-text', 'outbox-retry',
   'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',
-  'layout-select', 'layout-note'
+  'layout-select', 'layout-note',
+  'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd'
 ];
 
 /* IntersectionObserver 대역.

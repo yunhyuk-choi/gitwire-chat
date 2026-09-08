@@ -4,7 +4,10 @@
 조각을 밀어 넣거나, 새 메시지마다 페이지를 다시 그리는 일은 없다. 서버는
 JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
 
-    GET  /                                 셸 HTML (1회)
+    GET  /                                 셸 HTML (1회, **캐시 안 함**)
+    GET  /assets/<도장>/<파일>             ⭐ 도장 박힌 정적 자원 (영구 캐시)
+    GET  /api/version                      설치본 버전 · 자원 도장 · 이 프로세스
+    POST /api/update/check                 새 버전이 있나 (⭐ 사용자가 누를 때만)
     GET  /api/rooms                        방 목록 (+ 연결 상태)
     POST /api/rooms                        방 등록 → **즉시 반환**, 클론은 백그라운드
     POST /api/rooms/<id>/retry             실패한 방 다시 연결
@@ -25,14 +28,41 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    make_response,
+    render_template,
+    request,
+    send_from_directory,
+)
 
-from . import events, forges
+from . import assets, events, forges
 from .config import Settings, load_settings
 from .rooms import RoomError, RoomManager, RoomNotReady
 
 log = logging.getLogger(__name__)
+
+#: 배포 이름 — `importlib.metadata` 조회 키이자 pip 인자에 쓰는 이름.
+DIST_NAME = "gitwire-chat"
+
+
+def installed_version() -> str:
+    """설치본 버전 문자열. 소스 체크아웃처럼 메타데이터가 없으면 빈 문자열.
+
+    ⚠️ 이 값은 **캐시 무효화에 쓸 수 없다** — 이 프로젝트는 같은 버전 문자열로
+    여러 번 배포한다. 캐시는 `assets.AssetStamper`(내용 해시)가 깬다. 여기 있는
+    것은 사람이 읽는 표시·보고용이다.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version(DIST_NAME)
+    except Exception:  # noqa: BLE001 — PackageNotFoundError 포함
+        return ""
 
 
 def create_app(
@@ -51,6 +81,12 @@ def create_app(
     app.json.ensure_ascii = False
     app.extensions["gitwire_chat"] = manager
 
+    # 정적 자원 도장. 템플릿은 `asset('app.js')` 로만 URL 을 만든다 —
+    # `url_for('static', ...)` 는 도장이 없어서 캐시를 깰 수 없다.
+    stamper = assets.AssetStamper(app.static_folder)
+    app.extensions["gitwire_chat_assets"] = stamper
+    app.jinja_env.globals["asset"] = stamper.url
+
     if start:
         manager.start()
 
@@ -58,11 +94,88 @@ def create_app(
 
     @app.get("/")
     def index():
-        return render_template(
-            "index.html",
-            default_author=settings.author,
-            recent_limit=settings.recent_limit,
+        # ⚠️ **셸은 캐시하지 않는다.** 도장 박힌 자원 URL 이 이 HTML 안에 들어
+        # 있으므로, 셸이 캐시되면 도장을 바꿔도 브라우저가 옛 URL 을 계속 쓴다 —
+        # 캐시 무효화 전체가 무력화된다. 첫 페인트 전에 도는 인라인 테마 조각도
+        # 여기 있어서 같이 신선해진다. 크기는 6KB 남짓이고 로컬 서버라 비용이 없다.
+        response = make_response(
+            render_template(
+                "index.html",
+                default_author=settings.author,
+                recent_limit=settings.recent_limit,
+            )
         )
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+    # ------------------------------------------------------- 정적 자원
+
+    @app.get(f"{assets.ASSETS_PREFIX}/<stamp>/<path:filename>")
+    def asset(stamp: str, filename: str):
+        """도장 박힌 정적 자원.
+
+        도장이 맞으면 **1년 + immutable** 로 준다. 내용이 바뀌면 도장이 바뀌어
+        URL 자체가 달라지므로, 오래 캐시하는 것이 이 방식의 요점이다.
+        """
+        current = stamper.stamp
+        response = send_from_directory(app.static_folder, filename)
+        if stamp == current:
+            response.headers["Cache-Control"] = (
+                f"public, max-age={assets.ASSET_MAX_AGE}, immutable"
+            )
+            return response
+        # 옛 도장으로 들어온 요청 — 갱신 직후까지 열려 있던 탭이 뒤늦게 부르는
+        # 경우다. 우리는 옛 파일을 보관하지 않으니 **지금 파일**밖에 줄 것이 없다.
+        # 그걸 immutable 로 못 박으면 틀린 내용이 옛 URL 에 영구히 붙는다.
+        # 조용히 넘기지 않는다 — 서버 로그에 남기고 지금 도장을 헤더로 알린다.
+        log.warning(
+            "옛 자원 도장 %s 로 %s 요청 — 지금 도장은 %s. "
+            "그 탭은 새로고침해야 맞는 조합이 된다.",
+            stamp, filename, current,
+        )
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Asset-Stamp"] = current
+        response.headers["X-Asset-Stamp-Mismatch"] = "1"
+        return response
+
+    @app.get("/api/version")
+    def version():
+        """설치본 식별 정보 — 버전 · 자원 도장 · 이 프로세스.
+
+        ``pid`` 를 싣는 이유: 갱신 도구가 "이 포트에 응답하는 것이 정말 내가
+        기록해 둔 그 프로세스인가"를 확인해야 한다. ``prefix``(파이썬 설치 접두사)
+        는 "이 인스턴스가 **지금 갈아치울 그 설치본**에서 왔나"를 가른다 — 다른
+        venv 에서 도는 앱은 이 갱신과 무관하므로 막을 이유가 없다. 루프백 전용
+        앱이라 프로세스 번호·경로는 비밀이 아니다.
+        """
+        return jsonify(
+            {
+                "name": DIST_NAME,
+                "version": installed_version(),
+                "asset_stamp": stamper.stamp,
+                "pid": os.getpid(),
+                "prefix": sys.prefix,
+            }
+        )
+
+    @app.post("/api/update/check")
+    def update_check():
+        """새 버전이 있나 — ⭐ **사용자가 누를 때만** 원격을 본다.
+
+        주기 폴링을 두지 않는 근거와, 여기서 갱신을 *실행하지 않는* 근거는
+        `static/js/update.js` 의 도크에 적어 뒀다 (요지: 인증 없는 루프백 앱에
+        "앱을 죽이고 갈아치우는" 엔드포인트를 두지 않는다 · CLI 가 정본이다).
+
+        이 호출이 하는 일은 ``git ls-remote`` 한 번이다. 상태를 바꾸지 않는다.
+        """
+        from . import updater
+
+        try:
+            return jsonify(updater.check().to_json())
+        except updater.UpdateError as exc:
+            return jsonify({"error": str(exc), "hint": exc.hint}), 400
 
     @app.get("/api/settings")
     def get_settings():

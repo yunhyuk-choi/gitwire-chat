@@ -29,6 +29,7 @@ stub 하네스가 못 잡는 구간이 정확히 셋이다:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,7 @@ from pathlib import Path
 import pytest
 from werkzeug.serving import make_server
 
+import gitwire_chat
 from gitwire_chat.app import create_app
 from gitwire_chat.config import Settings
 
@@ -220,7 +222,7 @@ https://example.invalid/아주/긴/경로/가/이어지는/주소</div></div></a
 </div></div></main></div></body></html>"""
 
 #: 위 페이지를 정해진 폭의 iframe 에 넣고, 그 안의 계산된 값을 회수한다.
-PROBE_LOG_FRAME = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+PROBE_LOG_FRAME = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
 </head><body style="margin:0">
 <iframe id="f" src="/__test__/probelog/%(theme)s/0"
         style="width:%(width)dpx;height:640px;border:0"></iframe>
@@ -361,7 +363,9 @@ def test_실제_브라우저에서_페이지가_예외_없이_뜬다(served, tmp
     )
     # 셸이 실제로 그려졌나 (템플릿이 렌더됐고 우리 정적 파일을 받았나).
     assert 'id="composer"' in dom
-    assert "/static/app.js" in dom
+    # ⚠️ 자원 URL 에는 **내용 도장**이 박힌다 (`/assets/<도장>/app.js`).
+    # 도장 값은 파일이 바뀌면 달라지므로 여기서 값을 고정하지 않는다.
+    assert re.search(r"/assets/[0-9a-f]{12}/app\.js", dom), dom[:2000]
 
 
 @needs_browser
@@ -412,7 +416,7 @@ def test_진입점이_ES_모듈로_실린다(served, tmp_path):
     """
     dom, _ = open_headless(served.url, tmp_path / "profile")
     assert 'type="module"' in dom
-    assert "/static/app.js" in dom
+    assert re.search(r"/assets/[0-9a-f]{12}/app\.js", dom), dom[:2000]
 
 
 # ------------------------------------------------------------- 색 테마
@@ -658,3 +662,111 @@ def test_브라우저가_없으면_건너뛴다는_사실이_드러난다():
         print("브라우저 없음 → 브라우저 연기 테스트 SKIP", file=sys.stderr)
     else:
         assert Path(BROWSER).exists() or shutil.which(BROWSER)
+
+
+# ------------------------------------------- ⭐ 캐시 무효화 (같은 버전 재배포)
+
+
+@pytest.fixture
+def served_copy(tmp_path):
+    """정적 트리의 **사본**을 물고 뜬 앱.
+
+    캐시 무효화를 브라우저에서 재려면 테스트가 정적 파일을 실제로 고쳐야 한다.
+    패키지 안의 원본을 고치면 실패·중단 시 레포가 더러워진 채로 남으므로,
+    사본으로 옮겨 놓고 그것을 고친다.
+
+    ⚠️ 앱에 뒷문을 뚫지 않는다 — Flask 의 `static_folder` 와 우리 스탬퍼의
+    `root` 는 원래 공개 속성이고, 테스트가 그 둘을 같은 곳으로 돌려놓을 뿐이다.
+    """
+    pkg_static = Path(gitwire_chat.__file__).parent / "static"
+    copy = tmp_path / "static"
+    shutil.copytree(pkg_static, copy)
+
+    settings = Settings(
+        home=tmp_path / "chats", author="캐시테스트", poll_interval=0.5,
+        notifications=False,
+    )
+    app = create_app(settings)
+    app.static_folder = str(copy)
+    app.extensions["gitwire_chat_assets"].root = copy
+    try:
+        with RecordingServer(app) as server:
+            server.static_root = copy
+            yield server
+    finally:
+        app.extensions["gitwire_chat"].stop()
+
+
+def stamp_of(dom: str) -> str:
+    """DOM 에 박힌 자원 도장. 셸이 실제로 뱉은 URL 에서 읽는다."""
+    found = re.search(r"/assets/([0-9a-f]{12})/app\.js", dom)
+    assert found, f"셸에 도장 박힌 진입점 URL 이 없다:\n{dom[:2000]}"
+    return found.group(1)
+
+
+@needs_browser
+def test_같은_버전으로_재배포해도_브라우저가_새_파일을_받는다(served_copy, tmp_path):
+    """⭐ **지금의 실패 조건을 그대로 흉내 낸다.**
+
+    이 프로젝트는 `pyproject.toml` 의 버전을 `0.2.0` 에 두고 git 커밋만 배포한다.
+    즉 `importlib.metadata.version()` 은 갱신 후에도 **같은 값**이다. 그 값을
+    캐시 키로 썼다면 브라우저는 옛 JS 를 계속 썼을 것이다 — 사용자가 매번
+    강력 새로고침을 기억해야 하는 절차가 바로 그것이다.
+
+    여기서는 브라우저 프로필을 **같은 것으로 재사용**해 디스크 캐시를 살려 둔
+    채 세 번 연다:
+
+      1회  옛 파일 → 도장 A
+      2회  파일을 고친 뒤(버전 문자열은 그대로) → 도장 B ≠ A, 새 코드가 **실행**된다
+      3회  아무것도 안 고침 → 도장 그대로 + 진입점을 **다시 안 받는다**(캐시 명중)
+
+    3회가 반대 방향을 닫는다: 도장이 그대로면 브라우저는 네트워크를 타지 않는다.
+    그게 없으면 "매번 다 새로 받는다"로도 1·2회를 통과할 수 있다.
+    """
+    from gitwire_chat.app import installed_version
+
+    profile = tmp_path / "profile"          # ⭐ 세 번 모두 같은 프로필 = 캐시 유지
+    entry = served_copy.static_root / "app.js"
+    original = entry.read_bytes()
+    version_before = installed_version()
+
+    # --- 1회: 옛 파일 -------------------------------------------------
+    dom1, console1 = open_headless(served_copy.url, profile)
+    assert not uncaught_lines(console1), console1[-2000:]
+    stamp1 = stamp_of(dom1)
+    assert f"/assets/{stamp1}/app.js" in served_copy.paths, served_copy.paths
+    assert 'data-probe="v2"' not in dom1
+
+    # --- "배포": 버전 문자열은 그대로, 파일 내용만 바뀐다 ----------------
+    entry.write_bytes(
+        original
+        + b"\ndocument.documentElement.setAttribute('data-probe', 'v2');\n"
+    )
+    assert installed_version() == version_before, (
+        "이 테스트의 전제가 깨졌다 — 버전 문자열이 바뀌면 흉내가 아니다"
+    )
+
+    # --- 2회: 새 파일이 실제로 내려오나 -------------------------------
+    served_copy.paths.clear()
+    dom2, console2 = open_headless(served_copy.url, profile)
+    assert not uncaught_lines(console2), console2[-2000:]
+    stamp2 = stamp_of(dom2)
+    assert stamp2 != stamp1, "파일을 고쳤는데 도장이 그대로다 = 캐시가 안 깨진다"
+    assert f"/assets/{stamp2}/app.js" in served_copy.paths, served_copy.paths
+    # ⭐ 클레임이 아니라 **실행된 결과**를 본다 — 새 코드가 루트에 찍은 표식.
+    assert 'data-probe="v2"' in dom2, (
+        "새 진입점이 내려오지 않았다(또는 안 돌았다) = 캐시가 옛 파일을 먹였다"
+    )
+
+    # --- 3회: 안 고치면 그대로 + 캐시 명중 ----------------------------
+    served_copy.paths.clear()
+    dom3, console3 = open_headless(served_copy.url, profile)
+    assert not uncaught_lines(console3), console3[-2000:]
+    assert stamp_of(dom3) == stamp2, "안 고쳤는데 도장이 바뀌었다"
+    assert 'data-probe="v2"' in dom3
+    assert f"/assets/{stamp2}/app.js" not in served_copy.paths, (
+        "도장이 그대로인데 진입점을 또 받아 갔다 = immutable 캐시가 안 먹는다.\n"
+        f"들어온 요청: {served_copy.paths}"
+    )
+    # 셸은 매번 새로 받는다 — 그 안에 새 도장이 들어 있어야 하니까.
+    assert "/" in served_copy.paths
