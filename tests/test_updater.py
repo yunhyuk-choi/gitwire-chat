@@ -1107,8 +1107,13 @@ def test_서버가_스스로를_대장에_적고_그것으로_멈추고_다시_�
         proc.wait(timeout=30)
 
         # --- 대장에 적힌 그대로 다시 띄운다 ----------------------------
+        # ⚠️ `directory=` 를 반드시 준다. 안 주면 다시 뜬 앱이 **다른 대장**
+        # (환경변수가 가리키는 guard-run)에 자기를 적어서, 아래 `finally` 가
+        # 옛 pid 를 죽이고 새 프로세스를 **놓친다** — 실측된 누수였다(테스트를
+        # 돌린 만큼 서버 프로세스가 머신에 쌓였다). 프로덕션 경로
+        # (`updater.update`)는 언제나 이 인자를 넘긴다.
         report = updater.Report()
-        assert updater.start_instance(instance, report), report.lines
+        assert updater.start_instance(instance, report, directory=registry), report.lines
         again = runstate.wait_until_up(port, timeout=BOOT_TIMEOUT)
         assert again is not None, "\n".join(report.lines)
         assert again["pid"] != instance.pid, "새 프로세스여야 한다"
@@ -1118,6 +1123,8 @@ def test_서버가_스스로를_대장에_적고_그것으로_멈추고_다시_�
         assert Path(new_instance.home) == home.resolve()
         assert new_instance.author == "왕복테스트"
     finally:
+        # 이 테스트가 만든 프로세스를 **하나도 남기지 않는다.** 다시 띄운 것은
+        # 대장에서(= 그 새 pid 로), 처음 것은 Popen 핸들로 각각 잡는다.
         candidate = runstate.load(port, directory=registry)
         if candidate is not None:
             try:
@@ -1131,3 +1138,7 @@ def test_서버가_스스로를_대장에_적고_그것으로_멈추고_다시_�
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and runstate.probe(port, timeout=0.5):
             time.sleep(0.3)
+        # 조용히 새지 않는다 — 안 죽었으면 그 사실이 드러나야 한다.
+        assert runstate.probe(port, timeout=1.0) is None, (
+            f"테스트가 띄운 앱이 포트 {port} 에 살아 있다 — 프로세스가 샌다"
+        )
