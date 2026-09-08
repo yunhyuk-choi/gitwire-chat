@@ -76,6 +76,7 @@ XML + COM 이라 *셸/외부 도구 의존*이 생긴다 — 이 모듈이 피�
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -470,6 +471,41 @@ class Backend:
         """지금 서비스 관리자에 올라와 있나 — 사람이 읽을 한 줄."""
         return ""
 
+    # -- 감독자 (갱신이 쓴다) --------------------------------------------
+
+    supervises = False
+    """이 수단이 **죽은 프로세스를 되살리나.**
+
+    갱신(`python -m gitwire_chat update`)에 필요한 사실이다. 되살리는 수단
+    아래에서 프로세스를 직접 죽이면 감독자가 옛 코드로 다시 띄워 버리거나
+    (macOS ``KeepAlive``) 유닛 상태가 어긋난다 — 경합이다. 그런 OS 에서는
+    멈춤·재기동을 **감독자에게 맡긴다.**
+
+    Windows 시작 폴더는 로그인할 때 한 번 띄우고 끝이므로 감독자가 아니다.
+    """
+
+    def registered_port(self) -> int | None:
+        """등록 파일에 박혀 있는 ``--port`` 값. 등록돼 있지 않으면 None.
+
+        갱신이 "지금 돌고 있는 이 인스턴스가 **감독자가 띄운 그것**인가"를
+        판정하는 데 쓴다. 포맷이 셋(cmd·plist·unit)이라 각각을 파싱하지 않고
+        토큰 뒤의 첫 숫자를 읽는다 — 세 포맷 모두 ``--port`` 와 값이 이웃한다.
+        (그 성질은 `tests/test_updater.py` 가 세 포맷 전부로 확인한다.)
+        """
+        text = self.read()
+        if not text:
+            return None
+        found = re.search(r"--port\D{0,60}?(\d+)", text)
+        return int(found.group(1)) if found else None
+
+    def stop_service(self, report: Report) -> bool:
+        """감독자에게 멈추라고 한다. 감독자가 없으면 False."""
+        return False
+
+    def start_service(self, report: Report) -> bool:
+        """감독자에게 띄우라고 한다. 감독자가 없으면 False."""
+        return False
+
     def preflight(self, report: Report) -> bool:
         """등록 전에 이 OS 에서 등록이 가능한지 본다. 불가면 명확히 실패한다."""
         return True
@@ -738,6 +774,28 @@ class MacosBackend(Backend):
         ok, _ = _run(["launchctl", "print", f"{self._domain()}/{LAUNCHD_LABEL}"])
         return "launchd 상태: " + ("올라와 있다" if ok else "올라와 있지 않다")
 
+    #: ⚠️ 이 앱의 plist 는 ``KeepAlive{SuccessfulExit:false}`` 다 — 시그널로
+    #: 죽이면 launchd 가 ``ThrottleInterval`` 뒤에 **옛 코드로 다시 띄운다.**
+    supervises = True
+
+    def stop_service(self, report: Report) -> bool:  # pragma: no cover — macOS 전용
+        if self.custom_dir or not shutil.which("launchctl"):
+            return False
+        ok, out = _run(["launchctl", "bootout", f"{self._domain()}/{LAUNCHD_LABEL}"])
+        if not ok:
+            ok, out = _run(["launchctl", "unload", "-w", self.path])
+        report.say("  launchd: " + ("내렸다" if ok else f"내리지 못했다 — {out}"))
+        return ok
+
+    def start_service(self, report: Report) -> bool:  # pragma: no cover — macOS 전용
+        if self.custom_dir or not shutil.which("launchctl"):
+            return False
+        ok, out = _run(["launchctl", "bootstrap", self._domain(), self.path])
+        if not ok:
+            ok, out = _run(["launchctl", "load", "-w", self.path])
+        report.say("  launchd: " + ("띄웠다" if ok else f"띄우지 못했다 — {out}"))
+        return ok
+
 
 class LinuxBackend(Backend):
     platform = "linux"
@@ -789,6 +847,25 @@ class LinuxBackend(Backend):
             return ""
         ok, out = _run(["systemctl", "--user", "is-active", SYSTEMD_UNIT])
         return f"systemd 상태: {out or ('active' if ok else 'inactive')}"
+
+    #: 유닛에 ``Restart=on-failure`` 가 있고, 무엇보다 유닛이 관리하는 프로세스를
+    #: 밖에서 죽이면 유닛 상태가 어긋난다. 멈춤·재기동은 systemd 에게 맡긴다.
+    #: (``enable`` 상태는 건드리지 않는다 — 자동 시작 등록은 그대로 남는다.)
+    supervises = True
+
+    def stop_service(self, report: Report) -> bool:  # pragma: no cover — Linux 전용
+        if self.custom_dir or not shutil.which("systemctl"):
+            return False
+        ok, out = _run(["systemctl", "--user", "stop", SYSTEMD_UNIT])
+        report.say("  systemd: " + ("멈췄다" if ok else f"멈추지 못했다 — {out}"))
+        return ok
+
+    def start_service(self, report: Report) -> bool:  # pragma: no cover — Linux 전용
+        if self.custom_dir or not shutil.which("systemctl"):
+            return False
+        ok, out = _run(["systemctl", "--user", "start", SYSTEMD_UNIT])
+        report.say("  systemd: " + ("띄웠다" if ok else f"띄우지 못했다 — {out}"))
+        return ok
 
 
 BACKENDS = {

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 from flask import (
     Flask,
@@ -144,8 +145,10 @@ def create_app(
         """설치본 식별 정보 — 버전 · 자원 도장 · 이 프로세스.
 
         ``pid`` 를 싣는 이유: 갱신 도구가 "이 포트에 응답하는 것이 정말 내가
-        기록해 둔 그 프로세스인가"를 확인해야 한다. 루프백 전용 앱이라
-        프로세스 번호는 비밀이 아니다.
+        기록해 둔 그 프로세스인가"를 확인해야 한다. ``prefix``(파이썬 설치 접두사)
+        는 "이 인스턴스가 **지금 갈아치울 그 설치본**에서 왔나"를 가른다 — 다른
+        venv 에서 도는 앱은 이 갱신과 무관하므로 막을 이유가 없다. 루프백 전용
+        앱이라 프로세스 번호·경로는 비밀이 아니다.
         """
         return jsonify(
             {
@@ -153,6 +156,7 @@ def create_app(
                 "version": installed_version(),
                 "asset_stamp": stamper.stamp,
                 "pid": os.getpid(),
+                "prefix": sys.prefix,
             }
         )
 
