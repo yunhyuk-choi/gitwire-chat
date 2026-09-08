@@ -404,6 +404,51 @@ html, body {
 .messages { position: relative; width: 100%; }
 .messages > .msg { position: absolute; top: 0; left: 0; right: 0; }
 
+/* ⭐ **떠 있는 발신자 머리** — 묶는 배치(`ide`)가 쓴다.
+ *
+ * 묶기는 같은 사람이 이어 말할 때 이름을 한 번만 찍는데, 창이 묶음 **중간**에서
+ * 시작하면 그 이름이 화면 밖이라 누가 말했는지 알 수 없다. 그것만 해결하는 장치다
+ * (Slack 의 날짜 구분선·iOS 섹션 헤더와 같은 방식). 띄우는 판단은 타임라인이 하고
+ * (`hidden` 을 토글한다), 여기서는 **자리를 차지하지 않게** 만드는 일만 한다.
+ *
+ * ⚠️ 높이 0 의 sticky 상자 + 그 안의 절대 위치 줄이다. 흐름을 차지하면 가상화가
+ * 계산한 세로 좌표와 실제 픽셀이 어긋나고, 그러면 머리 잘림을 막으려고 붙인 장치가
+ * 스크롤을 망가뜨리는 원인이 된다. 그래서 **오버레이**여야 한다. */
+.sticky-head {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 2;
+  overflow: visible;
+  overflow-anchor: none;
+}
+.sticky-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.sticky-row .ts { font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 이름 색은 줄 안의 머리와 **같은 규칙**을 쓴다 (같은 사람 = 같은 색).
+   슬롯 번호는 타임라인이 찍어 주고, 색은 팔레트가 갖는다. */
+.sticky-row .author { font-weight: 600; color: var(--theirs-ink); }
+.sticky-head[data-sender="1"] .sticky-row .author { color: var(--sender-1); }
+.sticky-head[data-sender="2"] .sticky-row .author { color: var(--sender-2); }
+.sticky-head[data-sender="3"] .sticky-row .author { color: var(--sender-3); }
+.sticky-head[data-sender="4"] .sticky-row .author { color: var(--sender-4); }
+.sticky-head[data-sender="5"] .sticky-row .author { color: var(--sender-5); }
+.sticky-head[data-sender="6"] .sticky-row .author { color: var(--sender-6); }
+/* 내 말이면 내 이름 색이 이긴다 (뒤에 둔다 — 슬롯 규칙과 특정도가 같다). */
+.sticky-head.mine .sticky-row .author { color: var(--mine-ink); }
+
 /* ⭐ 가상 스크롤을 세우지 못했을 때 대화 자리에 뜨는 **결함 표시.**
    한때 여기에 격하(degrade) 배치가 있었다 — 전부 그리기로 계속 가는 폴백이다.
    걷어냈다: 그건 성능 때문에 붙인 기능이 조용히 빠진 채로 앱이 돌게 만든다.
@@ -737,4 +782,88 @@ a.button {
   :root[data-chat-layout="log"] .msg .author { grid-column: 2; max-width: none; }
   :root[data-chat-layout="log"] .msg .line { grid-column: 2; }
   :root[data-chat-layout="log"] .msg .ts .sec { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 배치: ide — **연속 발화 묶기.** 같은 사람이 연달아 말하면 발신자 머리를 한 번만
+ * 찍고 아래로 묶는다. 반복되는 이름·시각이 사라져 세로 밀도를 벌고, 대화의 결이
+ * 남는다 (에디터의 통합 터미널처럼 얌전한 회색 바닥).
+ *
+ * ⭐ **묶음은 CSS 의 단위가 아니다.** 여기 있는 규칙은 전부 `.msg` 한 건에 걸린다 —
+ * 머리는 그 중 첫 메시지가 갖는 조각(`.msg-head`)이고, 나머지 줄에서는 그 조각이
+ * 숨을 뿐이다. 그래서 가상 스크롤이 항목을 하나씩 걷어내고 붙여도 묶음이 깨지지
+ * 않는다(묶음을 감싸는 요소가 애초에 없다).
+ *
+ * ⚠️ `log` 과 같은 경계를 지킨다 — 이 규칙들은 모두 `:root[data-chat-layout="ide"]`
+ * 안에 갇혀 있고 사이드바·고르는 칸·상태줄은 건드리지 않는다. 배치가 망가져도
+ * 되돌릴 UI 는 살아 있어야 한다 (`tests/test_theme.py` 가 기계로 확인한다).
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+:root[data-chat-layout="ide"] .timeline { padding: 4px 0; }
+:root[data-chat-layout="ide"] .older-sentinel { padding: 2px 10px 6px; }
+
+/* 줄은 폭을 다 쓴다. 내 것은 **왼쪽 레일 색만** 바뀐다 (가장 절제된 구분 —
+   위치를 오른쪽으로 옮기지 않고, 바닥도 칠하지 않는다). */
+:root[data-chat-layout="ide"] .msg {
+  max-width: none;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 13px;
+}
+:root[data-chat-layout="ide"] .msg.mine { background: transparent; }
+
+/* 머리 — 발신자 + 시각. 묶음의 첫 줄에만 있고(숨김은 전역 `[hidden]` 규칙이 한다),
+   위쪽 여백이 **묶음 사이의 간격**이 된다 (항목 사이 간격은 2px 로 좁혀 뒀다 —
+   그 값은 가상화가 계산하므로 JS 가 안다: message-node.js 의 `GAPS`). */
+:root[data-chat-layout="ide"] .msg .msg-head {
+  gap: 8px;
+  padding: 7px 0 1px;
+  font-size: 12px;
+}
+:root[data-chat-layout="ide"] .msg .msg-head .author {
+  font-weight: 600;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+:root[data-chat-layout="ide"] .msg .msg-head .ts {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* 발신자마다 고유 색 — `log` 과 같은 슬롯 규칙(이름에서 계산한다). 이름 글자가
+   그대로 보이므로 색은 **덧붙는 단서**다. */
+:root[data-chat-layout="ide"] .msg[data-sender="1"] .author { color: var(--sender-1); }
+:root[data-chat-layout="ide"] .msg[data-sender="2"] .author { color: var(--sender-2); }
+:root[data-chat-layout="ide"] .msg[data-sender="3"] .author { color: var(--sender-3); }
+:root[data-chat-layout="ide"] .msg[data-sender="4"] .author { color: var(--sender-4); }
+:root[data-chat-layout="ide"] .msg[data-sender="5"] .author { color: var(--sender-5); }
+:root[data-chat-layout="ide"] .msg[data-sender="6"] .author { color: var(--sender-6); }
+:root[data-chat-layout="ide"] .msg.mine .msg-head .author { color: var(--mine-ink); }
+
+/* 본문 줄 — 왼쪽 레일이 묶음을 세로로 잇는다. 답장 인용·전송 상태·답장 버튼이
+   **전부 이 안에서** 산다 (말풍선·log 과 같은 조각들이다). */
+:root[data-chat-layout="ide"] .msg .line {
+  min-width: 0;
+  padding-left: 9px;
+  border-left: 2px solid var(--line);
+}
+:root[data-chat-layout="ide"] .msg.mine .line { border-left-color: var(--mine-ink); }
+:root[data-chat-layout="ide"] .msg .body { white-space: pre-wrap; }
+:root[data-chat-layout="ide"] .msg .quote {
+  margin: 0 0 2px;
+  padding: 1px 6px;
+}
+:root[data-chat-layout="ide"] .msg .msg-actions { display: inline; margin: 0 0 0 6px; }
+:root[data-chat-layout="ide"] .msg .msg-state { display: inline-flex; margin: 0 0 0 6px; }
+
+/* 좁은 폭(320px 안팎): 묶기는 여기서 **오히려 이득이 크다** — 반복되는 이름이
+   세로를 덜 먹는다. 접을 것이 없으므로 여백만 줄인다 (`log` 은 3열이 성립하지
+   않아 2열로 접어야 했다). */
+@media (max-width: 480px) {
+  :root[data-chat-layout="ide"] .msg { padding: 0 8px; }
+  :root[data-chat-layout="ide"] .msg .line { padding-left: 7px; }
 }

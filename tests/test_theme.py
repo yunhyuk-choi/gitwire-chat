@@ -272,6 +272,14 @@ for _slot in range(1, 7):
     for _surface in ("--bg", "--panel", "--stripe", "--mine"):
         TEXT_PAIRS.append((f"--sender-{_slot}", _surface, 4.5, f"발신자 {_slot}"))
 
+#: 떠 있는 발신자 머리(`ide` 의 묶기)는 `--bg` 바닥 위에 앉는다 — 이름이 그 위에서
+#: 읽혀야 "누가 말했는지 화면에 있다"가 성립한다. 발신자 색 6종은 위에서 이미
+#: `--bg` 를 보고, 남은 두 이름색을 여기서 본다.
+TEXT_PAIRS += [
+    ("--theirs-ink", "--bg", 4.5, "남의 이름(떠 있는 머리)"),
+    ("--mine-ink", "--bg", 4.5, "내 이름(떠 있는 머리)"),
+]
+
 #: 강조 블록(선택된 방·주 버튼) 위의 글자.
 #: 터미널 팔레트는 AA(4.5)를 지킨다. `기본` 은 예전부터 흰 글자를 파란 블록에
 #: 얹어 라이트 3.5~4.6 / 다크 2.6~3.2 인데, `기본` 은 지금 모습을 유지해야 하므로
@@ -315,6 +323,9 @@ def test_배치_규칙은_대화_영역에만_걸린다():
         ".room-btn", ".room-name", ".status", ".composer", ".brand", ".icon-btn",
         ".add-room", ".search-bar",
     )
+    # ⚠️ 떠 있는 머리(`.sticky-head`)는 이 목록에 없다 — 그 규칙에는
+    # `data-chat-layout` 이 붙지 않기 때문이다(배치와 무관하게 같은 자리이고,
+    # 띄울지 말지는 타임라인이 `hidden` 으로 정한다).
     allowed = (".msg", ".timeline", ".messages", ".older-sentinel", ".jump")
     problems = []
     for line in css.splitlines():

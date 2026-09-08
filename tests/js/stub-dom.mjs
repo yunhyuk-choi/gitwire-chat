@@ -63,10 +63,20 @@ export class Node {
 
   /* 가상화 라이브러리가 항목 높이를 읽는 곳. */
   get offsetHeight() {
+    /* ⭐ 숨은 것은 **자리를 차지하지 않는다** (`[hidden] { display: none }`).
+       이것이 없으면 "묶여서 발신자 머리가 숨었다"가 높이에 나타나지 않아,
+       머리 숨김이 항목 하나의 높이만 바꾼다는 사실을 셀 수 없다. */
+    if (this.hidden) { return 0; }
     if (this._height) { return this._height; }
     /* 정하지 않았으면 자손 수로 대충 만든다 (예전 scrollHeight 규칙과 같은 뜻). */
     let n = 0;
-    const walk = (node) => { for (const c of node.children) { n += 1; walk(c); } };
+    const walk = (node) => {
+      for (const c of node.children) {
+        if (c.hidden) { continue; }
+        n += 1;
+        walk(c);
+      }
+    };
     walk(this);
     return n * 20;
   }
@@ -270,6 +280,7 @@ export const ELEMENT_IDS = [
   'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
   'new-repo-use', 'new-repo-error',
   'outbox', 'outbox-text', 'outbox-retry',
+  'sticky-head', 'sticky-author', 'sticky-ts',
   'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',
   'layout-select', 'layout-note',
   'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd',

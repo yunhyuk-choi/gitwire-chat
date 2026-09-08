@@ -55,6 +55,11 @@ const nodeMod = await import(
 const themeMod = await import(
   url.pathToFileURL(path.join(STATIC, 'js', 'theme.js')).href
 );
+/* 묶기 규칙(시간 컷오프·머리 판정)은 **모델을 소유한** 타임라인 것이다.
+   상수를 테스트가 베끼면 둘이 어긋나도 통과하므로 원천에서 읽는다. */
+const timelineMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'timeline.js')).href
+);
 
 /* 갱신 모듈의 상수(주기·포기 횟수·화면 표식 헤더)를 **원천에서** 읽는다 —
    테스트가 숫자를 베끼면 둘이 어긋나도 통과한다. */
@@ -1477,7 +1482,19 @@ function layoutAttr(doc) {
 
 await test('구조 분기는 한 곳이고, 모르는 레이아웃 이름은 기본으로 떨어진다', () => {
   const names = Object.keys(nodeMod.STRUCTURES);
-  assert.deepEqual(names, ['bubbles', 'log'], '구조 표가 달라졌다: ' + names);
+  assert.deepEqual(names, ['bubbles', 'log', 'ide'], '구조 표가 달라졌다: ' + names);
+  /* 구조가 아는 나머지 두 표(묶는가 · 항목 간격)도 **같은 이름 공간**을 쓴다.
+     어긋나면 "구조는 있는데 묶기·간격이 없는" 배치가 생긴다. */
+  for (const name of Object.keys(nodeMod.GROUPED)) {
+    assert.ok(names.indexOf(name) >= 0, '묶기 표에 없는 배치가 있다: ' + name);
+  }
+  for (const name of Object.keys(nodeMod.GAPS)) {
+    assert.ok(names.indexOf(name) >= 0, '간격 표에 없는 배치가 있다: ' + name);
+  }
+  assert.equal(nodeMod.grouped('ide'), true);
+  assert.equal(nodeMod.grouped('bubbles'), false);
+  assert.equal(nodeMod.grouped('없는배치'), false);
+  assert.equal(nodeMod.itemGap('없는배치'), nodeMod.GAPS.bubbles);
   /* 이름 → 구조 표와 고를 수 있는 목록이 **짝**이어야 한다. 어긋나면 "고를 수는
      있는데 구조가 없는" 이름이 생긴다. */
   assert.deepEqual(themeMod.LAYOUTS.map((l) => l.id).sort(), names.sort());
@@ -1732,6 +1749,318 @@ await test('log 배치에서도 답장 인용·보내는 중·재시도가 산�
   await sending;
   assert.ok(bubble.textContent.includes('보내지 못했다'));
   assert.ok(findByClass(bubble, 'retry'), '재시도가 없다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+/* ----------------------------------------- 배치 `ide` — 연속 발화 묶기 */
+
+/*
+ * ⭐ 여기서 지키는 것은 "묶여 보이나"가 아니라 **묶기가 가상화를 깨지 않나**다.
+ *
+ * 묶기를 가상화 단위로 만들면(묶음 = 항목) 두 곳에서 깨진다: 묶음 크기에 상한이
+ * 없어 3건을 보이려고 200건을 그리게 되고, 과거를 불러올 때 묶음이 합쳐져 항목
+ * 경계·인덱스·키가 흔들린다. 그래서 단위는 **메시지**로 두고 머리를 첫 메시지의
+ * 속성으로 만들었다. 그 선택이 실제로 값을 갚는지를 아래가 수치로 본다:
+ *   · 머리가 잘려도 누가 말했는지 화면에 있다 (떠 있는 머리)
+ *   · 과거를 불러와 묶음이 이어질 때 **그 항목 하나만** 다시 잰다
+ *   · 한 사람이 연달아 수백 건 말해도 DOM 노드 수는 상수에 가깝다
+ *   · `rebuiltInView` 는 어느 경로에서도 0
+ */
+
+/* 로컬 시각 한 점. ⚠️ **로컬**이어야 한다 — 날 경계는 사용자가 보는 달력에서
+   갈리므로, UTC 문자열로 적으면 이 테스트가 실행 기계의 시간대에 따라 갈린다. */
+function when(y, mo, d, hh, mm, ss) {
+  return new Date(y, mo - 1, d, hh, mm, ss || 0, 0);
+}
+
+/* 묶기 테스트용 발화 한 건. id 는 그 시각의 epoch 를 고정폭으로 적어
+   **사전식 = 시간순**을 지킨다 (앱의 정렬 규약과 같다). */
+function turn(author, at, extra) {
+  return Object.assign({
+    id: 'records/talk/' + String(at.getTime()).padStart(15, '0') + '.json',
+    author: author,
+    text: author + ' 의 말 ' + at.getHours() + ':' + at.getMinutes(),
+    ts: at.toISOString(),
+    sender: 'x.host', kind: 'msg', reply_to: null, unknown: false, mine: false
+  }, extra || {});
+}
+
+function idebooted(options) {
+  const opts = Object.assign({}, options || {});
+  opts.stored = Object.assign({}, opts.stored || {});
+  opts.stored[LAYOUT_KEY] = 'ide';
+  return boot(opts);
+}
+
+/* 창 안 노드들 중 **머리가 보이는** 것의 수. 0 이면 화면에 발신자가 없다는 뜻이다. */
+function visibleHeads(doc) {
+  return doc.getElementById('messages').children
+    .filter((node) => node.children.length && !node.children[0].hidden).length;
+}
+
+await test('⭐ ide 배치: 같은 사람이 이어 말하면 발신자 머리를 한 번만 찍는다', async () => {
+  const talk = [
+    turn('bc.lee', when(2026, 9, 3, 14, 12)),
+    turn('bc.lee', when(2026, 9, 3, 14, 12, 31)),
+    turn('kihong', when(2026, 9, 3, 14, 14)),
+    turn('기본이름', when(2026, 9, 3, 14, 16), { mine: true })
+  ];
+  const { doc, chat } = await idebooted({ messages: talk });
+  assert.equal(chat.layout(), 'ide');
+  assert.equal(layoutAttr(doc), 'ide', '루트 표식이 없다 — CSS 가 안 걸린다');
+
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows.length, 4);
+  /* 두 조각: `.msg-head`(발신자·시각) + `.line`(인용·본문·답장·상태). */
+  assert.deepEqual(rows[0].children.map((c) => String(c.className)), ['msg-head', 'line']);
+  assert.deepEqual(rows[0].children[0].children.map((c) => String(c.className)),
+    ['author', 'ts']);
+  assert.equal(rows[0].children[0].children[0].textContent, 'bc.lee');
+
+  /* ⭐ 머리 판정은 **모델**에 있다 (구조는 그 값만 읽는다). */
+  assert.deepEqual(chat.items().map((m) => m.head), [true, false, true, true]);
+
+  /* ⭐ DOM 에서는 머리를 **지우지 않고 숨긴다.** 지우면 되살릴 때(과거를 불러와
+     묶음이 갈릴 때) 노드를 다시 만들어야 하고, 그 순간 rebuiltInView 가 깨진다. */
+  assert.equal(rows[0].children[0].hidden, false);
+  assert.equal(rows[1].children[0].hidden, true, '묶였는데 머리가 그대로 보인다');
+  assert.equal(rows[1].children[0].children[0].textContent, 'bc.lee',
+    '머리를 지워 버렸다 (숨기는 것이어야 한다)');
+
+  /* 세로 밀도 이득의 실체 — 묶인 줄은 머리만큼 낮다. */
+  console.log('      묶음 첫 줄 ' + rows[0].offsetHeight + 'px · 묶인 줄 ' +
+    rows[1].offsetHeight + 'px · 항목 간격 ' + nodeMod.itemGap('ide') + 'px');
+  assert.ok(rows[1].offsetHeight < rows[0].offsetHeight,
+    '묶여도 높이가 같다 (머리가 자리를 먹고 있다)');
+
+  /* 내것/남의것은 그대로 갈린다 (묶기가 그 표식을 먹지 않는다). */
+  assert.equal(isMine(rows[3]), true);
+  assert.equal(isMine(rows[1]), false);
+  assert.equal(rows[2].getAttribute('data-sender'), String(nodeMod.senderSlot('kihong')));
+
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ 시간 컷오프: 같은 사람이라도 벌어지면 머리를 다시 찍는다 (날이 바뀌면 무조건)', async () => {
+  const cutoff = timelineMod.GROUP_GAP_MS;
+  assert.ok(cutoff > 0, '컷오프가 없다');
+  const head = timelineMod.headVisible;
+
+  /* 순수 함수로 먼저 — 경계 안/밖. */
+  const base = turn('bc.lee', when(2026, 9, 3, 14, 0));
+  const inside = turn('bc.lee', new Date(when(2026, 9, 3, 14, 0).getTime() + cutoff - 1000));
+  const outside = turn('bc.lee', new Date(when(2026, 9, 3, 14, 0).getTime() + cutoff + 1000));
+  assert.equal(head(inside, base), false, '컷오프 안인데 머리를 다시 찍는다');
+  assert.equal(head(outside, base), true, '컷오프를 넘었는데 묶었다');
+  /* 시각을 못 읽으면 묶지 않는다 (모르는 것을 '가깝다'로 취급하지 않는다). */
+  assert.equal(head(Object.assign({}, inside, { ts: '언제인지 모른다' }), base), true);
+  /* 같은 이름이어도 내것/남의것이 갈리면 새 머리다. */
+  assert.equal(head(Object.assign({}, inside, { mine: true }), base), true);
+
+  /* ⭐ 날 경계 — 컷오프만으로는 막히지 않는다 (23:59 와 00:01 은 2분 차이다). */
+  const lastNight = turn('bc.lee', when(2026, 9, 3, 23, 59));
+  const thisMorning = turn('bc.lee', when(2026, 9, 4, 0, 1));
+  assert.equal(head(thisMorning, lastNight), true,
+    '어제 마지막 말과 오늘 첫 말이 한 묶음이 됐다');
+
+  /* 그리고 실제 화면에서도 같다.
+     ⚠️ 판정은 **바로 앞 줄**과 비교한다 — 그래서 화면 확인용 대화는 앞 줄과의
+     간격이 뜻대로 되게 따로 세운다 (`outside` 를 그냥 이어 붙이면 그 직전은
+     `inside` 라서 2초 차이가 되고, 이 테스트가 컷오프를 재지 못한다). */
+  const talk = [
+    turn('bc.lee', when(2026, 9, 3, 14, 0)),        /* 대화의 시작 */
+    turn('bc.lee', when(2026, 9, 3, 14, 5)),        /* +5분 — 묶인다 */
+    turn('bc.lee', when(2026, 9, 3, 14, 30)),       /* +25분 — 컷오프 밖 */
+    turn('bc.lee', when(2026, 9, 3, 23, 59)),       /* 한참 뒤 */
+    turn('bc.lee', when(2026, 9, 4, 0, 1))          /* +2분이지만 **날이 다르다** */
+  ];
+  const { doc, chat } = await idebooted({ messages: talk });
+  assert.deepEqual(chat.items().map((m) => m.head), [true, false, true, true, true]);
+  const rows = doc.getElementById('messages').children;
+  assert.deepEqual(rows.map((n) => n.children[0].hidden), [false, true, false, false, false]);
+  console.log('      컷오프 ' + (cutoff / 60000) + '분 · 안(' +
+    ((cutoff - 1000) / 60000).toFixed(2) + '분) 묶임 · 밖 새 머리 · 날 경계 새 머리');
+});
+
+await test('⭐ 묶음 중간에서 창이 시작해도 누가 말했는지 화면에 있다 (떠 있는 머리)', async () => {
+  /* manyMessages 는 전부 같은 사람·같은 시각이다 = **묶음 하나**. */
+  const { doc, chat } = await idebooted({ messages: manyMessages(200), viewport: 300 });
+  await settle();
+  const timeline = doc.getElementById('timeline');
+  const sticky = doc.getElementById('sticky-head');
+
+  timeline.scrollTop = 4000;
+  timeline.dispatch('scroll');
+  await settle();
+
+  /* 전제: 창 안에 **머리가 하나도 없다.** 이게 아니면 이 테스트는 아무것도
+     증명하지 못한다 (묶기의 유일한 결함이 바로 이 상태다). */
+  assert.equal(visibleHeads(doc), 0, '창 안에 머리가 있어 전제가 성립하지 않는다');
+  const top = chat.items().find((m) => m.id === chat.keepAnchor());
+  assert.equal(top.head, false, '화면 위 항목이 묶음의 첫 줄이다 (전제 실패)');
+
+  /* ⭐ 그래서 떠 있는 머리가 그 자리를 메운다. */
+  assert.equal(sticky.hidden, false, '누가 말했는지 화면에 없다 (머리가 잘렸다)');
+  assert.equal(doc.getElementById('sticky-author').textContent, '앨리스');
+  assert.ok(doc.getElementById('sticky-ts').textContent, '떠 있는 머리에 시각이 없다');
+  assert.equal(sticky.getAttribute('data-sender'), String(nodeMod.senderSlot('앨리스')));
+  console.log('      창 안 노드 ' + doc.getElementById('messages').children.length +
+    '개 · 그 중 머리 보이는 것 ' + visibleHeads(doc) + '개 · 떠 있는 머리 「' +
+    doc.getElementById('sticky-author').textContent + '」 (hidden=' + sticky.hidden + ')');
+
+  /* (1) 맨 위로 돌아가 머리가 화면에 있으면 **겹쳐 뜨지 않는다.** */
+  timeline.scrollTop = 0;
+  timeline.dispatch('scroll');
+  await settle();
+  assert.equal(visibleHeads(doc), 1, '맨 위인데 머리가 안 보인다 (전제 실패)');
+  assert.equal(sticky.hidden, true, '머리가 보이는데 떠 있는 머리까지 떴다 (중복)');
+
+  /* (2) 오버레이라 **높이 측정에 영향이 없다** — 노드를 다시 만들지 않았다. */
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.ok(chat.stats.stickyShown > 0, '떠 있는 머리가 한 번도 안 떴다');
+
+  /* (3) 묶지 않는 배치에서는 아예 뜨지 않는다 (머리가 언제나 붙어 있으므로). */
+  const plain = await boot({ messages: manyMessages(200), viewport: 300 });
+  await settle();
+  const t2 = plain.doc.getElementById('timeline');
+  t2.scrollTop = 4000;
+  t2.dispatch('scroll');
+  await settle();
+  assert.equal(plain.doc.getElementById('sticky-head').hidden, true,
+    '말풍선 배치에서 떠 있는 머리가 떴다');
+});
+
+await test('⭐ 과거를 불러와 묶음이 이어지면 **그 항목 하나만** 다시 잰다', async () => {
+  /* 같은 사람(앨리스)이 이어 말한 대화를 과거·현재로 갈라 둔다 — 이어 붙는 순간
+     기존 첫 메시지가 머리를 잃는다. 그게 이 배치의 유일한 무효화 경계다. */
+  const t0 = when(2026, 9, 3, 14, 0).getTime();
+  const past = [0, 1, 2, 3].map((i) => turn('앨리스', new Date(t0 + i * 20000)));
+  const now = [4, 5, 6].map((i) => turn('앨리스', new Date(t0 + i * 20000)));
+
+  const { doc, chat } = await idebooted({
+    messages: now, past: past, hasMore: true, pageSize: 2, viewport: 300
+  });
+  await settle();
+  const list = doc.getElementById('messages');
+  scrollUp(doc);
+  await settle();
+
+  const v = chat.virtualizer();
+  const firstId = chat.items()[0].id;
+  const firstNode = chat.nodes().get(firstId);
+  assert.ok(firstNode, '기존 첫 메시지가 창 안에 없다 (전제 실패)');
+  assert.equal(chat.items()[0].head, true, '기존 첫 메시지에 머리가 없다 (전제 실패)');
+  /* 지금 잰 크기를 전부 떠 둔다 — "무엇이 다시 재졌나"의 기준선이다. */
+  const sizesBefore = new Map(v.itemSizeCache);
+  const nodesBefore = new Map(chat.nodes());
+  const flipsBefore = chat.stats.headChanged;
+  const paintsBefore = chat.stats.headRepainted;
+  const remeasuredBefore = chat.stats.headRemeasured;
+  const createdBefore = chat.stats.created;
+
+  StubIntersectionObserver.current.trigger();   /* 위 끝에 닿았다 = 과거를 잇는다 */
+  await settle();
+
+  /* (1) 판정이 뒤집힌 항목은 **하나**다. */
+  assert.equal(chat.stats.headChanged - flipsBefore, 1,
+    '머리 판정이 뒤집힌 항목이 하나가 아니다');
+  assert.equal(chat.stats.headRepainted - paintsBefore, 1);
+  assert.equal(chat.items().find((m) => m.id === firstId).head, false,
+    '묶음이 이어졌는데 머리가 그대로다');
+
+  /* (2) ⭐ **다시 잰 항목도 하나**다 — 가상화의 크기 캐시(키 = 메시지 id)에서
+     값이 달라진 키를 센다. 다른 항목은 창 안에서 다시 재도 값이 그대로다. */
+  const changed = [...sizesBefore.keys()]
+    .filter((key) => v.itemSizeCache.get(key) !== sizesBefore.get(key));
+  console.log('      크기가 달라진 항목: ' + changed.length + '개 · 기존 항목 ' +
+    sizesBefore.size + '개 중 · 머리를 잃은 항목 ' + sizesBefore.get(firstId) +
+    'px → ' + v.itemSizeCache.get(firstId) + 'px');
+  assert.equal(chat.stats.headRemeasured - remeasuredBefore, 1,
+    '다시 잰 항목이 하나가 아니다');
+  assert.deepEqual(changed, [firstId], '머리를 잃은 항목 말고도 크기가 바뀌었다');
+  assert.ok(v.itemSizeCache.get(firstId) < sizesBefore.get(firstId),
+    '머리를 잃었는데 높이가 줄지 않았다 (측정이 안 됐다)');
+
+  /* (3) 노드는 **같은 객체 그대로**다 — 다시 만들지 않았다. */
+  assert.equal(chat.nodes().get(firstId), firstNode, '머리를 고치려고 노드를 갈았다');
+  assert.equal(firstNode.children[0].hidden, true, '그 노드의 머리가 숨지 않았다');
+  assert.equal(firstNode.children[0].children[0].textContent, '앨리스',
+    '머리를 지워 버렸다 (숨기는 것이어야 한다)');
+  for (const [id, node] of nodesBefore) {
+    if (chat.nodes().has(id)) {
+      assert.equal(chat.nodes().get(id), node, id + ' 가 교체됐다');
+    }
+  }
+  assert.equal(chat.stats.rebuiltInView, 0, '창 안 노드를 다시 만들었다');
+  assert.equal(list.removedByReplace, 0, '타임라인을 통째로 비웠다');
+  console.log('      새로 만든 노드 ' + (chat.stats.created - createdBefore) +
+    '개 (이어 붙은 과거 ' + chat.stats.prepended + '건) · rebuiltInView ' +
+    chat.stats.rebuiltInView);
+});
+
+await test('⭐ 한 사람이 연달아 수백 건 말해도 DOM 노드 수는 상수에 가깝다', async () => {
+  /* 묶음을 가상화 단위로 만들었으면 **여기서 깨진다** — 이 방은 묶음이 하나라
+     3건을 보이려고 400건을 그리게 된다. */
+  const { doc, chat } = await idebooted({ messages: manyMessages(400), viewport: 300 });
+  const list = doc.getElementById('messages');
+
+  /* 전제: 전부 한 묶음이다 (머리를 가진 항목이 1개). */
+  const heads = chat.items().filter((m) => m.head).length;
+  assert.equal(heads, 1, '한 묶음이 아니다 (전제 실패): 머리 ' + heads + '개');
+  assert.equal(chat.items().length, 400);
+
+  console.log('      한 묶음 400건 · DOM 노드 ' + list.children.length + '개 · 전체 높이 ' +
+    chat.virtualizer().getTotalSize() + 'px');
+  assert.ok(list.children.length < 40,
+    'DOM 에 ' + list.children.length + '개가 남았다 (묶음을 항목으로 만든 것과 같다)');
+
+  const timeline = doc.getElementById('timeline');
+  const peak = [];
+  for (const offset of [4000, 12000, 24000, 500]) {
+    timeline.scrollTop = offset;
+    timeline.dispatch('scroll');
+    await settle();
+    peak.push(list.children.length);
+  }
+  console.log('      스크롤하며 본 DOM 노드 수: ' + peak.join(', '));
+  assert.ok(Math.max.apply(null, peak) < 40, '스크롤 중 노드가 쌓였다: ' + peak);
+  assert.ok(chat.stats.recycled > 0, '창 밖 노드를 걷어낸 적이 없다 (가상화 아님)');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('ide 배치에서도 답장 인용·보내는 중·재시도·아웃박스가 산다', async () => {
+  const quoted = turn('앨리스', when(2026, 9, 3, 14, 0));
+  const reply = turn('밥', when(2026, 9, 3, 14, 1));
+  reply.reply_to = quoted.id;
+  const { doc, chat, context } = await idebooted({ messages: [quoted, reply] });
+  const rows = doc.getElementById('messages').children;
+  const line = rows[1].children[1];
+  assert.equal(String(line.children[0].className), 'quote');
+  assert.ok(line.children[0].textContent.includes('앨리스: '), '인용이 비었다');
+  assert.ok(findByClass(rows[1], 'link'), '답장 버튼이 없다');
+
+  /* 낙관적 전송 → 실패 → 재시도가 같은 노드 위에서 돈다 (구조와 무관하다). */
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = '보내는 중이 보여야 한다';
+  const sending = chat.send();
+  await settle();
+  const mineRow = doc.getElementById('messages').children[2];
+  assert.equal(isMine(mineRow), true, '내 말이 내 것으로 표시되지 않았다');
+  /* 내 말은 남의 말 뒤에 오므로 **머리가 붙는다** (다른 사람이다). */
+  assert.equal(mineRow.children[0].hidden, false);
+  assert.ok(mineRow.textContent.includes('보내는 중'), '보내는 중이 안 보인다');
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+  assert.ok(mineRow.textContent.includes('보내지 못했다'));
+  assert.ok(findByClass(mineRow, 'retry'), '재시도가 없다');
+
+  /* 아웃박스 띠는 배치와 무관하다 (입력창 위, 방 전체에 걸리는 띠다). */
+  StubEventSource.current.emit('outbox', {
+    room: 'r1', state: 'stuck', pending: 1, detail: '원격이 막혔다'
+  });
+  assert.equal(doc.getElementById('outbox').hidden, false, '아웃박스 띠가 안 뜬다');
   assert.equal(chat.stats.rebuiltInView, 0);
 });
 
