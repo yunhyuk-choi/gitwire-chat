@@ -580,6 +580,37 @@ def test_앱을_갱신하는_엔드포인트는_없다(client):
     assert update_rules == ["/api/update/check"], update_rules
 
 
+# =========================================================== 재기동 로그
+
+
+def test_로그_꼬리는_이번_재기동_시도부터_보여준다(tmp_path):
+    """⚠️ 로그를 이어 쓰므로 지난 재기동의 **정상** 출력이 꼬리를 채운다 (실측).
+
+    그러면 "안 떴다"는 보고에 잘 뜬 로그가 붙어서 사람이 엉뚱한 줄을 읽는다.
+    """
+    log = tmp_path / "restart.log"
+    log.write_text(
+        "지난 실행 · 잘 떴다\n * Running on http://127.0.0.1:8791\n"
+        f"\n{updater.RESTART_MARK} 2026-01-01 00:00:00\n"
+        "gitwire-chat: error: unrecognized arguments: --없는옵션\n",
+        encoding="utf-8",
+    )
+    tail = updater.log_tail(log)
+    assert any("unrecognized arguments" in line for line in tail)
+    assert not any("잘 떴다" in line for line in tail), "지난 실행이 섞였다"
+
+
+def test_경계선이_없는_로그도_꼬리는_준다(tmp_path):
+    """아무것도 안 주는 것보다 마지막 몇 줄이라도 주는 것이 낫다."""
+    log = tmp_path / "restart.log"
+    log.write_text("옛 형식 로그\n터졌다\n", encoding="utf-8")
+    assert updater.log_tail(log) == ["옛 형식 로그", "터졌다"]
+
+
+def test_없는_로그는_빈_목록이다(tmp_path):
+    assert updater.log_tail(tmp_path / "없다.log") == []
+
+
 # ================================================== ⭐ 진짜 프로세스 왕복
 
 

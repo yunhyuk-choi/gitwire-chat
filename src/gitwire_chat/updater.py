@@ -52,6 +52,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -74,6 +75,10 @@ UP_TIMEOUT = 40.0
 
 #: 재기동한 프로세스의 출력을 모을 로그 파일 이름 (앱 상태 디렉토리 안).
 RESTART_LOG = "update-restart.log"
+
+#: 재기동마다 로그에 남기는 경계선. 실패 보고의 로그 꼬리가 **이번 시도**부터
+#: 시작하게 자른다 — 지난 실행의 정상 출력과 섞이면 사람이 엉뚱한 줄을 읽는다.
+RESTART_MARK = "=== gitwire-chat update 재기동"
 
 #: 실패 보고에 붙일 로그 꼬리 줄 수.
 LOG_TAIL = 25
@@ -450,7 +455,12 @@ def start_instance(
     report.say(f"    로그: {log_path}")
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        # 이어 쓴다 — 지난 재기동 기록을 지우지 않는다. 대신 **경계선을 남긴다**:
+        # 안 뜬 이유를 볼 때 지난 실행의 출력과 섞이면 사람이 엉뚱한 줄을 읽는다
+        # (실측에서 로그 꼬리가 지난 두 번의 정상 출력으로 절반이 찼다).
         handle = open(log_path, "a", encoding="utf-8", errors="replace", newline="\n")
+        handle.write(f"\n{RESTART_MARK} {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        handle.flush()
     except OSError as exc:
         report.say(f"    ⚠ 로그 파일을 열지 못했다 ({exc}) — 출력을 버리고 띄운다")
         handle = None
@@ -491,12 +501,22 @@ def start_instance(
 
 
 def log_tail(path: Path, lines: int = LOG_TAIL) -> list[str]:
-    """실패 보고에 붙일 로그 꼬리. 없으면 빈 목록."""
+    """실패 보고에 붙일 로그 꼬리 — **이번 재기동 시도부터**. 없으면 빈 목록.
+
+    경계선(`RESTART_MARK`)이 있으면 그 뒤만 자른다. 없으면(로그를 못 썼거나 옛
+    형식) 그냥 마지막 몇 줄을 준다 — 아무것도 안 주는 것보다 낫다.
+
+    ⚠️ 자르는 이유: 로그를 이어 쓰기 때문에 지난 재기동의 **정상** 출력이 꼬리의
+    절반을 차지한다(실측). 그러면 사람이 엉뚱한 줄을 읽고 "잘 떴는데?" 한다.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    return text.rstrip("\n").split("\n")[-lines:]
+    _, mark, current = text.rpartition(RESTART_MARK)
+    if mark:
+        text = mark + current
+    return text.strip("\n").split("\n")[-lines:]
 
 
 # ------------------------------------------------------------------ pip 설치
