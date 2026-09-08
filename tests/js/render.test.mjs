@@ -48,6 +48,14 @@ const { createApp } = await import(
   url.pathToFileURL(path.join(STATIC, 'js', 'boot.js')).href
 );
 
+/* 레이아웃 이음새를 **직접** 들여다보는 두 모듈 (표와 목록이 짝인지 본다). */
+const nodeMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'message-node.js')).href
+);
+const themeMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'theme.js')).href
+);
+
 const results = [];
 function test(name, fn) {
   return Promise.resolve()
@@ -94,10 +102,16 @@ function isMine(node) {
   return String(node.className).split(' ').indexOf('mine') >= 0;
 }
 
-/* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다. */
+/* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다.
+ *
+ * 타이머는 **테스트가 쥔다**(진짜 setTimeout 이 아니다). 이유가 둘:
+ *   · IME 안전 타이머(3초)를 실제로 기다리지 않고 만료시킬 수 있다.
+ *   · "언제 도는가"가 손에 있어야 "확정 신호 없이는 안 보낸다"를 셀 수 있다.
+ */
 function stubWindow() {
   return {
     listeners: {},
+    timers: [],
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
     removeEventListener(type, fn) {
       const list = this.listeners[type] || [];
@@ -106,7 +120,26 @@ function stubWindow() {
     },
     dispatch(type, event) {
       for (const fn of (this.listeners[type] || []).slice()) { fn(event || { type }); }
-    }
+    },
+    setTimeout(fn, ms) {
+      this.timers.push({ fn: fn, ms: ms || 0, cleared: false });
+      return this.timers.length;                 /* 1-based id */
+    },
+    clearTimeout(id) {
+      const t = this.timers[id - 1];
+      if (t) { t.cleared = true; }
+    },
+    /* `upto` ms 이하로 걸린 콜백을 지금 돌린다. 돌린 개수를 돌려준다. */
+    runTimers(upto) {
+      const limit = upto === undefined ? 0 : upto;
+      const due = this.timers.filter((t) => !t.cleared && t.ms <= limit);
+      for (const t of due) { t.cleared = true; t.fn(); }
+      return due.length;
+    },
+    pendingTimers() { return this.timers.filter((t) => !t.cleared).map((t) => t.ms); },
+    /* 레이아웃 전환은 **새로고침**으로 간다 — 진짜로 다시 불러올 수는 없으니 센다. */
+    reloads: 0,
+    location: null
   };
 }
 
@@ -160,10 +193,13 @@ function boot(options) {
     fetch: fetchStub,
     EventSource: StubEventSource,
     IntersectionObserver: opts.noObserver ? undefined : StubIntersectionObserver,
+    /* `opts.stored` 로 초기값을 심는다 — "재기동 후에도 유지되나"는 저장소에
+       값이 남아 있는 상태로 다시 부팅해 보는 것으로만 증명된다. */
     localStorage: {
-      _v: {},
+      _v: Object.assign({}, opts.stored || {}),
       getItem(k) { return this._v[k] || null; },
-      setItem(k, v) { this._v[k] = v; }
+      setItem(k, v) { this._v[k] = v; },
+      removeItem(k) { delete this._v[k]; }
     },
     console: {
       log: console.log.bind(console),
@@ -173,6 +209,9 @@ function boot(options) {
     /* 기본은 **진짜** 엔진. 실패 경로를 보는 테스트만 여기에 다른 것을 넣는다. */
     virtual: ('virtual' in opts) ? opts.virtual : virtual
   };
+
+  /* location 은 win 을 가리켜야 하므로 리터럴 밖에서 묶는다. */
+  runtime.win.location = { reload() { runtime.win.reloads += 1; } };
 
   const chat = createApp(runtime);
   /* ⭐ 초기화 단위 하나를 **실제로 터뜨린다.** 격리는 "그렇게 짰다"가 아니라
@@ -1197,6 +1236,696 @@ await test("검색 결과도 같은 표식을 단다", async () => {
   const hits = doc.getElementById('search-list').children;
   assert.equal(hits.length, 2);
   assert.deepEqual(hits.map((h) => String(h.className)), ['hit mine', 'hit']);
+});
+
+/* --------------------------------------------- IME(한글) 조합 중의 Enter */
+
+/*
+ * ⭐ 맥에서 **마지막 글자가 씹혀 전송되던** 버그의 회귀 방지.
+ *
+ * 원인: `keydown` 은 IME 의 조합 확정보다 **먼저** 온다. 그래서 그때 읽은
+ * `value` 에는 마지막 음절이 없다. 아래 테스트는 그 순간을 그대로 재현한다 —
+ * 조합 중에는 value 가 짧고, 확정될 때 마지막 음절이 들어온다.
+ *
+ * 지키는 것 두 개가 대칭이 아니다(의도한 비대칭):
+ *   · **잘려서 보내지는 일은 없어야 한다** (모르고 지나가는 사고)
+ *   · 못 보내는 것은 허용한다 (사용자가 Enter 를 다시 누르면 된다)
+ */
+
+/* 키 이벤트 대역. `preventDefault` 를 불렀는지 기록한다 — 조합 중 Enter 를
+   막으면 IME 가 확정을 못 하고 그 글자가 입력칸에 남는다(보고된 두 번째 증상). */
+function keyEvent(key, extra) {
+  return Object.assign({
+    key: key, shiftKey: false, prevented: false,
+    preventDefault() { this.prevented = true; }
+  }, extra || {});
+}
+
+function posts(context) {
+  return context.fetch.calls.filter((c) => (c.init || {}).method === 'POST');
+}
+
+function bodyOf(call) { return JSON.parse(call.init.body); }
+
+async function imeBoot() {
+  const booted = await boot();
+  booted.context.fetch = deferredFetch();
+  booted.text = booted.doc.getElementById('text');
+  booted.list = booted.doc.getElementById('messages');
+  booted.before = booted.list.children.length;
+  return booted;
+}
+
+await test('⭐ 조합 중 Enter: 그 자리에서 보내지 않고, 확정된 뒤 **완전한 본문**을 보낸다', async () => {
+  const { doc, context, text, list, before } = await imeBoot();
+
+  /* 맥 한글 IME 로 "안녕하세요다" 를 치고 Enter — 이 순간 value 에는 마지막
+     음절('다')이 아직 없다. 이게 버그가 나던 정확한 상태다. */
+  text.dispatch('compositionstart');
+  text.value = '안녕하세요';
+  const enter = keyEvent('Enter', { isComposing: true });
+  text.dispatch('keydown', enter);
+  await settle();
+
+  assert.equal(posts(context).length, 0, '조합 중인데 전송됐다 (잘린 본문이 나갔다)');
+  assert.equal(list.children.length, before, '말풍선이 붙었다 (낙관적 전송이 나갔다)');
+  assert.equal(text.value, '안녕하세요', '입력칸이 비워졌다');
+  assert.equal(enter.prevented, false,
+    'preventDefault 로 IME 의 조합 확정을 막았다 — 그 글자가 입력칸에 남는다');
+
+  /* IME 가 그 Enter 로 조합을 확정한다: 마지막 음절이 들어오고 신호가 온다. */
+  text.value = '안녕하세요다';
+  text.dispatch('compositionend');
+  assert.equal(posts(context).length, 0,
+    '확정 신호와 같은 틱에 보냈다 — 엔진에 따라 value 가 아직 안 찬다');
+
+  context.win.runTimers(0);              /* 한 틱 양보 후 전송 */
+  await settle();
+
+  const sent = posts(context);
+  assert.equal(sent.length, 1, '확정됐는데 전송되지 않았다');
+  assert.equal(bodyOf(sent[0]).text, '안녕하세요다', '마지막 글자가 씹혔다');
+  assert.equal(text.value, '', '전송했는데 입력칸이 남았다');
+  assert.equal(list.children.length, before + 1);
+  assert.ok(list.children[before].textContent.includes('안녕하세요다'));
+  assert.deepEqual(context.win.pendingTimers(), [], '안전 타이머가 남았다');
+});
+
+await test('같은 판정이 `keyCode 229` 경로에서도 선다 (isComposing 을 안 주는 브라우저)', async () => {
+  const { context, text } = await imeBoot();
+  /* compositionstart 를 일부러 주지 않는다 — 키 이벤트만으로 판정되는지 본다. */
+  text.value = '테스트';
+  const enter = keyEvent('Enter', { keyCode: 229 });
+  text.dispatch('keydown', enter);
+  await settle();
+  assert.equal(posts(context).length, 0, '229 를 조합 중으로 보지 않았다');
+  assert.equal(enter.prevented, false);
+
+  text.value = '테스트다';
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(bodyOf(posts(context)[0]).text, '테스트다');
+});
+
+await test('⭐ 평소 타이핑의 조합 확정으로는 전송되지 않는다 (표시 오염 방지)', async () => {
+  const { context, text } = await imeBoot();
+
+  /* (1) Enter 없이 음절만 확정 — `compositionend` 는 평소 타이핑에서도 온다. */
+  for (const syllable of ['안', '안녕', '안녕하']) {
+    text.dispatch('compositionstart');
+    text.value = syllable;
+    text.dispatch('compositionend');
+  }
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Enter 를 누르지 않았는데 전송됐다');
+
+  /* (2) 조합 중 Enter 로 표시를 세운 **뒤에 다른 글자를 더 쳤다** = 전송 의도 무효.
+     이걸 지우지 않으면 다음 음절 확정 때 엉뚱하게 나간다. */
+  text.dispatch('compositionstart');
+  text.value = '안녕하';
+  text.dispatch('keydown', keyEvent('Enter', { isComposing: true }));
+  text.dispatch('keydown', keyEvent('세', { isComposing: true }));
+  text.value = '안녕하세';
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, '전송 의도를 취소했는데 나갔다');
+  assert.equal(text.value, '안녕하세', '입력칸 내용이 사라졌다');
+});
+
+await test('안전 타이머는 **취소 전용** — 만료되면 전송되지 않고 표시만 풀린다', async () => {
+  const { context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '확정 신호가 안 오는 환경';
+  text.dispatch('keydown', keyEvent('Enter', { isComposing: true }));
+  await settle();
+  assert.deepEqual(context.win.pendingTimers(), [3000], '안전 타이머가 걸리지 않았다');
+
+  context.win.runTimers(3000);           /* 신호를 못 받은 채 한도가 지났다 */
+  await settle();
+  assert.equal(posts(context).length, 0,
+    '⚠️ 안전 타이머가 **보냈다** — 확정을 모르는 상태의 전송이라 잘릴 수 있다');
+  assert.equal(text.value, '확정 신호가 안 오는 환경', '입력 내용을 잃었다');
+
+  /* 늦게 신호가 와도 표시는 이미 풀렸다 — 조용히 나가지 않는다. */
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0);
+
+  /* 그리고 모듈은 멀쩡하다 — 사용자가 Enter 를 다시 누르면 보내진다. */
+  text.dispatch('keydown', keyEvent('Enter'));
+  await settle();
+  assert.equal(posts(context).length, 1, '다시 누른 Enter 로도 안 보내진다');
+  assert.equal(bodyOf(posts(context)[0]).text, '확정 신호가 안 오는 환경');
+});
+
+await test('영문 입력은 아무 변화가 없다 — Enter 한 번에 즉시 전송', async () => {
+  const { context, text } = await imeBoot();
+  text.value = 'ship it';
+  const enter = keyEvent('Enter', { isComposing: false });
+  text.dispatch('keydown', enter);
+  await settle();
+  assert.equal(posts(context).length, 1, '영문 Enter 가 지연됐다');
+  assert.equal(bodyOf(posts(context)[0]).text, 'ship it');
+  assert.equal(enter.prevented, true, '줄바꿈 기본 동작을 막지 않았다');
+  assert.equal(text.value, '');
+  assert.deepEqual(context.win.pendingTimers(), [], '영문인데 IME 타이머가 걸렸다');
+});
+
+await test('Shift+Enter 는 줄바꿈이다 (조합 중에도 보내지 않는다)', async () => {
+  const { context, text } = await imeBoot();
+  text.value = '첫 줄';
+  const shifted = keyEvent('Enter', { shiftKey: true, isComposing: true });
+  text.dispatch('keydown', shifted);
+  text.dispatch('compositionend');        /* 확정돼도 전송 의도가 없다 */
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Shift+Enter 로 전송됐다');
+  assert.equal(shifted.prevented, false, '줄바꿈을 막았다');
+  assert.equal(text.value, '첫 줄');
+});
+
+await test('⭐ 대조군: 조합 여부를 보지 않고 보내면 잘린 본문이 나간다 (버그 재현)', async () => {
+  /* 이 테스트들이 **실제 버그를 겨냥하는지**를 증명한다. 같은 상태에서 가드를
+     지나쳐 곧바로 보내면(= 고치기 전 핸들러가 하던 일) 마지막 음절이 빠진다. */
+  const { chat, context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '안녕하세요';              /* 조합 중 — '다' 가 아직 없다 */
+
+  chat.send();                            /* 가드 없는 경로 (응답은 기다리지 않는다) */
+  await settle();
+
+  const sent = posts(context);
+  assert.equal(sent.length, 1);
+  assert.equal(bodyOf(sent[0]).text, '안녕하세요',
+    '대조군이 성립하지 않는다 — 이 경로에서 잘림이 재현되지 않으면 위 테스트가 무엇도 증명하지 못한다');
+  assert.notEqual(bodyOf(sent[0]).text, '안녕하세요다');
+});
+
+await test('보내기 버튼(폼 제출)은 확정된 완전한 본문을 보낸다', async () => {
+  /* 버튼을 누르려면 포인터가 입력칸을 떠나고, 그 blur 가 조합을 먼저 확정시킨다.
+     그래서 폼 경로에는 IME 가드를 두지 않는다 — 두면 "눌렀는데 안 보내진다"가 된다. */
+  const { doc, context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '버튼으로 보낸다';
+  text.value = '버튼으로 보낸다요';        /* blur → IME 확정 */
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Enter 도 없이 전송됐다');
+
+  doc.getElementById('composer').dispatch('submit', { preventDefault() {} });
+  await settle();
+  assert.equal(bodyOf(posts(context)[0]).text, '버튼으로 보낸다요');
+  assert.equal(text.value, '');
+});
+
+/* ------------------------------------------------------- 레이아웃 테마 */
+
+/*
+ * ⭐ 단계 A — **이음새만** 냈다. 구조는 지금 것(말풍선) 하나만 출하한다.
+ *
+ * 여기서 지키는 것:
+ *   · 구조 분기는 `message-node.js` 의 표 **한 곳**뿐이고, 모르는 이름은 기본으로
+ *     떨어진다 (저장값이 옛 이름일 수 있다).
+ *   · 전환은 **새로고침**으로 간다 — 그래서 "전환 중 노드 재생성"이라는 상태가
+ *     존재하지 않는다. 대신 읽던 자리를 **앵커 메시지 id** 로 복원한다.
+ *   · 테마가 못 서면 **기본으로 떨어지고 화면에 말한다.** 고르는 칸은 대화 영역
+ *     밖(사이드바)에 있어 망가진 테마에 갇히지 않는다.
+ */
+
+const LAYOUT_KEY = 'gitwire-chat.layout';
+const ANCHOR_KEY = 'gitwire-chat.anchor';
+const THEME_ATTR_FOR_FALLBACK = 'data-chat-theme';
+
+function themeAttr(doc) {
+  return doc.documentElement.getAttribute(THEME_ATTR_FOR_FALLBACK);
+}
+
+function layoutAttr(doc) {
+  return doc.documentElement.getAttribute('data-chat-layout');
+}
+
+await test('구조 분기는 한 곳이고, 모르는 레이아웃 이름은 기본으로 떨어진다', () => {
+  const names = Object.keys(nodeMod.STRUCTURES);
+  assert.deepEqual(names, ['bubbles', 'log'], '구조 표가 달라졌다: ' + names);
+  /* 이름 → 구조 표와 고를 수 있는 목록이 **짝**이어야 한다. 어긋나면 "고를 수는
+     있는데 구조가 없는" 이름이 생긴다. */
+  assert.deepEqual(themeMod.LAYOUTS.map((l) => l.id).sort(), names.sort());
+  assert.equal(themeMod.normalizeLayout('없는배치'), 'bubbles');
+  assert.equal(themeMod.normalizeLayout(null), 'bubbles');
+
+  /* 실제로 만들어 본다 — 모르는 이름을 줘도 말풍선이 나온다(빈 화면이 아니다). */
+  const doc = new StubDocument();
+  const dom = { doc: doc, make: (t, c, x) => {
+    const n = doc.createElement(t); if (c) { n.className = c; }
+    if (x !== undefined) { n.textContent = x; } return n;
+  }, setText: (n, t) => { n.textContent = t; }, hide: (n) => { n.hidden = true; },
+    show: (n) => { n.hidden = false; } };
+  const one = msg(1, '어떤 구조로든 그려진다');
+  const built = nodeMod.buildMessage(dom, one, { lookup: () => null }, '없는배치');
+  assert.equal(String(built.className), 'msg');
+  assert.ok(built.textContent.includes('어떤 구조로든 그려진다'));
+});
+
+await test('⭐ 앵커: 읽던 자리를 메시지 id 로 남기고, 새로고침 뒤 그 자리로 돌아온다', async () => {
+  const many = manyMessages(200);
+  const first = await boot({ messages: many, viewport: 300 });
+  await settle();
+  const timeline = first.doc.getElementById('timeline');
+  timeline.scrollTop = 4000;
+  timeline.dispatch('scroll');
+  await settle();
+
+  /* 지금 화면 위에 걸린 메시지 = 읽던 자리. */
+  const anchorId = first.chat.keepAnchor();
+  assert.ok(anchorId, '앵커를 못 잡았다');
+  const saved = JSON.parse(first.context.localStorage.getItem(ANCHOR_KEY));
+  assert.deepEqual(saved, { room: 'r1', id: anchorId });
+  /* ⚠️ 픽셀이 아니다 — 구조가 바뀌면 높이가 달라져 픽셀은 의미가 없다. */
+  assert.equal(JSON.stringify(saved).indexOf('scrollTop'), -1);
+
+  /* 새로고침 = 저장소만 들고 처음부터 다시 부팅한다. */
+  const stored = {};
+  stored[ANCHOR_KEY] = JSON.stringify(saved);
+  const again = await boot({ messages: many, viewport: 300, stored: stored });
+  await settle();
+
+  const shown = again.doc.getElementById('messages').children.map((n) => n.dataset.id);
+  assert.ok(shown.indexOf(anchorId) >= 0, '읽던 메시지가 화면에 없다');
+  assert.equal(again.chat.stats.restored, 1, '복원 경로를 타지 않았다');
+  assert.equal(again.chat.state.atBottom, false, '맨 아래로 가 버렸다');
+  assert.equal(again.chat.stats.rebuiltInView, 0);
+  /* ⭐ 앵커는 **한 번만** 쓴다 — 안 지우면 그 뒤 모든 새로고침이 그 자리로 간다. */
+  assert.equal(again.context.localStorage.getItem(ANCHOR_KEY), null, '앵커가 남았다');
+
+  /* 가장 강한 증거: 다시 물어본 "화면 위에 걸린 메시지"가 **같은 메시지**다. */
+  const nowTop = again.chat.keepAnchor();
+  console.log('      앵커 복원: 남긴 것 …' + anchorId.slice(-20) +
+    ' / 복원 후 화면 위 …' + String(nowTop).slice(-20) +
+    ' (scrollTop ' + again.doc.getElementById('timeline').scrollTop + ')');
+  assert.equal(nowTop, anchorId, '읽던 자리가 아니다');
+});
+
+await test('앵커가 없거나 다른 방 것이면 조용히 맨 아래로 뜬다', async () => {
+  const many = manyMessages(50);
+  /* (1) 앵커 없음 — 지금까지의 동작 그대로. */
+  const plain = await boot({ messages: many, viewport: 300 });
+  await settle();
+  assert.equal(plain.chat.state.atBottom, true);
+  assert.equal(plain.chat.stats.restored, 0);
+
+  /* (2) 다른 방에서 남긴 앵커 — 이 방에 적용하면 엉뚱한 자리로 간다. */
+  const stored = {};
+  stored[ANCHOR_KEY] = JSON.stringify({ room: 'r2', id: many[10].id });
+  const other = await boot({ messages: many, viewport: 300, stored: stored });
+  await settle();
+  assert.equal(other.chat.stats.restored, 0, '다른 방의 앵커로 스크롤했다');
+  assert.equal(other.chat.state.atBottom, true);
+
+  /* (3) 이 방 것이지만 지금 안 불러온 메시지 — 조용히 맨 아래로. */
+  const gone = {};
+  gone[ANCHOR_KEY] = JSON.stringify({ room: 'r1', id: 'records/없는/메시지.json' });
+  const missing = await boot({ messages: many, viewport: 300, stored: gone });
+  await settle();
+  assert.equal(missing.chat.stats.restored, 0);
+  assert.equal(missing.chat.state.atBottom, true);
+});
+
+await test('같은 배치를 다시 골라도 새로고침하지 않는다', async () => {
+  const { chat, context } = await boot();
+  assert.equal(chat.layout(), 'bubbles');
+  assert.equal(chat.setLayout('bubbles'), false, '같은 값인데 전환했다');
+  assert.equal(context.win.reloads, 0, '쓸데없이 새로고침했다');
+  /* 없는 이름은 기본으로 정규화되므로 이 경우도 전환이 아니다. */
+  assert.equal(chat.setLayout('없는배치'), false);
+  assert.equal(context.win.reloads, 0);
+  assert.equal(context.localStorage.getItem(LAYOUT_KEY), 'bubbles');
+});
+
+await test('⭐ 폴백: 저장된 배치 이름이 없는 것이면 기본으로 떨어진다', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log-옛이름';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(chat.layout(), 'bubbles');
+  assert.equal(layoutAttr(doc), null, '없는 배치 표식이 루트에 남았다');
+  /* 첫 페인트 조각이 찍어 둔 표식도 여기서 걷힌다 (아래 계약 테스트가 짝을 본다). */
+  assert.equal(doc.getElementById('layout-select').value, 'bubbles');
+});
+
+await test('⭐ 폴백: 테마가 못 서면 기본으로 떨어지고 **화면에 말한다**', async () => {
+  /* ⚠️ 이게 이번 단계의 가장 위험한 함정이다 — 망가진 테마가 화면을 먹으면
+     고르는 UI 도 같이 먹혀 되돌릴 방법이 없다(저장값이 남아 새로고침해도 같다).
+     그래서 실패하면 루트 표식을 걷어내 **지금까지의 모습**으로 떨어뜨린다. */
+  const stored = {};
+  stored['gitwire-chat.theme'] = 'tty';
+  stored[LAYOUT_KEY] = 'bubbles';
+  const { doc, chat, consoleErrors } = await boot({
+    stored: stored,
+    sabotage: (doc2) => breakWiring(doc2, 'toggle-theme', '테마 배선 실패')
+  });
+
+  assert.equal(themeAttr(doc), null, '실패했는데 색 표식이 남았다');
+  assert.equal(layoutAttr(doc), null, '실패했는데 배치 표식이 남았다');
+  assert.equal(chat.layout(), 'bubbles', '구조가 기본으로 떨어지지 않았다');
+
+  /* 조용히 떨어지지 않는다 — 상태줄·콘솔·failures 세 곳에 남는다. */
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+  assert.ok(doc.getElementById('status').textContent.indexOf('테마') >= 0);
+  assert.ok(consoleErrors.join(' ').indexOf('테마') >= 0);
+  assert.equal(chat.failures()[0].unit, '테마');
+
+  /* 그리고 대화는 멀쩡하다 (테마 실패가 화면을 먹지 않는다). */
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  /* 고르는 칸은 **대화 영역 밖**(사이드바)에 그대로 있다 — 갇히지 않는다. */
+  assert.ok(doc.getElementById('theme-select'), '색 고르는 칸이 사라졌다');
+  assert.ok(doc.getElementById('layout-select'), '배치 고르는 칸이 사라졌다');
+});
+
+await test('log 배치로 뜨면 줄 구조로 그려진다 (시각·발신자·본문 3조각)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc, chat } = await boot({
+    stored: stored,
+    messages: [msg(1, '첫 줄', '앨리스'), mineMsg(2, '내 줄')]
+  });
+  assert.equal(chat.layout(), 'log');
+  assert.equal(layoutAttr(doc), 'log', '루트 표식이 없다 — CSS 가 안 걸린다');
+
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows.length, 2);
+  const row = rows[0];
+  /* 3조각: `.ts` · `.author` · `.line`. 말풍선의 `.msg-head` 는 없다. */
+  assert.deepEqual(row.children.map((c) => String(c.className)), ['ts', 'author', 'line']);
+  assert.equal(row.children[1].textContent, '앨리스');
+  /* 시각은 초까지, 그리고 초는 **별도 조각**이다 (좁은 폭에서 CSS 가 이것만 숨긴다). */
+  const when = row.children[0];
+  assert.deepEqual(when.children.map((c) => String(c.className)), ['hm', 'sec']);
+  /* 오늘이면 HH:MM, 다른 날이면 M/D HH:MM — 어느 쪽이든 분까지가 이 조각이다. */
+  assert.ok(/\d{2}:\d{2}$/.test(when.children[0].textContent), when.children[0].textContent);
+  assert.ok(/^:\d{2}$/.test(when.children[1].textContent), when.children[1].textContent);
+  /* 내 것은 **위치가 아니라** 클래스로 갈린다 (줄 기반에서 좌우는 성립하지 않는다). */
+  assert.equal(isMine(rows[1]), true);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('발신자 색 슬롯은 이름에서 나온다 (같은 사람 = 언제나 같은 색)', async () => {
+  assert.equal(nodeMod.senderSlot('앨리스'), nodeMod.senderSlot('앨리스'));
+  const slots = ['앨리스', '밥', '캐럴', '데이브', '이브', '프랭크', '그레이스']
+    .map(nodeMod.senderSlot);
+  for (const s of slots) {
+    assert.ok(s >= 1 && s <= nodeMod.SENDER_SLOTS, '슬롯이 범위를 벗어났다: ' + s);
+  }
+  assert.ok(new Set(slots).size >= 4, '이름 7개가 색 4가지도 안 된다: ' + slots);
+
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc } = await boot({
+    stored: stored, messages: [msg(1, '하나', '앨리스'), msg(2, '둘', '밥')]
+  });
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows[0].getAttribute('data-sender'), String(nodeMod.senderSlot('앨리스')));
+  assert.equal(rows[1].getAttribute('data-sender'), String(nodeMod.senderSlot('밥')));
+});
+
+await test('⭐ 줄무늬는 **모델 인덱스** 기준이다 (스크롤해도 홀짝이 뒤집히지 않는다)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const { doc, chat } = await boot({
+    stored: stored, messages: manyMessages(200), viewport: 300
+  });
+  const list = doc.getElementById('messages');
+  const timeline = doc.getElementById('timeline');
+
+  function check(where) {
+    const ids = chat.items().map((m) => m.id);
+    let domOrderDiffers = false;
+    let lastIndex = -1;
+    for (const node of list.children) {
+      const index = Number(node.getAttribute('data-index'));
+      /* 모델에서의 자리와 홀짝 표식이 맞나 */
+      assert.equal(ids[index], node.dataset.id, where + ': data-index 가 모델과 다르다');
+      assert.equal(node.getAttribute('data-row'), index % 2 === 0 ? 'even' : 'odd',
+        where + ': ' + index + '번의 홀짝이 틀렸다');
+      if (index < lastIndex) { domOrderDiffers = true; }
+      lastIndex = index;
+    }
+    return domOrderDiffers;
+  }
+
+  check('처음');
+  let sawShuffle = false;
+  /* ⚠️ 마지막 두 개가 요점이다: 창이 **겹치는** 상태로 위로 조금 올라가면
+     남아 있는 노드 뒤에 낮은 인덱스가 붙어 DOM 순서가 모델 순서와 어긋난다. */
+  for (const offset of [3000, 9000, 14000, 13600, 500]) {
+    timeline.scrollTop = offset;
+    timeline.dispatch('scroll');
+    await settle();
+    sawShuffle = check('scrollTop ' + offset) || sawShuffle;
+  }
+  /* ⭐ 대조군의 자리: 가상 스크롤은 노드를 걷어내고 **끝에 다시 붙인다.** 그래서
+     DOM 순서가 모델 순서와 실제로 어긋난다 — `:nth-child` 로 칠했다면 바로 여기서
+     홀짝이 뒤집혔을 것이다. 어긋남을 확인해 두는 것이 그 증거다. */
+  console.log('      DOM 순서가 모델 순서와 어긋난 적: ' + sawShuffle +
+    ' · 걷어낸 노드 ' + chat.stats.recycled + '개 · rebuiltInView ' +
+    chat.stats.rebuiltInView);
+  assert.equal(sawShuffle, true,
+    'DOM 순서가 한 번도 어긋나지 않았다 — 이 테스트가 무엇도 증명하지 못한다');
+  assert.ok(chat.stats.recycled > 0);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('log 배치에서도 답장 인용·보내는 중·재시도가 산다', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log';
+  const quoted = msg(1, '원래 말', '앨리스');
+  const reply = msg(2, '답장이다', '밥');
+  reply.reply_to = quoted.id;
+  const { doc, chat, context } = await boot({
+    stored: stored, messages: [quoted, reply]
+  });
+  const rows = doc.getElementById('messages').children;
+  const line = rows[1].children[2];
+  assert.equal(String(line.children[0].className), 'quote');
+  assert.ok(line.children[0].textContent.includes('앨리스: 원래 말'), '인용이 비었다');
+  /* 답장 버튼도 줄 안에 있다 */
+  assert.ok(findByClass(rows[1], 'link'), '답장 버튼이 없다');
+
+  /* 낙관적 전송 → 실패 → 재시도가 같은 노드 위에서 돈다 (구조와 무관하다). */
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = '보내는 중이 보여야 한다';
+  const sending = chat.send();
+  await settle();
+  const bubble = doc.getElementById('messages').children[2];
+  assert.ok(bubble.textContent.includes('보내는 중'), '보내는 중이 안 보인다');
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+  assert.ok(bubble.textContent.includes('보내지 못했다'));
+  assert.ok(findByClass(bubble, 'retry'), '재시도가 없다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('⭐ 배치를 바꾸면 읽던 자리를 남기고 **새로고침한다** (즉시 전환하지 않는다)', async () => {
+  const { doc, chat, context } = await boot({
+    messages: manyMessages(120), viewport: 300
+  });
+  await settle();
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 2500;
+  timeline.dispatch('scroll');
+  await settle();
+  const nodesBefore = doc.getElementById('messages').children.slice();
+  const createdBefore = chat.stats.created;
+
+  assert.equal(chat.setLayout('log'), true, '전환이 일어나지 않았다');
+
+  /* (1) 저장됐다 — 새로고침 뒤에도 그 배치로 뜬다. */
+  assert.equal(context.localStorage.getItem(LAYOUT_KEY), 'log');
+  /* (2) 읽던 자리를 **앵커 메시지 id** 로 남겼다 (픽셀이 아니다). */
+  const saved = JSON.parse(context.localStorage.getItem(ANCHOR_KEY));
+  assert.equal(saved.room, 'r1');
+  assert.ok(saved.id, '앵커 id 가 없다');
+  /* (3) 새로고침을 불렀다. */
+  assert.equal(context.win.reloads, 1, '새로고침하지 않았다');
+  /* (4) ⭐ **즉시 전환하지 않았다** — 이 페이지의 노드는 하나도 손대지 않았다.
+     (즉시 전환하면 높이 캐시가 낡고 창 안 노드를 다시 만들어야 한다.) */
+  assert.equal(chat.stats.created, createdBefore, '전환하려고 노드를 만들었다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.deepEqual(doc.getElementById('messages').children, nodesBefore);
+  assert.ok(doc.getElementById('status').textContent.indexOf('다시 불러온다') >= 0,
+    '새로고침한다는 사실을 화면에 말하지 않았다');
+});
+
+await test('타임라인이 죽어 있어도 배치 전환은 진행된다 (앵커만 없다)', async () => {
+  const { chat, context } = await boot({
+    sabotage: (doc2) => breakWiring(doc2, 'timeline', '타임라인 배선 실패')
+  });
+  assert.equal(chat.setLayout('log'), true);
+  assert.equal(context.win.reloads, 1, '전환이 막혔다');
+  assert.equal(context.localStorage.getItem(ANCHOR_KEY), null);
+});
+
+/* ------------------------------------------------------------ 색 테마 */
+
+/*
+ * ⭐ 여기서 지키는 것은 색이 예쁜가가 아니라 **테마 전환이 화면을 건드리지
+ * 않는가**다. 색은 CSS 토큰으로 흐르므로 DOM 을 손댈 이유가 없다 — 노드를 다시
+ * 만드는 구현이면 가상 스크롤의 측정값이 낡고 읽던 자리가 튄다. 그래서 노드
+ * 동일성(===)·`rebuiltInView`·`scrollTop`·DOM 조작 횟수를 전부 수치로 본다.
+ */
+
+const THEME_KEY = 'gitwire-chat.theme';
+const THEME_ATTR = 'data-chat-theme';
+
+await test('첫 방문 기본값은 `기본` — 루트에 아무 속성도 찍지 않는다', async () => {
+  const { doc, chat } = await boot();
+  assert.equal(themeAttr(doc), null, '고르지도 않았는데 테마가 찍혔다');
+  assert.equal(chat.theme(), 'default');
+  /* 고르지 않았으면 저장도 하지 않는다 (다음 배포에서 기본값을 바꿀 여지를 남긴다). */
+  assert.equal(chat.modules.theme.current(), 'default');
+});
+
+await test('테마를 고르면 즉시 루트에 찍히고 이 기기에 남는다', async () => {
+  const { doc, chat, context } = await boot();
+  for (const id of ['log', 'ide', 'tty', 'tui']) {
+    chat.setTheme(id);
+    assert.equal(themeAttr(doc), id, id + ' 가 찍히지 않았다');
+    assert.equal(context.localStorage.getItem(THEME_KEY), id);
+  }
+  /* 기본으로 되돌리면 **속성을 지운다** = 시스템 라이트/다크 추종으로 복귀. */
+  chat.setTheme('default');
+  assert.equal(themeAttr(doc), null, '기본인데 속성이 남았다 (시스템 추종이 깨진다)');
+  assert.equal(context.localStorage.getItem(THEME_KEY), 'default');
+});
+
+await test('고르는 UI(select)가 실제로 테마를 바꾼다', async () => {
+  const { doc, chat } = await boot();
+  const bar = doc.getElementById('theme-bar');
+  assert.equal(bar.hidden, true, '설정 칸이 처음부터 펼쳐져 있다');
+
+  doc.getElementById('toggle-theme').dispatch('click');
+  assert.equal(bar.hidden, false, '◐ 를 눌렀는데 펼쳐지지 않았다');
+
+  const select = doc.getElementById('theme-select');
+  select.value = 'tui';
+  select.dispatch('change');
+  assert.equal(themeAttr(doc), 'tui');
+  assert.equal(chat.theme(), 'tui');
+  /* 무엇을 고른 상태인지 칸에 남는다 (다시 열었을 때 현재 값이 보여야 한다). */
+  assert.equal(select.value, 'tui');
+  assert.ok(doc.getElementById('theme-note').textContent.length > 0, '설명이 비었다');
+
+  doc.getElementById('toggle-theme').dispatch('click');
+  assert.equal(bar.hidden, true, '다시 누르면 접혀야 한다');
+});
+
+await test('⭐ 재기동해도 고른 테마가 유지된다 (첫 페인트 전에 찍힌다)', async () => {
+  const stored = {};
+  stored[THEME_KEY] = 'tty';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(themeAttr(doc), 'tty', '저장된 테마가 되살아나지 않았다');
+  assert.equal(chat.theme(), 'tty');
+  assert.equal(doc.getElementById('theme-select').value, 'tty');
+});
+
+await test('모르는 저장값은 조용히 기본으로 떨어진다 (검은 화면 사고 방지)', async () => {
+  const stored = {};
+  stored[THEME_KEY] = 'solarized-없는테마';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(themeAttr(doc), null);
+  assert.equal(chat.theme(), 'default');
+});
+
+await test('⭐ 테마를 바꿔도 메시지 노드를 다시 만들지 않는다 (rebuiltInView 0)', async () => {
+  const { doc, chat } = await boot({ messages: manyMessages(200), viewport: 300 });
+  const list = doc.getElementById('messages');
+  await settle();
+
+  /* 위로 조금 올라가 "읽던 자리"를 만든다 (맨 아래면 보존됐는지 알 수 없다). */
+  const timeline = doc.getElementById('timeline');
+  timeline.scrollTop = 3000;
+  timeline.dispatch('scroll');
+  await settle();
+
+  const nodesBefore = list.children.slice();
+  const idsBefore = nodesBefore.map((n) => n.dataset.id);
+  const snapshot = {
+    created: chat.stats.created,
+    appended: chat.stats.appended,
+    recycled: chat.stats.recycled,
+    cleared: chat.stats.cleared,
+    measured: chat.stats.measured,
+    createElement: doc.counts.createElement,
+    appendChild: doc.counts.appendChild,
+    removeChild: doc.counts.removeChild,
+    replaceChildren: doc.counts.replaceChildren
+  };
+  const topBefore = timeline.scrollTop;
+  const heightBefore = timeline.scrollHeight;
+
+  for (const id of ['log', 'ide', 'tty', 'tui', 'default']) { chat.setTheme(id); }
+  await settle();
+
+  console.log('      테마 5번 전환 · DOM 노드 ' + list.children.length +
+    '개 · created ' + snapshot.created + '→' + chat.stats.created +
+    ' · rebuiltInView ' + chat.stats.rebuiltInView +
+    ' · scrollTop ' + topBefore + '→' + timeline.scrollTop);
+
+  /* (1) 노드를 하나도 만들지 않았다 — 색은 CSS 로 흐른다. */
+  assert.equal(chat.stats.created, snapshot.created, '메시지 노드를 다시 만들었다');
+  assert.equal(chat.stats.appended, snapshot.appended);
+  assert.equal(chat.stats.recycled, snapshot.recycled, '창 밖으로 걷어낸 것이 생겼다');
+  assert.equal(chat.stats.cleared, snapshot.cleared, '타임라인을 비웠다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+
+  /* (2) DOM 조작 자체가 0 이다 (테마는 루트 속성 한 줄이 전부다). */
+  assert.equal(doc.counts.createElement, snapshot.createElement);
+  assert.equal(doc.counts.appendChild, snapshot.appendChild);
+  assert.equal(doc.counts.removeChild, snapshot.removeChild);
+  assert.equal(doc.counts.replaceChildren, snapshot.replaceChildren);
+  assert.equal(doc.counts.innerHTML, 0);
+
+  /* (3) 같은 객체가 같은 자리에 그대로 있다. */
+  assert.equal(list.children.length, nodesBefore.length);
+  for (let i = 0; i < nodesBefore.length; i++) {
+    assert.equal(list.children[i], nodesBefore[i], i + '번 노드가 교체됐다');
+  }
+  assert.deepEqual(list.children.map((n) => n.dataset.id), idsBefore);
+
+  /* (4) 높이 측정도, 읽던 자리도 그대로다 — 색만 바꾸면 높이는 변하지 않는다.
+     (폰트·행간·여백을 함께 건드리면 여기가 깨진다. 그래서 이번 범위는 색뿐이다.) */
+  assert.equal(chat.stats.measured, snapshot.measured, '높이를 다시 쟀다');
+  assert.equal(timeline.scrollHeight, heightBefore, '전체 높이가 변했다');
+  assert.equal(timeline.scrollTop, topBefore, '테마를 바꿨는데 읽던 자리를 잃었다');
+});
+
+await test('⭐ 테마 모듈이 못 서도 나머지 화면은 산다 (배선 실패로 실증)', async () => {
+  const { doc, chat, consoleErrors } = await boot({
+    sabotage: (doc2) => breakWiring(doc2, 'toggle-theme', '테마 배선 실패')
+  });
+  /* 대화·방 목록은 그대로 뜬다. */
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  assert.ok(doc.getElementById('rooms').children.length > 0);
+  /* 색은 기본으로 간다 (속성이 안 찍힌다) — 조용히는 아니고 드러난다. */
+  assert.equal(themeAttr(doc), null);
+  assert.equal(chat.failures().length, 1);
+  assert.equal(chat.failures()[0].unit, '테마');
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+  assert.ok(consoleErrors.join(' ').indexOf('테마') >= 0);
+});
+
+await test('테마가 죽어도 저장된 값은 첫 페인트 조각이 살려 둔다 (계약 일치)', () => {
+  /* 모듈과 템플릿이 **같은 키·같은 속성**을 써야 이 폴백이 성립한다.
+     (파이썬 쪽 test_theme.py 가 문자열 일치를 다시 확인한다.) */
+  const mod = fs.readFileSync(path.join(STATIC, 'js', 'theme.js'), 'utf8');
+  assert.ok(mod.includes("'" + THEME_KEY + "'"), 'theme.js 의 저장 키가 다르다');
+  assert.ok(mod.includes("'" + THEME_ATTR + "'"), 'theme.js 의 루트 속성이 다르다');
+  assert.ok(indexHtml.includes("'" + THEME_KEY + "'"), 'index.html 의 저장 키가 다르다');
+  assert.ok(indexHtml.includes("'" + THEME_ATTR + "'"), 'index.html 의 루트 속성이 다르다');
 });
 
 /* -------------------------------------------------------------- 보고 */

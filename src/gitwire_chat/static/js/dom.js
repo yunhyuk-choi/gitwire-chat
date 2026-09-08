@@ -47,13 +47,22 @@ export function uid() {
 
 /* 표시 시각 — 오늘이면 HH:MM, 아니면 M/D HH:MM. */
 export function timeLabel(iso) {
+  var parts = timeParts(iso);
+  return parts ? parts.label : '';
+}
+
+/* 시각을 **조각으로** 돌려준다.
+   줄 기반 배치는 초까지 보여 주고, 좁은 폭에서는 그 초만 CSS 로 숨긴다 —
+   그래서 초를 별도 조각으로 내놓는다 (JS 가 폭을 재서 분기하지 않는다:
+   폭 분기는 CSS 가 할 일이고, 재는 순간 그 값이 낡는다). */
+export function timeParts(iso) {
   var d = new Date(iso);
-  if (isNaN(d.getTime())) { return ''; }
+  if (isNaN(d.getTime())) { return null; }
   function two(n) { return (n < 10 ? '0' : '') + n; }
   var now = new Date();
   var sameDay = d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
   var hm = two(d.getHours()) + ':' + two(d.getMinutes());
-  if (sameDay) { return hm; }
-  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm;
+  var head = sameDay ? hm : ((d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm);
+  return { label: head, head: head, sec: ':' + two(d.getSeconds()) };
 }
