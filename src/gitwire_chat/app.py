@@ -8,6 +8,9 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     GET  /assets/<도장>/<파일>             ⭐ 도장 박힌 정적 자원 (영구 캐시)
     GET  /api/version                      설치본 버전 · 자원 도장 · 이 프로세스
     POST /api/update/check                 새 버전이 있나 (⭐ 사용자가 누를 때만)
+    POST /api/update/run                   ⭐ 갱신을 **시작**시킨다 — 정본 CLI 를
+                                           분리된 프로세스로 띄우고 즉시 반환.
+                                           우리 화면에서 온 요청만 받는다 (`csrf.py`)
     GET  /api/rooms                        방 목록 (+ 연결 상태)
     POST /api/rooms                        방 등록 → **즉시 반환**, 클론은 백그라운드
     POST /api/rooms/<id>/retry             실패한 방 다시 연결
@@ -40,7 +43,7 @@ from flask import (
     send_from_directory,
 )
 
-from . import assets, events, forges
+from . import assets, csrf, events, forges, updaterun
 from .config import Settings, load_settings
 from .rooms import RoomError, RoomManager, RoomNotReady
 
@@ -86,6 +89,10 @@ def create_app(
     stamper = assets.AssetStamper(app.static_folder)
     app.extensions["gitwire_chat_assets"] = stamper
     app.jinja_env.globals["asset"] = stamper.url
+
+    # 갱신 실행기. 서버 하나가 하나를 들고 있어야 "지금 내가 띄운 갱신이 아직
+    # 도나"를 확정적으로 알 수 있다 (`updaterun.py` 동시 실행 방지).
+    app.extensions["gitwire_chat_update"] = updaterun.Launcher(home=settings.home)
 
     if start:
         manager.start()
@@ -164,9 +171,9 @@ def create_app(
     def update_check():
         """새 버전이 있나 — ⭐ **사용자가 누를 때만** 원격을 본다.
 
-        주기 폴링을 두지 않는 근거와, 여기서 갱신을 *실행하지 않는* 근거는
-        `static/js/update.js` 의 도크에 적어 뒀다 (요지: 인증 없는 루프백 앱에
-        "앱을 죽이고 갈아치우는" 엔드포인트를 두지 않는다 · CLI 가 정본이다).
+        주기 폴링을 두지 않는 근거는 `static/js/update.js` 의 도크에 있다 (요지:
+        확인은 실제 네트워크 왕복이라, 로컬 앱이 사용자가 모르는 사이에 외부로
+        나가는 동작을 만들지 않는다).
 
         이 호출이 하는 일은 ``git ls-remote`` 한 번이다. 상태를 바꾸지 않는다.
         """
@@ -176,6 +183,84 @@ def create_app(
             return jsonify(updater.check().to_json())
         except updater.UpdateError as exc:
             return jsonify({"error": str(exc), "hint": exc.hint}), 400
+
+    @app.post("/api/update/run")
+    def update_run():
+        """⭐ 누르면 갱신이 **끝까지** 진행된다. 단, 여기서 갱신하지는 않는다.
+
+        하는 일이 셋이고 순서가 그대로 방어의 순서다:
+
+        1. **우리 화면에서 온 요청인가** (`csrf.py`). 이 앱은 루프백 전용 ·
+           인증 없음이라, "앱을 죽이고 갈아치우는" 엔드포인트를 드라이브바이로
+           부를 수 없게 만드는 것이 이 문의 전부다 — 커스텀 요청 헤더 +
+           ``Sec-Fetch-Site`` + ``Origin``. 근거·한계는 그 모듈 도크에 있다.
+        2. **바뀔 게 있나** (`updater.check` = ``git ls-remote`` 한 번).
+           없으면 **아무것도 띄우지 않고** 그렇게 답한다. 이 판정을 화면의 말을
+           믿고 건너뛰지 않는다 — 멀쩡한 앱을 재시작시키지 않는 것은 서버가
+           지켜야 하는 성질이다.
+        3. **정본 CLI 를 분리된 프로세스로 띄우고 즉시 반환** (`updaterun.py`).
+           멈춤·설치·재기동·실패 시 되돌리기와 안내는 그 CLI 가 이미 한다.
+           서버가 자기 패키지를 갈아치우며 자기를 재시작하는 구조로 만들지
+           않는다 (Windows 파일 락 · 실패하면 되돌릴 주체가 사라진다).
+
+        ⚠️ 성공 응답은 "**시작했다**"(202)이고 "갱신됐다"가 아니다. 그 뒤 이
+        서버는 곧 죽는다 — 화면이 그 구간을 어떻게 버티는지는
+        `static/js/update.js` 가 소유한다. 응답에 이 프로세스의 ``pid`` 를 실어
+        주는 이유가 그것이다: 화면은 **pid 가 달라진 것**으로 새 서버를 가른다.
+        """
+        from . import updater
+
+        reason = csrf.deny_reason(request.headers, request.host)
+        if reason:
+            # 조용히 거절하지 않는다 — 서버 로그에 남긴다. 정상 UI 가 갑자기
+            # 막히는 일이 생기면 그 이유가 여기 찍혀 있어야 한다.
+            log.warning("갱신 실행 요청을 거절했다 — %s", reason)
+            return jsonify(
+                {"error": reason, "code": "forbidden", "hint": csrf.HINT}
+            ), 403
+
+        try:
+            found = updater.check()
+        except updater.UpdateError as exc:
+            return jsonify(
+                {"error": str(exc), "hint": exc.hint, "code": "source"}
+            ), 400
+        if not found.behind:
+            return jsonify({
+                "started": False,
+                "code": "current",
+                "check": found.to_json(),
+            })
+
+        launcher = app.extensions["gitwire_chat_update"]
+        try:
+            run = launcher.launch()
+        except updaterun.Busy as exc:
+            return jsonify({
+                "error": str(exc), "code": "busy",
+                "hint": exc.hint, "run": exc.run.to_json(),
+            }), 409
+        except updaterun.Unmanaged as exc:
+            return jsonify(
+                {"error": str(exc), "code": "unmanaged", "hint": exc.hint}
+            ), 409
+        except updaterun.LaunchError as exc:
+            return jsonify(
+                {"error": str(exc), "code": "launch", "hint": exc.hint}
+            ), 500
+        return jsonify({
+            "started": True,
+            "run": run.to_json(),
+            "check": found.to_json(),
+            # 화면이 "새 서버가 떴다"를 가르는 기준. 버전·도장이 아니라 pid 다 —
+            # 정적 파일이 안 바뀌면 도장은 그대로이고, 버전 문자열은 같은 값으로
+            # 여러 번 배포한다 (`installed_version` 도크).
+            "serving": {
+                "pid": os.getpid(),
+                "version": installed_version(),
+                "asset_stamp": stamper.stamp,
+            },
+        }), 202
 
     @app.get("/api/settings")
     def get_settings():

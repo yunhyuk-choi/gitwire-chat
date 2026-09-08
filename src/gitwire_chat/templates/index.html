@@ -125,14 +125,24 @@
     <p class="empty" id="rooms-empty">등록된 방이 없다. ＋ 로 레포 주소를 넣어라.</p>
 
     <!-- 갱신 알림 (static/js/update.js). ⭐ 여기서 앱을 갱신하지 **않는다** —
-         새 것이 있나 물어보고 칠 명령을 보여줄 뿐이다. 정본은 CLI
-         (`python -m gitwire_chat update`) 이고, 앱이 아예 안 뜨는 상태에서도
-         복구가 되어야 하므로 그 경로가 버튼일 수 없다.
-         그리고 확인은 **누를 때만** 나간다 — 주기적으로 원격을 보지 않는다
-         (그 근거는 update.js 도크). -->
+         「갱신한다」는 서버가 정본 CLI(`python -m gitwire_chat update`)를 분리된
+         프로세스로 띄우게 하는 방아쇠일 뿐이다. 앱이 아예 안 뜨는 상태에서도
+         복구가 되어야 하므로 CLI 가 정본이고, 그래서 칠 명령과 복사 버튼이
+         그대로 남아 있다.
+         흐름: 확인 → 무엇이 바뀌나 보여주고 확인받기 → 시작 → **서버를 잃는
+         구간을 버티고** 새 버전으로 돌아오기 (그 구간의 소유자가 update.js 다).
+         확인은 **누를 때만** 나간다 — 주기적으로 원격을 보지 않는다. 실행 요청은
+         커스텀 헤더를 붙여 보내고 서버가 그것을 본다 (드라이브바이 방지 —
+         근거는 update.js · gitwire_chat/csrf.py 도크). -->
     <div class="update-bar" id="update-bar">
       <button type="button" class="link" id="check-update">업데이트 확인</button>
       <p class="update-note" id="update-note" hidden></p>
+      <a class="link" id="update-compare" target="_blank" rel="noopener noreferrer" hidden>무엇이 바뀌었나</a>
+      <div class="update-actions">
+        <button type="button" class="primary" id="run-update" hidden>지금 갱신</button>
+        <button type="button" class="primary" id="confirm-update" hidden>갱신한다</button>
+        <button type="button" id="cancel-update" hidden>취소</button>
+      </div>
       <code class="update-cmd" id="update-cmd" hidden></code>
       <button type="button" class="link" id="copy-update-cmd" hidden>명령 복사</button>
     </div>
