@@ -78,6 +78,11 @@ RESTART_LOG = "update-restart.log"
 #: 실패 보고에 붙일 로그 꼬리 줄 수.
 LOG_TAIL = 25
 
+#: 대장 밖 인스턴스를 왜 막았나 — 두 사유를 **구분한다.** 모르는 것을 안다고
+#: 말하지 않는 것이 이 프로젝트의 규율이다.
+SAME_INSTALL = "same"        # /api/version 의 prefix 가 우리와 같다 (확인됨)
+UNKNOWN_INSTALL = "unknown"  # 설치 위치를 알려주지 않는다 (옛 버전) — 보수적으로 막는다
+
 
 class UpdateError(Exception):
     """갱신을 진행할 수 없다 — 사람이 무엇을 하면 되는지 함께 들고 있다."""
@@ -561,9 +566,13 @@ def _find_unmanaged(known: set[int], ports: list[int]) -> list[int]:
 
     다른 venv 에서 도는 앱은 세지 않는다(``prefix`` 가 다르다) — 우리가 건드릴
     파일과 무관하므로 막을 이유가 없다. ``prefix`` 를 아예 안 알려주는 옛 버전은
-    **같은 설치본으로 본다**(보수적으로 — 모르면 막는다).
+    보수적으로 막되, **사유를 구분해서** 돌려준다 (`SAME_INSTALL` / `UNKNOWN_INSTALL`)
+    — "같은 설치본이다"라고 단정하면 실제로는 다른 venv 일 수 있으므로 보고가
+    거짓이 된다. 모르는 것은 모른다고 말한다.
 
     임의 포트를 훑지 않는다(포트 스캔은 하지 않는다). 볼 곳만 본다.
+
+    반환: ``[(포트, 사유), …]``
     """
     out = []
     for port in ports:
@@ -574,12 +583,13 @@ def _find_unmanaged(known: set[int], ports: list[int]) -> list[int]:
             # ⚠️ 갱신 기능이 없던 버전은 /api/version 에 404 를 준다. 그것을
             # "없다"로 보면 **처음 한 번**이 조용히 깨진다 (섞인 상태).
             if runstate.probe_legacy(port):
-                out.append(port)
+                out.append((port, UNKNOWN_INSTALL))
             continue
         prefix = str(seen.get("prefix") or "")
-        if prefix and Path(prefix) != Path(sys.prefix):
-            continue
-        out.append(port)
+        if not prefix:
+            out.append((port, UNKNOWN_INSTALL))
+        elif Path(prefix) == Path(sys.prefix):
+            out.append((port, SAME_INSTALL))
     return out
 
 
@@ -601,20 +611,24 @@ def update(
 
     # ---------------------------------------------- 1) 바뀔 게 있나 (먼저 알린다)
     try:
-        source = installed_source()
+        origin = installed_source()
     except UpdateError as exc:
         report.fail(str(exc), exc.hint)
         return report
-    if url:
-        # ⚠️ 원격 조회와 pip 인자가 **같은 주소**를 봐야 한다. 하나만 바꾸면
-        # "저쪽을 확인하고 이쪽을 설치하는" 조용한 어긋남이 된다.
-        source = replace(source, url=url)
+    # ⚠️ 두 좌표를 **구분해서** 들고 간다.
+    #   origin — 지금 설치본이 실제로 온 곳. **되돌리기**는 여기를 가리켜야 한다
+    #            (설치본의 그 커밋은 여기에만 있다).
+    #   source — 이번에 조회하고 설치할 곳. `--url` 이 이것만 바꾼다.
+    # 원격 조회와 pip 인자가 **같은 주소**를 봐야 하므로 둘을 함께 바꾸고,
+    # 되돌리기만 origin 을 쓴다. 하나만 바꾸면 "저쪽을 확인하고 이쪽을 설치하는"
+    # 또는 "없는 곳으로 되돌리라고 안내하는" 조용한 어긋남이 된다.
+    source = replace(origin, url=url) if url else origin
     target_url = source.url
     version_before = installed_version()
     stamp_before = assets.compute_stamp(_installed_static_dir())
 
     report.say(f"설치 원천  : {target_url}" + (f" @ {source.revision}" if source.revision else ""))
-    report.say(f"지금 설치본: {source.commit[:12] or '알 수 없음'}  (버전 {version_before or '?'})")
+    report.say(f"지금 설치본: {origin.commit[:12] or '알 수 없음'}  (버전 {version_before or '?'})")
     report.say(f"자원 도장  : {stamp_before}")
     try:
         remote = remote_commit(target_url, source.ref)
@@ -624,16 +638,16 @@ def update(
     report.say(f"원격 최신  : {remote[:12]}")
     report.say("")
 
-    if remote == source.commit and not force:
+    if remote == origin.commit and not force:
         report.say("최신이다 — 바뀔 것이 없다.")
         report.say("아무것도 멈추지 않았고, 아무것도 설치하지 않았다.")
         report.say("(그래도 다시 설치하려면 --force)")
         return report
-    if remote == source.commit:
+    if remote == origin.commit:
         report.say("최신이지만 --force 라 그대로 다시 설치한다.")
     else:
-        report.say(f"새 것이 있다: {source.commit[:12] or '?'} → {remote[:12]}")
-        link = compare_link(target_url, source.commit, remote)
+        report.say(f"새 것이 있다: {origin.commit[:12] or '?'} → {remote[:12]}")
+        link = compare_link(target_url, origin.commit, remote)
         if link:
             report.say(f"무엇이 바뀌었나: {link}")
     report.say("")
@@ -651,11 +665,25 @@ def update(
     )
     if unmanaged and not ignore_unmanaged:
         report.ok = False
-        report.say("중단: 대장에 없는 인스턴스가 돌고 있다 — 포트 " + ", ".join(map(str, unmanaged)))
+        report.say(
+            "중단: 대장에 없는 인스턴스가 돌고 있다 — 포트 "
+            + ", ".join(str(p) for p, _ in unmanaged)
+        )
         report.say("")
-        report.say("이 갱신 기능이 없던 버전으로 떠 있어서, 그 프로세스의 pid 도 실행")
-        report.say("옵션도 알 수 없다. 즉 멈출 수도, 원래 옵션으로 다시 띄울 수도 없다.")
-        report.say(f"그리고 그것은 지금 갈아치울 설치본과 같은 곳이다 ({sys.prefix}).")
+        report.say("그 프로세스의 pid 도 실행 옵션도 알 수 없다 — 대장에 적혀 있지")
+        report.say("않기 때문이다. 즉 멈출 수도, 원래 옵션으로 다시 띄울 수도 없다.")
+        for seen_port, reason in unmanaged:
+            if reason == SAME_INSTALL:
+                report.say(
+                    f"  · 포트 {seen_port}: **지금 갈아치울 설치본과 같은 곳**이다"
+                    f" ({sys.prefix})."
+                )
+            else:
+                report.say(
+                    f"  · 포트 {seen_port}: 설치 위치를 알려주지 않는다 (갱신 기능이"
+                    f" 없던 버전이다) — 지금 갈아치울 설치본({sys.prefix})과 같은"
+                    f" 곳인지 **알 수 없어서** 막는다."
+                )
         report.say("여기서 그냥 갈아치우면 살아 있는 앱이 **옛 파이썬 코드로 새 정적")
         report.say("파일을 서빙하는** 섞인 상태가 된다.")
         report.say("")
@@ -669,7 +697,7 @@ def update(
     if unmanaged:
         report.say(
             "⚠ 대장에 없는 인스턴스(포트 "
-            + ", ".join(map(str, unmanaged))
+            + ", ".join(str(p) for p, _ in unmanaged)
             + ")를 --ignore-unmanaged 로 무시한다 — 그 앱은 갱신 뒤 직접 재기동해야 한다."
         )
 
@@ -727,7 +755,7 @@ def update(
             runstate.wait_until_up(instance.port, timeout=up_timeout)
         report.say("")
         report.say("직접 되돌리거나 다시 시도하려면:")
-        report.say(f"  pip install --force-reinstall --no-deps \"{source.pinned(source.commit)}\"")
+        report.say(f"  pip install --force-reinstall --no-deps \"{origin.pinned(origin.commit)}\"")
         return report
     report.changed = True
     report.say("")
@@ -736,14 +764,14 @@ def update(
     version_after = installed_version()
     stamp_after = assets.compute_stamp(_installed_static_dir())
     report.say("── 바뀐 것")
-    report.say(f"커밋      : {source.commit[:12] or '?'} → {remote[:12]}")
+    report.say(f"커밋      : {origin.commit[:12] or '?'} → {remote[:12]}")
     report.say(f"버전      : {version_before or '?'} → {version_after or '?'}")
     if stamp_after != stamp_before:
         report.say(f"자원 도장 : {stamp_before} → {stamp_after}")
         report.say("            (브라우저가 새 JS·CSS 를 알아서 받는다 — 강력 새로고침 불필요)")
     else:
         report.say(f"자원 도장 : {stamp_after} (정적 파일은 그대로 — 받을 것이 없다)")
-    link = compare_link(target_url, source.commit, remote)
+    link = compare_link(target_url, origin.commit, remote)
     if link:
         report.say(f"차이      : {link}")
     report.say("")
@@ -762,7 +790,7 @@ def update(
     report.say("── 다시 띄운다")
     for instance in stopped:
         if not start_instance(instance, report, directory=directory):
-            _say_rollback(report, source, instance)
+            _say_rollback(report, origin, instance)
             continue
         seen = runstate.wait_until_up(instance.port, timeout=up_timeout)
         if seen is None:
@@ -777,7 +805,7 @@ def update(
                 report.say("  " + "-" * 40)
             else:
                 report.say(f"  로그가 비어 있다: {restart_log_path(instance)}")
-            _say_rollback(report, source, instance)
+            _say_rollback(report, origin, instance)
             continue
         report.say(
             f"  포트 {instance.port}: 떴다 — 버전 {seen.get('version') or '?'} · "
@@ -791,15 +819,18 @@ def update(
     return report
 
 
-def _say_rollback(report: Report, source: Source, instance: runstate.Instance) -> None:
+def _say_rollback(report: Report, origin: Source, instance: runstate.Instance) -> None:
     """되돌리는 방법을 **명령 그대로** 보여준다.
 
     "갱신했더니 앱이 안 뜬다"에서 사람이 할 수 있는 일이 남아 있어야 한다.
     직전 커밋을 알고 있으니(설치 전에 읽어 뒀다) 못 박아서 되돌릴 수 있다.
+
+    ⚠️ 가리키는 곳은 `--url` 로 바꾼 주소가 아니라 **설치본이 실제로 온 곳**
+    (`origin`)이다 — 그 커밋은 거기에만 있다.
     """
     report.ok = False
     report.say("")
     report.say("직전 버전으로 되돌리는 방법:")
-    report.say(f"  pip install --force-reinstall --no-deps \"{source.pinned(source.commit)}\"")
+    report.say(f"  pip install --force-reinstall --no-deps \"{origin.pinned(origin.commit)}\"")
     report.say("  그다음 다시 띄운다:")
     report.say(f"  {instance.display}")

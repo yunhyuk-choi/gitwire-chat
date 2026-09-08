@@ -399,17 +399,55 @@ def test_대장에_있지만_죽은_인스턴스는_무시한다(no_network, tmp
 
 
 def test_대장_밖_인스턴스가_있으면_중단하고_무엇을_할지_말한다(no_network, tmp_path):
-    no_network["unmanaged"] = [8770]
+    no_network["unmanaged"] = [(8770, updater.SAME_INSTALL)]
     report = updater.update(directory=tmp_path)
     assert not report.ok
     assert no_network["pip"] == [], "섞인 상태를 만들지 않는다"
     text = "\n".join(report.lines)
     assert "Ctrl+C" in text
     assert "--ignore-unmanaged" in text
+    assert "같은 곳" in text
+
+
+def test_설치_위치를_모르는_인스턴스는_모른다고_말한다(no_network, tmp_path):
+    """⚠️ 모르는 것을 안다고 말하지 않는다.
+
+    옛 버전은 자기 설치 위치를 알려주지 않는다. 그것을 "같은 설치본이다"라고
+    단정하면(실제로는 다른 venv 일 수 있다) 보고가 거짓이 된다. 막는 것은
+    같지만 **사유는 다르게** 말한다.
+    """
+    no_network["unmanaged"] = [(8770, updater.UNKNOWN_INSTALL)]
+    report = updater.update(directory=tmp_path)
+    assert not report.ok
+    text = "\n".join(report.lines)
+    assert "알 수 없어서" in text
+    assert "같은 곳**이다" not in text
+
+
+def test_되돌리기는_url_을_바꿔도_설치본이_온_곳을_가리킨다(
+    no_network, tmp_path, monkeypatch
+):
+    """⚠️ `--url` 로 다른 곳을 설치하려다 실패했을 때, 되돌릴 커밋은 **원래 곳**에만
+    있다. 바뀐 주소로 안내하면 있지도 않은 커밋을 가리키는 거짓 안내가 된다.
+    """
+    monkeypatch.setattr(
+        updater, "pip_install", lambda req, report, **kw: report.fail("실패다") or False
+    )
+    monkeypatch.setattr(updater, "stop_instance", lambda inst, report, **kw: True)
+    monkeypatch.setattr(updater, "start_instance", lambda inst, report, **kw: True)
+    monkeypatch.setattr(runstate, "alive", lambda inst, **kw: True)
+    monkeypatch.setattr(runstate, "wait_until_up", lambda port, **kw: {"pid": 1})
+    runstate.record(sample(8899), directory=tmp_path)
+
+    report = updater.update(directory=tmp_path, url="https://example.invalid/other.git")
+    assert not report.ok
+    text = "\n".join(report.lines)
+    assert "gitwire-chat.git@" + "a" * 40 in text, "되돌리기가 원래 곳을 가리켜야 한다"
+    assert "other.git@" + "a" * 40 not in text
 
 
 def test_대장_밖_인스턴스를_무시하라고_하면_경고하고_진행한다(no_network, tmp_path):
-    no_network["unmanaged"] = [8770]
+    no_network["unmanaged"] = [(8770, updater.SAME_INSTALL)]
     report = updater.update(directory=tmp_path, ignore_unmanaged=True)
     assert report.ok and report.changed
     assert any("무시한다" in line for line in report.lines)
