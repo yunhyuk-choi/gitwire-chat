@@ -4,7 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>gitwire-chat</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<!-- ⭐ 정적 자원 URL 에는 **내용 도장**이 박혀 있다 (`/assets/<도장>/…`).
+     파일이 바뀌면 도장이 바뀌어 URL 이 달라지므로 브라우저가 알아서 새로 받는다 —
+     갱신 후 강력 새로고침을 사람이 기억해야 하는 절차가 사라진다. 도장은 정적
+     트리의 **내용 해시**라 같은 버전 문자열로 재배포해도 동작한다
+     (`gitwire_chat/assets.py` 도크). `url_for('static', …)` 를 쓰면 도장이
+     빠지므로 여기서는 `asset()` 만 쓴다 — 그 규율은 tests/test_assets.py 가 본다. -->
+<link rel="stylesheet" href="{{ asset('style.css') }}">
 
 <!-- ⭐ 고른 색 테마를 **첫 페인트 전에** 심는다. 모듈 스크립트는 HTML 파싱이
      끝난 뒤에 돌아서, 여기서 심지 않으면 어두운 테마를 쓰는 사람이 새로고침마다
@@ -185,7 +191,12 @@
      스크립트가 그것을 집어갔다 — "실렸나 / 그때 실렸나"가 실제 사고 지점이었다).
      가상 스크롤 엔진(@tanstack/virtual-core)은 레포에 **벤더링**되어 있다.
      CDN 을 쓰지 않는 이유: 이 앱은 내 컴퓨터에서 도는 로컬 앱이고, 오프라인에서도
-     떠야 하며, 외부 호스트에 의존을 만들지 않는다. 빌드 단계도 없다. -->
-<script type="module" src="{{ url_for('static', filename='app.js') }}"></script>
+     떠야 하며, 외부 호스트에 의존을 만들지 않는다. 빌드 단계도 없다.
+
+     ⭐ 이 태그의 URL 에 박힌 도장은 **모듈 그래프 전체**에 전파된다. 상대 import
+     (`./js/boot.js`)가 같은 접두사 안에서 해석되기 때문이다 —
+     `/assets/<도장>/app.js` → `/assets/<도장>/js/boot.js`. 벤더 파일도 같다.
+     그래서 옛 파일 하나가 새 파일들 사이에 섞이는 일이 생길 수 없다. -->
+<script type="module" src="{{ asset('app.js') }}"></script>
 </body>
 </html>
