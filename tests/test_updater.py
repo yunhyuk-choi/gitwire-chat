@@ -21,12 +21,13 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from gitwire_chat import autostart, runstate, updater
+from gitwire_chat import autostart, csrf, runstate, updater, updaterun
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -569,15 +570,437 @@ def test_확인이_실패하면_사유와_힌트를_함께_준다(client, monkey
     assert body["error"] and "pip install" in body["hint"]
 
 
-def test_앱을_갱신하는_엔드포인트는_없다(client):
-    """⭐ 루프백·인증 없음 설계에서 원격 실행 표면을 만들지 않는다.
+def test_갱신_표면은_확인과_실행_둘뿐이고_실행은_POST_뿐이다(client):
+    """⭐ 표면이 자라지 않았는지 센다.
 
-    브라우저로 아무 페이지나 열어 둔 상태에서 그 페이지가 폼 전송 하나로 우리
-    앱을 재설치·재기동시킬 수 있게 되면, 막을 방법이 없다(인증이 없다).
+    한때 이 자리에는 "앱을 갱신하는 엔드포인트는 **없다**"가 있었다. 그 판단을
+    뒤집었지만(버튼으로 갱신까지 간다), 뒤집은 것은 *하나*뿐이다 — 실행 표면은
+    `POST /api/update/run` 딱 하나이고, 그것도 우리 화면에서 온 요청만 받는다
+    (`csrf.py`). `--force`·`--url` 처럼 위험을 늘리는 스위치는 HTTP 로 열지
+    않았다: 그건 CLI 가 정본이다.
     """
     rules = sorted(str(rule) for rule in client.application.url_map.iter_rules())
     update_rules = [r for r in rules if "update" in r]
-    assert update_rules == ["/api/update/check"], update_rules
+    assert update_rules == ["/api/update/check", "/api/update/run"], update_rules
+    # 읽기 동사로는 부를 수 없다 — 링크·이미지·프리페치로 갱신이 시작되지 않게.
+    assert client.get("/api/update/run").status_code == 405
+
+
+# ======================================= ⭐ 화면에서 온 요청인가 (csrf.py)
+#
+# 여기 있는 것이 "버튼으로 갱신까지" 를 성립시킨 그 방어다. 예전 판단(실행
+# 엔드포인트를 두지 않는다)의 근거는 "드라이브바이를 막을 수단이 없다"였는데,
+# 그 뒷부분이 틀렸다는 것을 **거절되는지 세어서** 확인한다.
+
+
+#: Flask 테스트 클라이언트가 쓰는 Host (`Origin` 비교 대상이 이것이다).
+TEST_HOST = "localhost"
+
+
+def form_post(origin: str = "http://evil.invalid", *, sec_fetch: bool = True) -> dict:
+    """다른 페이지가 숨은 HTML 폼으로 보낸 POST 의 헤더 모양.
+
+    ⭐ 여기 커스텀 헤더가 **없는 것**이 핵심이다 — 평범한 폼은 붙일 수 없다.
+    `sec_fetch=False` 는 그 헤더를 안 보내는 오래된 브라우저다.
+    """
+    headers = {
+        "Origin": origin,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if sec_fetch:
+        headers["Sec-Fetch-Site"] = "cross-site"
+        headers["Sec-Fetch-Mode"] = "navigate"
+    return headers
+
+
+def ui_post(host: str = "127.0.0.1:8770") -> dict:
+    """우리 화면이 보내는 POST 의 헤더 모양 (브라우저가 붙이는 것까지)."""
+    return {
+        csrf.HEADER: csrf.HEADER_VALUE,
+        "Origin": f"http://{host}",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+    }
+
+
+@pytest.mark.parametrize(
+    "headers,expect",
+    [
+        # 아무 헤더도 없는 최악의 경우 — **커스텀 헤더 요구**에서 죽는다.
+        ({}, "요청 헤더가 없다"),
+        ({"Content-Type": "application/x-www-form-urlencoded"}, "요청 헤더가 없다"),
+        # 요즘 브라우저의 폼 전송 — `Sec-Fetch-Site` 에서 먼저 죽는다.
+        (form_post(), "같은 출처에서 온 것이 아니라고"),
+        # `Sec-Fetch-*` 를 안 보내는 브라우저의 폼 전송 — `Origin` 에서 죽는다.
+        (form_post(sec_fetch=False), "다른 출처"),
+        # 헤더를 붙였다고 우겨도 브라우저가 붙인 표식이 우리를 지킨다.
+        ({csrf.HEADER: "update", "Sec-Fetch-Site": "cross-site"}, "같은 출처에서 온 것이 아니라고"),
+        ({csrf.HEADER: "update", "Sec-Fetch-Site": "same-site"}, "같은 출처에서 온 것이 아니라고"),
+        ({csrf.HEADER: "update", "Origin": "http://evil.invalid"}, "다른 출처"),
+        # 샌드박스 iframe·data: 문서의 Origin
+        ({csrf.HEADER: "update", "Origin": "null"}, "다른 출처"),
+        # 이름만 맞고 값이 다른 헤더로는 열리지 않는다.
+        ({csrf.HEADER: "아무거나"}, "요청 헤더가 없다"),
+    ],
+)
+def test_우리_화면에서_오지_않은_요청은_사유와_함께_거절한다(headers, expect):
+    reason = csrf.deny_reason(headers, "127.0.0.1:8770")
+    assert reason, f"통과시켰다: {headers}"
+    assert expect in reason, reason
+
+
+def test_우리_화면_모양은_통과한다():
+    assert csrf.deny_reason(ui_post(), "127.0.0.1:8770") == ""
+    # localhost 로 열어도 된다 — 비교 대상은 Host 헤더 자신이다.
+    assert csrf.deny_reason(ui_post("localhost:8770"), "localhost:8770") == ""
+
+
+def test_Sec_Fetch_를_안_보내는_클라이언트도_통과한다():
+    """⭐ **방어가 정상 사용을 막으면 실패다.**
+
+    `Sec-Fetch-*` 는 비교적 최신 헤더다. 안 보내는 브라우저·`curl`·스크립트에서도
+    우리 UI 는 동작해야 하므로 **없으면 통과**시킨다. 그 경우에도 커스텀 헤더
+    요구는 그대로 성립한다 (평범한 폼은 못 붙인다).
+    """
+    assert csrf.deny_reason({csrf.HEADER: csrf.HEADER_VALUE}, "127.0.0.1:8770") == ""
+    # Origin 도 없는 옛 클라이언트 (헤더 하나만 붙인 curl)
+    assert csrf.deny_reason(
+        {csrf.HEADER: csrf.HEADER_VALUE, "User-Agent": "curl/7.0"}, "127.0.0.1:8770"
+    ) == ""
+
+
+# =================================== ⭐ 누르면 갱신이 시작된다 (엔드포인트)
+
+
+class FakeLauncher:
+    """`updaterun.Launcher` 의 **소비 표면만** 흉내 낸 기록기.
+
+    엔드포인트 테스트에서 갱신을 정말로 띄우지 않는다. 실제 프로세스 왕복은
+    아래 「실행기」 절이 따로 본다 — 두 관심사를 한 테스트에 섞으면 둘 다 흐려진다.
+    """
+
+    def __init__(self, home: Path) -> None:
+        self.home = Path(home)
+        self.launches = 0
+        self.raise_with: BaseException | None = None
+
+    def launch(self) -> updaterun.Run:
+        if self.raise_with is not None:
+            raise self.raise_with
+        self.launches += 1
+        return updaterun.Run(
+            launcher_pid=os.getpid(),
+            started_at=time.time(),
+            log=str(self.home / updaterun.LOG_NAME),
+            pid=987654,
+            command=(sys.executable, "-m", "gitwire_chat", "update"),
+        )
+
+
+@pytest.fixture
+def runner(tmp_path, monkeypatch):
+    """`POST /api/update/run` 을 볼 준비 한 벌 (네트워크·실제 실행 없음)."""
+    from gitwire_chat.app import create_app
+    from gitwire_chat.config import Settings
+
+    state = {"remote": "b" * 40, "installed": "a" * 40}
+    monkeypatch.setattr(
+        updater,
+        "_direct_url",
+        lambda: direct_url(vcs_info={"vcs": "git", "commit_id": state["installed"]}),
+    )
+    monkeypatch.setattr(
+        updater, "remote_commit", lambda url, ref="HEAD": state["remote"]
+    )
+    app = create_app(
+        Settings(home=tmp_path / "chats", notifications=False), start=False
+    )
+    launcher = FakeLauncher(tmp_path / "chats")
+    app.extensions["gitwire_chat_update"] = launcher
+    state["launcher"] = launcher
+    state["client"] = app.test_client()
+    return state
+
+
+def test_새_것이_있으면_CLI_를_띄우고_즉시_202_로_답한다(runner):
+    """⭐ 응답은 "**시작했다**"이고 "갱신됐다"가 아니다 — 기다리지 않는다."""
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 202
+    body = response.get_json()
+    assert body["started"] is True
+    assert runner["launcher"].launches == 1
+    assert body["check"]["behind"] is True
+    assert body["run"]["log"].endswith(updaterun.LOG_NAME)
+    # 화면이 "새 서버가 떴다"를 가르는 기준 — 지금 서버의 pid.
+    assert body["serving"]["pid"] == os.getpid()
+
+
+def test_바뀔_게_없으면_아무것도_띄우지_않고_그렇게_말한다(runner):
+    """⭐ 이 판정을 화면의 말을 믿고 건너뛰지 않는다 (서버가 확인한다)."""
+    runner["remote"] = runner["installed"]
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["started"] is False and body["code"] == "current"
+    assert body["check"]["behind"] is False
+    assert runner["launcher"].launches == 0, "멀쩡한 앱을 재시작시키려 했다"
+
+
+def test_거절된_요청은_갱신을_띄우지_않는다(runner):
+    """403 이 "사유만 다르게 말하고 실행은 됐다"가 아니어야 한다."""
+    for headers in ({}, form_post(), {csrf.HEADER: csrf.HEADER_VALUE, "Origin": "http://evil.invalid"},
+    ):
+        response = runner["client"].post("/api/update/run", headers=headers)
+        assert response.status_code == 403, headers
+        body = response.get_json()
+        assert body["code"] == "forbidden"
+        assert body["error"] and "python -m gitwire_chat update" in body["hint"]
+    assert runner["launcher"].launches == 0
+
+
+def test_이미_돌고_있으면_409_로_거절하고_어디를_보라고_말한다(runner):
+    live = updaterun.Run(
+        launcher_pid=os.getpid(),
+        started_at=time.time() - 5,
+        log=str(runner["launcher"].home / updaterun.LOG_NAME),
+    )
+    runner["launcher"].raise_with = updaterun.Busy(live)
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "busy"
+    assert updaterun.LOG_NAME in body["hint"], body["hint"]
+    assert body["run"]["log"]
+
+
+def test_대장에_없는_인스턴스는_거절하고_CLI_를_안내한다(runner):
+    """⭐ 여기서 갱신하면 **옛 코드로 새 정적 파일을 서빙하는 섞인 상태**가 된다."""
+    runner["launcher"].raise_with = updaterun.Unmanaged("힌트: python -m gitwire_chat update")
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "unmanaged"
+    assert "python -m gitwire_chat update" in body["hint"]
+
+
+def test_띄우지_못하면_사유와_힌트를_준다(runner):
+    runner["launcher"].raise_with = updaterun.LaunchError("띄우지 못했다", hint="직접: …")
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 500
+    assert response.get_json()["code"] == "launch"
+
+
+def test_출처를_모르면_실행도_사유와_힌트를_준다(runner, monkeypatch):
+    monkeypatch.setattr(updater, "_direct_url", lambda: None)
+    response = runner["client"].post("/api/update/run", headers=ui_post(TEST_HOST))
+    assert response.status_code == 400
+    body = response.get_json()
+    assert body["code"] == "source" and "pip install" in body["hint"]
+    assert runner["launcher"].launches == 0
+
+
+# ================================================ 실행기 (updaterun.py)
+
+
+class SlowChild:
+    """끝나는 시점을 **테스트가 쥔** 자식 프로세스 대역."""
+
+    def __init__(self, pid: int = 123456) -> None:
+        self.pid = pid
+        self._done = threading.Event()
+
+    def poll(self):
+        return 0 if self._done.is_set() else None
+
+    def wait(self):
+        self._done.wait(timeout=10)
+        return 0
+
+    def finish(self) -> None:
+        self._done.set()
+
+
+class StubLauncher(updaterun.Launcher):
+    """OS 실행 한 걸음만 갈아끼운 실행기 — 자물쇠·문지기는 **진짜**다."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.spawned: list[list[str]] = []
+        self.children: list[SlowChild] = []
+
+    def _spawn(self, argv, run):
+        self.spawned.append(list(argv))
+        child = SlowChild(pid=123456 + len(self.children))
+        self.children.append(child)
+        return child
+
+
+def me_in_registry(directory: Path, port: int = 8899) -> runstate.Instance:
+    """이 프로세스를 대장에 적는다 — 화면 갱신의 전제 조건."""
+    instance = sample(port, pid=os.getpid())
+    runstate.record(instance, directory=directory)
+    return instance
+
+
+def test_대장에_없으면_아예_띄우지_않는다(tmp_path):
+    """⭐ 조용한 고장(섞인 상태)을 만들 수 있는 경우를 **거절**한다."""
+    launcher = StubLauncher(home=tmp_path / "chats", directory=tmp_path / "run")
+    with pytest.raises(updaterun.Unmanaged) as caught:
+        launcher.launch()
+    assert "python -m gitwire_chat update" in caught.value.hint
+    assert launcher.spawned == []
+    assert not launcher.lock_path.exists(), "거절했는데 자물쇠가 남았다"
+
+
+def test_두_번_눌러도_두_탭에서_눌러도_한_번만_돈다(tmp_path):
+    """⭐ 같은 서버 안에서는 추측하지 않는다 — 자식에게 물어본다."""
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+
+    first = launcher.launch()
+    assert launcher.spawned, "안 띄웠다"
+    assert launcher.current() is not None
+    with pytest.raises(updaterun.Busy) as caught:
+        launcher.launch()                      # 두 번째 누름 / 다른 탭
+    assert caught.value.run.started_at == first.started_at
+    assert updaterun.LOG_NAME in caught.value.hint
+    assert len(launcher.spawned) == 1, "두 번 띄웠다"
+
+    # 끝나면 자물쇠가 풀리고 다시 띄울 수 있다.
+    launcher.children[0].finish()
+    for _ in range(100):
+        if not launcher.lock_path.exists():
+            break
+        time.sleep(0.05)
+    assert not launcher.lock_path.exists(), "자식이 끝났는데 자물쇠가 남았다"
+    launcher.launch()
+    assert len(launcher.spawned) == 2
+
+
+def test_다른_서버가_방금_띄운_갱신이면_거절한다(tmp_path):
+    """다른 포트의 인스턴스가 눌렀을 때 — 자물쇠 파일 한 장으로 갈린다."""
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    launcher.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher._write_lock(
+        updaterun.Run(
+            launcher_pid=os.getpid() + 1,       # 남의 서버
+            started_at=time.time(),
+            log=str(tmp_path / "없는파일.log"),
+        )
+    )
+    with pytest.raises(updaterun.Busy):
+        launcher.launch()
+    assert launcher.spawned == []
+
+
+def test_로그가_조용해진_남의_자물쇠는_이어받는다(tmp_path):
+    """⚠️ 자물쇠를 풀 주체가 사라질 수 있다 — 그 한계를 이렇게 메운다.
+
+    갱신은 자물쇠를 만든 서버를 죽인다. 그래서 남의 자물쇠는 **로그가 얼마나
+    조용한가**로 판정한다 (근거·한계는 `updaterun.py` 모듈 도크).
+    """
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    quiet = tmp_path / "quiet.log"
+    quiet.write_text("옛 갱신 기록\n", encoding="utf-8")
+    old = time.time() - updaterun.IDLE_LIMIT - 60
+    os.utime(quiet, (old, old))
+    launcher.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher._write_lock(
+        updaterun.Run(launcher_pid=os.getpid() + 1, started_at=old, log=str(quiet))
+    )
+    assert launcher.current() is None
+    launcher.launch()                          # 이어받는다
+    assert len(launcher.spawned) == 1
+
+
+def test_아주_오래된_자물쇠는_로그가_자라고_있어도_버린다(tmp_path):
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    fresh = tmp_path / "fresh.log"
+    fresh.write_text("지금도 자란다\n", encoding="utf-8")
+    launcher.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher._write_lock(
+        updaterun.Run(
+            launcher_pid=os.getpid() + 1,
+            started_at=time.time() - updaterun.HARD_LIMIT - 1,
+            log=str(fresh),
+        )
+    )
+    assert launcher.current() is None
+
+
+def test_망가진_자물쇠는_없는_것으로_본다(tmp_path):
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    launcher.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher.lock_path.write_text("{망가짐", encoding="utf-8")
+    assert launcher.current() is None
+    launcher.launch()
+    assert len(launcher.spawned) == 1
+
+
+def test_자물쇠_파일은_UTF8_이고_LF_다(tmp_path):
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    launcher.launch()
+    raw = launcher.lock_path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf") and b"\r\n" not in raw
+    raw.decode("utf-8")
+
+
+def test_띄우는_명령은_모듈로_부르고_대장을_명시한다(tmp_path):
+    """⚠️ 콘솔 스크립트로 부르면 Windows 에서 pip 가 그 파일을 잠근다.
+
+    그리고 ``--dir`` 을 해석된 값으로 박는다 — 대장이 어긋나면 갱신이 이 앱을
+    못 찾아서 **정확히 우리가 막으려는 고장**(섞인 상태)이 된다.
+    """
+    run_dir = tmp_path / "run"
+    launcher = updaterun.Launcher(home=tmp_path / "chats", directory=run_dir)
+    argv = launcher.command()
+    assert argv[0] == sys.executable
+    assert argv[1:4] == ["-m", "gitwire_chat", "update"]
+    assert argv[4:6] == ["--dir", str(run_dir)]
+    assert "gitwire-chat" not in Path(argv[0]).name.lower()
+
+
+def test_실제로_갱신_CLI_를_띄우고_기록을_남기고_자물쇠를_푼다(tmp_path, monkeypatch):
+    """⭐ 흉내가 아니다 — **진짜 프로세스**를 띄운다.
+
+    `--dry-run` 으로 띄우므로 아무것도 멈추지 않고 아무것도 설치하지 않는다
+    (사용자 인스턴스도 안전하다 — dry-run 은 다른 포트를 *읽어만* 본다).
+    보는 것은 이 파일이 책임지는 그 셋이다: **띄웠나 · 출력이 파일로 갔나 ·
+    끝난 뒤 자물쇠가 풀렸나.**
+    """
+    run_dir = tmp_path / "run"
+    me_in_registry(run_dir)
+    monkeypatch.setenv("PYTHONPATH", str(ROOT / "src"))
+    launcher = updaterun.Launcher(
+        home=tmp_path / "chats", directory=run_dir, extra_args=("--dry-run",)
+    )
+    (tmp_path / "chats").mkdir(parents=True, exist_ok=True)
+    run = launcher.launch()
+    assert run.pid > 0
+    assert launcher.lock_path.exists()
+
+    deadline = time.monotonic() + BOOT_TIMEOUT
+    while time.monotonic() < deadline and launcher.lock_path.exists():
+        time.sleep(0.1)
+    assert not launcher.lock_path.exists(), "자식이 끝났는데 자물쇠가 남았다"
+
+    text = Path(run.log).read_text(encoding="utf-8", errors="replace")
+    assert updaterun.RUN_MARK in text, text
+    assert "--dry-run" in text, text
+    # CLI 가 **무엇이든 말했다** — 출력을 버리지 않았다는 증거.
+    lines = [line for line in text.strip().splitlines() if line.strip()]
+    assert len(lines) >= 3, text
 
 
 # =========================================================== 재기동 로그
