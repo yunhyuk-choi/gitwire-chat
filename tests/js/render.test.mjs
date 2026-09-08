@@ -94,10 +94,16 @@ function isMine(node) {
   return String(node.className).split(' ').indexOf('mine') >= 0;
 }
 
-/* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다. */
+/* window 대역 — 모듈이 전역을 직접 집어오지 않으므로 이 정도면 충분하다.
+ *
+ * 타이머는 **테스트가 쥔다**(진짜 setTimeout 이 아니다). 이유가 둘:
+ *   · IME 안전 타이머(3초)를 실제로 기다리지 않고 만료시킬 수 있다.
+ *   · "언제 도는가"가 손에 있어야 "확정 신호 없이는 안 보낸다"를 셀 수 있다.
+ */
 function stubWindow() {
   return {
     listeners: {},
+    timers: [],
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
     removeEventListener(type, fn) {
       const list = this.listeners[type] || [];
@@ -106,7 +112,23 @@ function stubWindow() {
     },
     dispatch(type, event) {
       for (const fn of (this.listeners[type] || []).slice()) { fn(event || { type }); }
-    }
+    },
+    setTimeout(fn, ms) {
+      this.timers.push({ fn: fn, ms: ms || 0, cleared: false });
+      return this.timers.length;                 /* 1-based id */
+    },
+    clearTimeout(id) {
+      const t = this.timers[id - 1];
+      if (t) { t.cleared = true; }
+    },
+    /* `upto` ms 이하로 걸린 콜백을 지금 돌린다. 돌린 개수를 돌려준다. */
+    runTimers(upto) {
+      const limit = upto === undefined ? 0 : upto;
+      const due = this.timers.filter((t) => !t.cleared && t.ms <= limit);
+      for (const t of due) { t.cleared = true; t.fn(); }
+      return due.length;
+    },
+    pendingTimers() { return this.timers.filter((t) => !t.cleared).map((t) => t.ms); }
   };
 }
 
@@ -1199,6 +1221,211 @@ await test("검색 결과도 같은 표식을 단다", async () => {
   const hits = doc.getElementById('search-list').children;
   assert.equal(hits.length, 2);
   assert.deepEqual(hits.map((h) => String(h.className)), ['hit mine', 'hit']);
+});
+
+/* --------------------------------------------- IME(한글) 조합 중의 Enter */
+
+/*
+ * ⭐ 맥에서 **마지막 글자가 씹혀 전송되던** 버그의 회귀 방지.
+ *
+ * 원인: `keydown` 은 IME 의 조합 확정보다 **먼저** 온다. 그래서 그때 읽은
+ * `value` 에는 마지막 음절이 없다. 아래 테스트는 그 순간을 그대로 재현한다 —
+ * 조합 중에는 value 가 짧고, 확정될 때 마지막 음절이 들어온다.
+ *
+ * 지키는 것 두 개가 대칭이 아니다(의도한 비대칭):
+ *   · **잘려서 보내지는 일은 없어야 한다** (모르고 지나가는 사고)
+ *   · 못 보내는 것은 허용한다 (사용자가 Enter 를 다시 누르면 된다)
+ */
+
+/* 키 이벤트 대역. `preventDefault` 를 불렀는지 기록한다 — 조합 중 Enter 를
+   막으면 IME 가 확정을 못 하고 그 글자가 입력칸에 남는다(보고된 두 번째 증상). */
+function keyEvent(key, extra) {
+  return Object.assign({
+    key: key, shiftKey: false, prevented: false,
+    preventDefault() { this.prevented = true; }
+  }, extra || {});
+}
+
+function posts(context) {
+  return context.fetch.calls.filter((c) => (c.init || {}).method === 'POST');
+}
+
+function bodyOf(call) { return JSON.parse(call.init.body); }
+
+async function imeBoot() {
+  const booted = await boot();
+  booted.context.fetch = deferredFetch();
+  booted.text = booted.doc.getElementById('text');
+  booted.list = booted.doc.getElementById('messages');
+  booted.before = booted.list.children.length;
+  return booted;
+}
+
+await test('⭐ 조합 중 Enter: 그 자리에서 보내지 않고, 확정된 뒤 **완전한 본문**을 보낸다', async () => {
+  const { doc, context, text, list, before } = await imeBoot();
+
+  /* 맥 한글 IME 로 "안녕하세요다" 를 치고 Enter — 이 순간 value 에는 마지막
+     음절('다')이 아직 없다. 이게 버그가 나던 정확한 상태다. */
+  text.dispatch('compositionstart');
+  text.value = '안녕하세요';
+  const enter = keyEvent('Enter', { isComposing: true });
+  text.dispatch('keydown', enter);
+  await settle();
+
+  assert.equal(posts(context).length, 0, '조합 중인데 전송됐다 (잘린 본문이 나갔다)');
+  assert.equal(list.children.length, before, '말풍선이 붙었다 (낙관적 전송이 나갔다)');
+  assert.equal(text.value, '안녕하세요', '입력칸이 비워졌다');
+  assert.equal(enter.prevented, false,
+    'preventDefault 로 IME 의 조합 확정을 막았다 — 그 글자가 입력칸에 남는다');
+
+  /* IME 가 그 Enter 로 조합을 확정한다: 마지막 음절이 들어오고 신호가 온다. */
+  text.value = '안녕하세요다';
+  text.dispatch('compositionend');
+  assert.equal(posts(context).length, 0,
+    '확정 신호와 같은 틱에 보냈다 — 엔진에 따라 value 가 아직 안 찬다');
+
+  context.win.runTimers(0);              /* 한 틱 양보 후 전송 */
+  await settle();
+
+  const sent = posts(context);
+  assert.equal(sent.length, 1, '확정됐는데 전송되지 않았다');
+  assert.equal(bodyOf(sent[0]).text, '안녕하세요다', '마지막 글자가 씹혔다');
+  assert.equal(text.value, '', '전송했는데 입력칸이 남았다');
+  assert.equal(list.children.length, before + 1);
+  assert.ok(list.children[before].textContent.includes('안녕하세요다'));
+  assert.deepEqual(context.win.pendingTimers(), [], '안전 타이머가 남았다');
+});
+
+await test('같은 판정이 `keyCode 229` 경로에서도 선다 (isComposing 을 안 주는 브라우저)', async () => {
+  const { context, text } = await imeBoot();
+  /* compositionstart 를 일부러 주지 않는다 — 키 이벤트만으로 판정되는지 본다. */
+  text.value = '테스트';
+  const enter = keyEvent('Enter', { keyCode: 229 });
+  text.dispatch('keydown', enter);
+  await settle();
+  assert.equal(posts(context).length, 0, '229 를 조합 중으로 보지 않았다');
+  assert.equal(enter.prevented, false);
+
+  text.value = '테스트다';
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(bodyOf(posts(context)[0]).text, '테스트다');
+});
+
+await test('⭐ 평소 타이핑의 조합 확정으로는 전송되지 않는다 (표시 오염 방지)', async () => {
+  const { context, text } = await imeBoot();
+
+  /* (1) Enter 없이 음절만 확정 — `compositionend` 는 평소 타이핑에서도 온다. */
+  for (const syllable of ['안', '안녕', '안녕하']) {
+    text.dispatch('compositionstart');
+    text.value = syllable;
+    text.dispatch('compositionend');
+  }
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Enter 를 누르지 않았는데 전송됐다');
+
+  /* (2) 조합 중 Enter 로 표시를 세운 **뒤에 다른 글자를 더 쳤다** = 전송 의도 무효.
+     이걸 지우지 않으면 다음 음절 확정 때 엉뚱하게 나간다. */
+  text.dispatch('compositionstart');
+  text.value = '안녕하';
+  text.dispatch('keydown', keyEvent('Enter', { isComposing: true }));
+  text.dispatch('keydown', keyEvent('세', { isComposing: true }));
+  text.value = '안녕하세';
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, '전송 의도를 취소했는데 나갔다');
+  assert.equal(text.value, '안녕하세', '입력칸 내용이 사라졌다');
+});
+
+await test('안전 타이머는 **취소 전용** — 만료되면 전송되지 않고 표시만 풀린다', async () => {
+  const { context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '확정 신호가 안 오는 환경';
+  text.dispatch('keydown', keyEvent('Enter', { isComposing: true }));
+  await settle();
+  assert.deepEqual(context.win.pendingTimers(), [3000], '안전 타이머가 걸리지 않았다');
+
+  context.win.runTimers(3000);           /* 신호를 못 받은 채 한도가 지났다 */
+  await settle();
+  assert.equal(posts(context).length, 0,
+    '⚠️ 안전 타이머가 **보냈다** — 확정을 모르는 상태의 전송이라 잘릴 수 있다');
+  assert.equal(text.value, '확정 신호가 안 오는 환경', '입력 내용을 잃었다');
+
+  /* 늦게 신호가 와도 표시는 이미 풀렸다 — 조용히 나가지 않는다. */
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0);
+
+  /* 그리고 모듈은 멀쩡하다 — 사용자가 Enter 를 다시 누르면 보내진다. */
+  text.dispatch('keydown', keyEvent('Enter'));
+  await settle();
+  assert.equal(posts(context).length, 1, '다시 누른 Enter 로도 안 보내진다');
+  assert.equal(bodyOf(posts(context)[0]).text, '확정 신호가 안 오는 환경');
+});
+
+await test('영문 입력은 아무 변화가 없다 — Enter 한 번에 즉시 전송', async () => {
+  const { context, text } = await imeBoot();
+  text.value = 'ship it';
+  const enter = keyEvent('Enter', { isComposing: false });
+  text.dispatch('keydown', enter);
+  await settle();
+  assert.equal(posts(context).length, 1, '영문 Enter 가 지연됐다');
+  assert.equal(bodyOf(posts(context)[0]).text, 'ship it');
+  assert.equal(enter.prevented, true, '줄바꿈 기본 동작을 막지 않았다');
+  assert.equal(text.value, '');
+  assert.deepEqual(context.win.pendingTimers(), [], '영문인데 IME 타이머가 걸렸다');
+});
+
+await test('Shift+Enter 는 줄바꿈이다 (조합 중에도 보내지 않는다)', async () => {
+  const { context, text } = await imeBoot();
+  text.value = '첫 줄';
+  const shifted = keyEvent('Enter', { shiftKey: true, isComposing: true });
+  text.dispatch('keydown', shifted);
+  text.dispatch('compositionend');        /* 확정돼도 전송 의도가 없다 */
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Shift+Enter 로 전송됐다');
+  assert.equal(shifted.prevented, false, '줄바꿈을 막았다');
+  assert.equal(text.value, '첫 줄');
+});
+
+await test('⭐ 대조군: 조합 여부를 보지 않고 보내면 잘린 본문이 나간다 (버그 재현)', async () => {
+  /* 이 테스트들이 **실제 버그를 겨냥하는지**를 증명한다. 같은 상태에서 가드를
+     지나쳐 곧바로 보내면(= 고치기 전 핸들러가 하던 일) 마지막 음절이 빠진다. */
+  const { chat, context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '안녕하세요';              /* 조합 중 — '다' 가 아직 없다 */
+
+  chat.send();                            /* 가드 없는 경로 (응답은 기다리지 않는다) */
+  await settle();
+
+  const sent = posts(context);
+  assert.equal(sent.length, 1);
+  assert.equal(bodyOf(sent[0]).text, '안녕하세요',
+    '대조군이 성립하지 않는다 — 이 경로에서 잘림이 재현되지 않으면 위 테스트가 무엇도 증명하지 못한다');
+  assert.notEqual(bodyOf(sent[0]).text, '안녕하세요다');
+});
+
+await test('보내기 버튼(폼 제출)은 확정된 완전한 본문을 보낸다', async () => {
+  /* 버튼을 누르려면 포인터가 입력칸을 떠나고, 그 blur 가 조합을 먼저 확정시킨다.
+     그래서 폼 경로에는 IME 가드를 두지 않는다 — 두면 "눌렀는데 안 보내진다"가 된다. */
+  const { doc, context, text } = await imeBoot();
+  text.dispatch('compositionstart');
+  text.value = '버튼으로 보낸다';
+  text.value = '버튼으로 보낸다요';        /* blur → IME 확정 */
+  text.dispatch('compositionend');
+  context.win.runTimers(0);
+  await settle();
+  assert.equal(posts(context).length, 0, 'Enter 도 없이 전송됐다');
+
+  doc.getElementById('composer').dispatch('submit', { preventDefault() {} });
+  await settle();
+  assert.equal(bodyOf(posts(context)[0]).text, '버튼으로 보낸다요');
+  assert.equal(text.value, '');
 });
 
 /* ------------------------------------------------------------ 색 테마 */
