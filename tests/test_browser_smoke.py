@@ -273,6 +273,117 @@ frame.addEventListener('load', function () {
 </script></body></html>"""
 
 
+#: `ide` 배치(연속 발화 묶기)를 **브라우저가 계산한 값**으로 재는 페이지.
+#:
+#: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라(네트워크·git 을
+#: 타지 않으려고) 메시지 줄이 그려지지 않는다. 그래서 `message-node.js` 가 만드는
+#: 것과 **같은 구조**를 손으로 세우고 진짜 `style.css` 를 물린다 (구조가 어긋나면
+#: stub DOM 테스트가 먼저 깨진다 — 조각·클래스 이름을 거기서 고정한다).
+#:
+#: 묶인 줄은 머리 조각이 `hidden` 이다 — 타임라인이 그렇게 만든다(지우지 않는다).
+#: 떠 있는 머리(`.sticky-head`)도 함께 세워 **자리를 차지하지 않는지**(height 0)와
+#: sticky 로 계산되는지를 본다.
+PROBE_IDE_ROWS = """<!doctype html><html lang="ko" data-chat-layout="ide"%(theme)s>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<link rel="stylesheet" href="/static/style.css"></head><body>
+<div class="app"><main class="chat"><div class="timeline" id="tl">
+<div class="sticky-head" id="sh" data-sender="1"><div class="sticky-row" id="sr">
+<span class="author" id="sha">bc.lee</span><time class="ts">14:12</time></div></div>
+<div class="messages">
+<article class="msg" id="g0" data-sender="1" data-index="0">
+<div class="msg-head" id="g0h"><span class="author" id="g0a">bc.lee</span>
+<time class="ts">14:12</time></div>
+<div class="line" id="g0l"><div class="body">묶음의 첫 줄</div>
+<div class="msg-actions"><button type="button" class="link">답장</button></div>
+<div class="msg-state" hidden></div></div></article>
+<article class="msg" id="g1" data-sender="1" data-index="1">
+<div class="msg-head" id="g1h" hidden><span class="author">bc.lee</span>
+<time class="ts">14:12</time></div>
+<div class="line" id="g1l"><div class="body">묶인 줄 — 아주 긴 URL 도 줄을 깨지 않아야 한다
+https://example.invalid/아주/긴/경로/가/이어지는/주소</div></div></article>
+<article class="msg mine" id="g2" data-sender="2" data-index="2">
+<div class="msg-head" id="g2h"><span class="author" id="g2a">나</span>
+<time class="ts">14:16</time></div>
+<div class="line" id="g2l"><div class="body">내 줄</div></div></article>
+<article class="msg" id="g3" data-sender="1" data-index="3">
+<div class="msg-head" id="g3h" hidden><span class="author">bc.lee</span>
+<time class="ts">14:12</time></div>
+<div class="line" id="g3l"><div class="body">묶음의 첫 줄</div>
+<div class="msg-actions"><button type="button" class="link">답장</button></div>
+<div class="msg-state" hidden></div></div></article>
+<div id="filler" style="height:1200px"></div>
+</div></div></main></div></body></html>"""
+
+#: 위 페이지를 정해진 폭의 iframe 에 넣고 계산된 값을 회수한다 (`log` 과 같은 이유 —
+#: 이 환경의 헤드리스 Edge 는 뷰포트를 492px 아래로 못 내린다. iframe 은 자기 폭이
+#: 곧 뷰포트다).
+PROBE_IDE_FRAME = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+</head><body style="margin:0">
+<iframe id="f" src="/__test__/probeide/%(theme)s/0"
+        style="width:%(width)dpx;height:640px;border:0"></iframe>
+<pre id="out"></pre>
+<script>
+var frame = document.getElementById('f');
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow;
+  var doc = frame.contentDocument;
+  function cs(id) { return win.getComputedStyle(doc.getElementById(id)); }
+  function box(id) { return doc.getElementById(id).getBoundingClientRect(); }
+  document.getElementById('out').textContent = JSON.stringify({
+    viewport: win.innerWidth,
+    /* 머리가 묶인 줄에서 **자리를 차지하지 않나** */
+    head_display: cs('g0h').display,
+    grouped_head_display: cs('g1h').display,
+    grouped_head_height: Math.round(box('g1h').height),
+    /* 묶인 줄이 첫 줄보다 낮다 = 세로 밀도를 벌었다 */
+    first_height: Math.round(box('g0').height),
+    grouped_height: Math.round(box('g1').height),
+    /* 첫 줄과 **같은 본문**으로 묶인 줄 — 밀도 이득은 이 둘을 비교해야 보인다. */
+    grouped_same_text_height: Math.round(box('g3').height),
+    /* 내것은 **왼쪽 레일 색만** 바뀐다 (위치를 옮기지 않는다) */
+    mine_rail: cs('g2l').borderLeftColor,
+    other_rail: cs('g0l').borderLeftColor,
+    mine_bg: cs('g2').backgroundColor,
+    mine_left: Math.round(box('g2').left),
+    other_left: Math.round(box('g0').left),
+    /* 발신자 색 (묶기와 무관하게 log 과 같은 슬롯 규칙) */
+    sender1: cs('g0a').color,
+    mine_author: cs('g2a').color,
+    /* 떠 있는 머리 — sticky 이고 **흐름을 차지하지 않는다**(높이 0) */
+    sticky_position: cs('sh').position,
+    sticky_height: Math.round(box('sh').height),
+    sticky_row_position: cs('sr').position,
+    sticky_row_visible: Math.round(box('sr').height) > 0,
+    sticky_author: cs('sha').color,
+    row_width: Math.round(box('g0').width),
+    /* ⭐ 스크롤한 뒤에도 떠 있는 머리가 **창 위에 남아 있나.** 묶음 중간에서
+       창이 시작해도 누가 말했는지 화면에 있다는 것이 곧 이 값이다. */
+    scrolled: (function () {
+      var tl = doc.getElementById('tl');
+      tl.scrollTop = 300;
+      return Math.round(tl.scrollTop);
+    })(),
+    sticky_offset_from_top: (function () {
+      var tl = doc.getElementById('tl').getBoundingClientRect();
+      return Math.round(box('sr').top - tl.top);
+    })(),
+    sticky_inside_view: (function () {
+      var tl = doc.getElementById('tl').getBoundingClientRect();
+      var r = box('sr');
+      return r.top >= tl.top - 1 && r.bottom <= tl.bottom + 1 && r.height > 0;
+    })(),
+    /* 그 자리에서 첫 줄(진짜 머리)은 이미 화면 위로 밀려 올라갔다 — 전제다. */
+    first_head_above_view: (function () {
+      var tl = doc.getElementById('tl').getBoundingClientRect();
+      return box('g0h').bottom < tl.top;
+    })(),
+    /* 가로 스크롤이 생기지 않나 (320px 규율) */
+    overflow: doc.documentElement.scrollWidth > win.innerWidth + 1
+  });
+});
+</script></body></html>"""
+
+
 def attach_test_routes(app) -> None:
     """씨앗·측정 페이지를 붙인다. **테스트 안에서만** 존재한다."""
     import json as _json
@@ -292,6 +403,13 @@ def attach_test_routes(app) -> None:
         body = PROBE_LOG_FRAME % {"theme": name, "width": width}
         return Response(body, mimetype="text/html")
 
+    def probeide(name: str, width: int):
+        theme = "" if name == "default" else f' data-chat-theme="{name}"'
+        if width <= 0:
+            return Response(PROBE_IDE_ROWS % {"theme": theme}, mimetype="text/html")
+        body = PROBE_IDE_FRAME % {"theme": name, "width": width}
+        return Response(body, mimetype="text/html")
+
     def probe(name: str):
         attr = "" if name == "default" else f' data-chat-theme="{name}"'
         return Response(PROBE_PAGE % {"attr": attr}, mimetype="text/html")
@@ -300,6 +418,7 @@ def attach_test_routes(app) -> None:
     app.add_url_rule("/__test__/seed/<name>/<layout>", "test_seed2", seed)
     app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
     app.add_url_rule("/__test__/probelog/<name>/<int:width>", "test_probelog", probelog)
+    app.add_url_rule("/__test__/probeide/<name>/<int:width>", "test_probeide", probeide)
 
 
 @pytest.fixture
@@ -561,8 +680,11 @@ def test_각_팔레트의_계산된_색이_정의와_같다(theme, served, tmp_p
     )
 
 
-#: 배치는 두 가지고, 색과 **직교한다** — 조합이 성립하는지도 하나 본다.
-LAYOUT_CASES = [("default", "bubbles"), ("default", "log"), ("tty", "log")]
+#: 배치는 색과 **직교한다** — 조합이 성립하는지도 함께 본다.
+LAYOUT_CASES = [
+    ("default", "bubbles"), ("default", "log"), ("tty", "log"),
+    ("default", "ide"), ("tty", "ide"),
+]
 
 
 @needs_browser
@@ -656,6 +778,112 @@ def test_log_배치가_실제로_격자로_계산된다(width, expect_cols, serv
     assert got["sender3"] == rgb(tokens["--sender-3"])
     assert len({got["sender1"], got["sender2"], got["sender3"]}) == 3
     # 줄은 폭을 다 쓴다 (말풍선처럼 잘리지 않는다).
+    assert got["row_width"] >= width - 24, got
+
+
+@needs_browser
+@pytest.mark.parametrize("theme", THEME_IDS)
+def test_ide_배치가_팔레트_다섯_종에서_모두_예외_없이_뜬다(theme, served, tmp_path):
+    """⭐ 배치와 색은 **직교한다** — 그 조합이 실제로 성립하는지 다섯 번 본다.
+
+    `ide` 는 렌더 로직을 건드린 배치다(연속 발화 묶기·떠 있는 머리). 그래서
+    팔레트마다 앱을 열어 이 프로젝트가 실제로 당한 사고의 기준으로 본다:
+    콘솔 `Uncaught` 0 · `/api/rooms` 호출됨(=배선까지 갔다) · 결함 표시 없음.
+    """
+    dom, console = open_headless(
+        f"{served.url}__test__/seed/{theme}/ide", tmp_path / "profile"
+    )
+    bad = uncaught_lines(console)
+    assert not bad, f"[{theme}/ide] 콘솔 예외:\n  " + "\n  ".join(bad)
+    assert 'id="composer"' in dom, f"[{theme}/ide] 앱으로 넘어가지 않았다"
+    assert "/api/rooms" in served.paths, f"[{theme}/ide] 서버를 부르지 않았다"
+    assert "초기화 실패" not in dom, f"[{theme}/ide] 초기화 단위가 못 섰다"
+    assert "메시지를 그릴 수 없다" not in dom
+
+    import re as re_mod
+
+    root = re_mod.search(r"<html[^>]*>", dom).group(0)
+    assert 'data-chat-layout="ide"' in root, root
+    if theme == "default":
+        assert "data-chat-theme" not in root, root
+    else:
+        assert f'data-chat-theme="{theme}"' in root, root
+    # 떠 있는 머리는 **자리에 있고 숨어 있다** (묶음 중간에서만 뜬다).
+    assert 'id="sticky-head"' in dom, "떠 있는 머리 자리가 없다"
+    # 두 축을 고르는 칸은 어느 조합에서도 살아 있다 (갇히지 않는다).
+    assert 'id="layout-select"' in dom
+    assert '<option value="ide"' in dom
+
+
+@needs_browser
+@pytest.mark.parametrize("width", [900, 320])
+def test_ide_배치의_묶기가_실제로_계산된다(width, served, tmp_path):
+    """⭐ 묶인 줄에서 머리가 **자리를 차지하지 않는지**, 떠 있는 머리가 **흐름을
+    차지하지 않는지**를 브라우저가 계산한 값으로 본다.
+
+    이 둘이 이 배치의 두 위험이다. 머리가 자리를 차지하면 묶어도 세로 밀도가
+    벌리지 않고, 떠 있는 머리가 흐름을 차지하면 가상화가 계산한 세로 좌표와 실제
+    픽셀이 어긋난다 — 머리 잘림을 막으려고 붙인 장치가 스크롤을 망가뜨린다.
+
+    320px 도 같은 규율로 본다. 묶기는 좁은 폭에서 **오히려 이득이 크다**
+    (반복되는 이름이 세로를 덜 먹는다) — 접을 것이 없어 `log` 처럼 2열로 갈 필요도
+    없다. 여기서 보는 것은 가로 스크롤이 생기지 않고 줄이 폭을 다 쓴다는 사실이다.
+    """
+    import html as html_mod
+    import json
+    import re as re_mod
+
+    dom, console = open_headless(
+        f"{served.url}__test__/probeide/tty/{width}", tmp_path / "profile"
+    )
+    assert not uncaught_lines(console), console[-1500:]
+    found = re_mod.search(r'<pre id="out">(.*?)</pre>', dom, re_mod.S)
+    assert found and found.group(1).strip(), dom[-1500:]
+    got = json.loads(html_mod.unescape(found.group(1)))
+    print(f"  [ide · {width}px] {json.dumps(got, ensure_ascii=False)}")
+
+    tokens = palette("tty")
+    assert got["viewport"] == width, f"뷰포트가 {width} 가 아니다 ({got['viewport']})"
+
+    # (1) 묶인 줄의 머리는 **없는 것과 같다** (지운 것이 아니라 숨긴 것이다).
+    assert got["head_display"] != "none", "묶음 첫 줄의 머리가 안 보인다"
+    assert got["grouped_head_display"] == "none", "묶였는데 머리가 자리를 먹는다"
+    assert got["grouped_head_height"] == 0, got["grouped_head_height"]
+    assert got["grouped_same_text_height"] < got["first_height"], (
+        f"묶여도 높이가 같다 (첫 줄 {got['first_height']} / "
+        f"같은 본문의 묶인 줄 {got['grouped_same_text_height']})"
+    )
+
+    # (2) 내것은 **왼쪽 레일 색만** 바뀐다 — 위치도 바닥도 그대로다.
+    assert got["mine_rail"] == rgb(tokens["--mine-ink"]), got["mine_rail"]
+    assert got["other_rail"] == rgb(tokens["--line"]), got["other_rail"]
+    assert got["mine_bg"] == "rgba(0, 0, 0, 0)", got["mine_bg"]
+    assert got["mine_left"] == got["other_left"], "내 줄이 오른쪽으로 옮겨졌다"
+    assert got["mine_author"] == rgb(tokens["--mine-ink"]), got["mine_author"]
+    assert got["sender1"] == rgb(tokens["--sender-1"]), got["sender1"]
+
+    # (3) 떠 있는 머리 — sticky 이고 **흐름을 차지하지 않는다**(높이 0).
+    assert got["sticky_position"] == "sticky", got["sticky_position"]
+    assert got["sticky_height"] == 0, (
+        f"떠 있는 머리가 흐름을 차지한다 ({got['sticky_height']}px)"
+    )
+    assert got["sticky_row_position"] == "absolute", got["sticky_row_position"]
+    assert got["sticky_row_visible"] is True, "떠 있는 머리가 보이지 않는다"
+    # ⭐ 스크롤해서 진짜 머리가 화면 위로 밀려 나간 상태에서도 **창 위에 남는다.**
+    assert got["scrolled"] > 0, "스크롤이 생기지 않아 이 판정이 무의미하다 (전제 실패)"
+    assert got["first_head_above_view"] is True, (
+        "진짜 머리가 아직 화면 안에 있다 — 잘림 상황이 재현되지 않았다 (전제 실패)"
+    )
+    # (`.timeline` 자신의 위쪽 여백만큼은 내려온다 — sticky 는 스크롤포트의
+    #  패딩 박스 위에 붙는다. 요점은 **함께 밀려 올라가지 않는다**는 것이다.)
+    assert 0 <= got["sticky_offset_from_top"] <= 8, (
+        f"떠 있는 머리가 함께 밀려 올라갔다 (창 위에서 {got['sticky_offset_from_top']}px)"
+    )
+    assert got["sticky_inside_view"] is True, "떠 있는 머리가 창 밖으로 나갔다"
+    assert got["sticky_author"] == rgb(tokens["--sender-1"]), got["sticky_author"]
+
+    # (4) 좁은 폭에서도 가로 스크롤이 없고 줄은 폭을 다 쓴다.
+    assert got["overflow"] is False, "가로 스크롤이 생겼다"
     assert got["row_width"] >= width - 24, got
 
 

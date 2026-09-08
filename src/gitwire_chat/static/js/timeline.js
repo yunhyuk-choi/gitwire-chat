@@ -1,7 +1,7 @@
 /*
- * 타임라인 — `#timeline` · `#messages` · `#older-sentinel` · `#jump-latest` 를
- * **소유한다.** 대화 모델(무엇이 있고 어떤 순서인가)도 여기 것이고, 다른 어떤
- * 모듈도 이 노드들을 만지지 않는다.
+ * 타임라인 — `#timeline` · `#messages` · `#older-sentinel` · `#jump-latest` ·
+ * `#sticky-head` 를 **소유한다.** 대화 모델(무엇이 있고 어떤 순서인가)도 여기
+ * 것이고, 다른 어떤 모듈도 이 노드들을 만지지 않는다.
  *
  * ⭐ 그래서 "타임라인을 통째로 다시 그리지 않는다"가 **구조에서 나온다.** 예전에는
  * 모든 화면 조각이 한 스코프에서 같은 상태를 공유해, 그 성질을 전역 규율 +
@@ -18,19 +18,66 @@
  *
  * 가상 스크롤이 안 되면 **느린 대체 렌더로 계속 가지 않는다.** 그건 성능 때문에
  * 붙인 기능이 조용히 빠진 채로 앱이 돌게 만든다 — 대신 이 영역에 결함을 그린다.
+ *
+ * ⭐ **연속 발화 묶기**(배치 `ide`)의 판단도 여기 것이다 — 모델을 소유한 곳이
+ * 여기이기 때문이다. `message-node.js` 는 상태 없는 변환만 하므로 "직전에 누가
+ * 말했나"를 알 수 없다. 여기서 각 메시지에 `head`(머리를 찍나)를 달아 주고, 구조는
+ * 그 값만 읽는다. 그래서 가상화는 손댈 것이 없다: **단위가 그대로 메시지**다.
  */
 
-import { errText } from './dom.js';
-import { buildMessage, paintState } from './message-node.js';
+import { errText, timeLabel } from './dom.js';
+import {
+  buildMessage, paintState, paintHead, senderSlot, grouped, itemGap
+} from './message-node.js';
 
 /* 처음 그릴 때 쓰는 높이 추정치(px). 실측되면 바로 대체된다. */
 var ESTIMATED_HEIGHT = 64;
 /* 읽던 자리를 남기는 칸 (레이아웃 전환은 새로고침이라 저장소를 거쳐야 한다). */
 var ANCHOR_KEY = 'gitwire-chat.anchor';
-/* 메시지 사이 간격(px) — CSS 의 여백을 가상화 계산에 알려 준다. */
-var ITEM_GAP = 6;
 /* 화면 밖에 여유로 더 그리는 개수. 스크롤 시 빈칸이 보이지 않게. */
 var OVERSCAN = 6;
+
+/* ⭐ 연속 발화 묶기의 **시간 컷오프**(ms) — 같은 사람이라도 이보다 벌어지면 머리를
+ * 다시 찍는다.
+ *
+ * 왜 필요한가: 없으면 **어제 마지막 말과 오늘 첫 말이 한 묶음**이 된다. 머리를 한
+ * 번만 찍는다는 것은 "그 시각 하나가 묶음 전체를 대표한다"는 말이고, 대표할 수
+ * 없을 만큼 벌어지면 그 표기가 거짓이 된다.
+ *
+ * 왜 10분인가:
+ *   · 이 앱의 왕복은 실시간 타이핑이 아니다 — 원격 git 을 폴링해서(기본 15초)
+ *     받는다. 한 사람이 이어 말하는 사이도 수십 초에서 수 분으로 벌어진다.
+ *     Slack 이 쓰는 5분을 그대로 가져오면 **한 호흡의 발화가 중간에서 갈린다.**
+ *   · 반대로 30분·1시간으로 늘리면 오전 묶음과 오후 묶음이 붙어, 머리에 찍힌 시각이
+ *     아래 줄들이 실제로 말한 시간과 전혀 달라진다.
+ *   · 10분은 사람이 "이어서 말하는 중"으로 읽는 상한에 가깝고, 세로 밀도를 버는
+ *     이득(반복되는 이름·시각 제거)의 대부분이 그 안에서 나온다.
+ *
+ * ⚠️ 컷오프만으로 **날 경계**가 막히지는 않는다 — 23:59 와 00:01 은 2분 차이다.
+ * 그래서 날이 다르면 간격과 무관하게 새 머리를 찍는다(머리의 시각 표기가 오늘/다른
+ * 날에 따라 달라지므로, 한 묶음에 두 날이 섞이면 그 표기 자체가 거짓이 된다). */
+export var GROUP_GAP_MS = 10 * 60 * 1000;
+
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+}
+
+/* 이 메시지에 머리를 찍나. **직전 메시지 하나만** 본다 — 그래서 O(1) 이고, 모델이
+   바뀔 때 다시 판정해야 하는 범위가 "직전이 바뀐 항목 하나"로 **유계**다. */
+export function headVisible(msg, prev) {
+  if (!msg) { return false; }
+  if (!prev) { return true; }                          /* 대화의 시작 */
+  if (prev.author !== msg.author) { return true; }     /* 다른 사람 */
+  /* 내것/남의것이 갈리면 같은 이름이어도 새 머리다 (표시 이름은 겹칠 수 있다). */
+  if (!!prev.mine !== !!msg.mine) { return true; }
+  var before = new Date(prev.ts).getTime();
+  var now = new Date(msg.ts).getTime();
+  /* 시각을 못 읽으면 묶지 않는다 — 모르는 것을 "가깝다"로 취급하지 않는다. */
+  if (isNaN(before) || isNaN(now)) { return true; }
+  if (now - before < 0 || now - before > GROUP_GAP_MS) { return true; }
+  return !sameDay(new Date(before), new Date(now));
+}
 
 export function createTimeline(env) {
   var dom = env.dom;
@@ -44,8 +91,21 @@ export function createTimeline(env) {
     messages: dom.$('messages'),
     olderSentinel: dom.$('older-sentinel'),
     olderNote: dom.$('older-note'),
-    jumpLatest: dom.$('jump-latest')
+    jumpLatest: dom.$('jump-latest'),
+    /* 묶음 중간에서 창이 시작될 때 **누가 말했는지**를 화면 상단에 띄우는 오버레이.
+       묶는 배치에서만 쓴다 (아래 `groups`). */
+    stickyHead: dom.$('sticky-head'),
+    stickyAuthor: dom.$('sticky-author'),
+    stickyTs: dom.$('sticky-ts')
   };
+
+  /* 이 페이지의 배치가 **묶는 구조인가.** 배치는 이 페이지가 사는 동안 바뀌지
+     않으므로(바꾸면 새로고침) 한 번 조회해 둔다. 구조 분기가 아니라 조회다 —
+     표는 `message-node.js` 가 갖고 있다. */
+  var groups = grouped(env.layout);
+  /* 항목 사이 간격(px). 구조가 아는 값이라 같은 표에서 온다 (CSS 로는 표현할 수
+     없다 — 화면 밖 항목은 DOM 에 없고, 간격은 가상화가 더한다). */
+  var itemGapPx = itemGap(env.layout);
 
   /* ---- 소유 상태. 이 모듈 밖에서 쓰는 곳이 없다. ---------------------- */
   var items = [];              /* 정렬된 메시지 모델 (id 오름차순 = 시간순) */
@@ -59,6 +119,10 @@ export function createTimeline(env) {
   var brokenNode = null;
   var rendering = false;
   var renderAgain = false;
+  /* 머리가 붙거나 떨어진 항목의 id. 높이가 달라졌으니 **그 하나만** 다시 재야
+     한다. 여기 담아 두고 창을 그릴 때 처리한다 — 그 시점에야 `data-index` 가
+     맞다(과거를 불러오면 모든 인덱스가 밀린다). */
+  var remeasure = new Set();
 
   var view = {
     roomId: null,
@@ -74,7 +138,11 @@ export function createTimeline(env) {
   var stats = {
     created: 0, appended: 0, prepended: 0, duplicates: 0,
     recycled: 0, rebuiltInView: 0, measured: 0, cleared: 0,
-    olderRequests: 0, anchored: 0, lastAnchor: 0, innerHTML: 0, restored: 0
+    olderRequests: 0, anchored: 0, lastAnchor: 0, innerHTML: 0, restored: 0,
+    /* 묶기 — 머리 판정이 **뒤집힌** 횟수 · 그래서 노드에 덧입힌 횟수 · 그래서
+       높이를 다시 잰 항목 수. 과거를 불러와 묶음이 이어질 때 셋 다 1 이어야
+       한다 (무효화가 유계라는 증거다). */
+    headChanged: 0, headRepainted: 0, headRemeasured: 0, stickyShown: 0
   };
 
   var hooks = {
@@ -102,11 +170,45 @@ export function createTimeline(env) {
     if (seen.has(msg.id)) { stats.duplicates += 1; return false; }
     seen.add(msg.id);
     known[msg.id] = msg;
-    items.splice(insertionIndex(msg.id), 0, msg);
+    var at = insertionIndex(msg.id);
+    items.splice(at, 0, msg);
+    /* ⭐ 머리는 **이 메시지의 속성**이다 — 직전 메시지를 보고 지금 정한다.
+       (묶음을 항목으로 만들지 않는 이유가 여기서 갚아진다: 새 메시지 하나가
+       도착해도 계산은 그 항목 하나, 남에게 영향이 없다.) */
+    msg.head = headVisible(msg, at > 0 ? items[at - 1] : null);
+    /* **바로 뒤 항목의 '직전'이 바뀌었다.** 그 하나만 다시 판정한다 — 이것이
+       무효화의 전부다(끝에 붙는 평상시에는 뒤가 없어 아무 일도 없다). */
+    refreshHead(at + 1);
     /* 보류 항목의 임시 ID 는 '위로 불러오기' 커서가 될 수 없다 (서버가 모른다). */
     if (!msg.pending && (!view.oldest || msg.id < view.oldest)) {
       view.oldest = msg.id;
     }
+    return true;
+  }
+
+  function removeItemAt(at) {
+    items.splice(at, 1);
+    /* 지운 자리의 **다음 항목**이 새 '직전'을 얻었다 — 그 하나만 다시 판정한다. */
+    refreshHead(at);
+  }
+
+  /* 한 항목의 머리 판정을 다시 하고, 뒤집혔으면 **그 노드 위에 덧입힌다.**
+     노드를 다시 만들지 않는다 (`rebuiltInView` 는 0 을 유지한다).
+
+     높이는 여기서 재지 않는다 — 다음 `paintWindow` 가 창 안 항목을 재면서 그
+     하나만 새 높이로 갱신한다. 여기서 재면 `data-index` 가 아직 낡아 있어
+     (과거를 불러오면 모든 인덱스가 밀린다) **엉뚱한 항목의 크기를 덮어쓴다.** */
+  function refreshHead(index) {
+    var msg = items[index];
+    if (!msg) { return false; }
+    var want = headVisible(msg, index > 0 ? items[index - 1] : null);
+    if (msg.head === want) { return false; }
+    msg.head = want;
+    stats.headChanged += 1;
+    if (paintHead(nodes.get(msg.id), msg)) { stats.headRepainted += 1; }
+    /* 창 밖이어도 담아 둔다 — 그 항목이 다시 창에 들어올 때(노드를 새로 만들 때)
+       라이브러리가 들고 있는 **낡은 크기**를 그때 갈아 준다. */
+    remeasure.add(msg.id);
     return true;
   }
 
@@ -131,7 +233,7 @@ export function createTimeline(env) {
       estimateSize: function () { return ESTIMATED_HEIGHT; },
       getItemKey: function (index) { return items[index] ? items[index].id : index; },
       overscan: OVERSCAN,
-      gap: ITEM_GAP,
+      gap: itemGapPx,
       scrollToFn: engine.elementScroll,
       observeElementRect: engine.observeElementRect,
       observeElementOffset: engine.observeElementOffset,
@@ -218,6 +320,16 @@ export function createTimeline(env) {
          paintState 가 통째로 다시 쓰기 때문이다.) */
       node.setAttribute('data-row', vi.index % 2 === 0 ? 'even' : 'odd');
       if (node.style) { node.style.transform = 'translateY(' + vi.start + 'px)'; }
+      /* ⭐ 머리가 붙거나 떨어진 항목은 **높이가 달라졌다.** 라이브러리의 기본
+         측정은 캐시가 있으면 그 값을 그대로 돌려주므로(갱신은 ResizeObserver 가
+         알려 줄 때만 일어난다) 그 사실이 반영되지 않는다. 전체 캐시를 비우면
+         (`measure()`) 창 안 **모든** 항목을 다시 재게 되어 "그 하나만"이라는
+         성질이 사라진다 — 그래서 이 항목 하나만 갈아 준다. */
+      if (remeasure.has(msg.id)) {
+        remeasure['delete'](msg.id);
+        stats.headRemeasured += 1;
+        v.resizeItem(vi.index, node.offsetHeight);
+      }
       v.measureElement(node);          /* 가변 높이 실측 */
     }
     nodes.forEach(function (node, id) {
@@ -231,6 +343,33 @@ export function createTimeline(env) {
       el.messages.style.height = v.getTotalSize() + 'px';
     }
     lastWindow = keep;
+    paintSticky(visible);
+  }
+
+  /* ⭐ **머리가 잘리는 문제**를 여기서 막는다.
+   *
+   * 묶기의 유일한 결함은 "창이 묶음 **중간**에서 시작하면 그 묶음의 머리가 화면
+   * 밖이라 누가 말했는지 알 수 없다"였다. 그래서 화면 상단에 현재 묶음의 발신자를
+   * 띄운다 (Slack 의 날짜 구분선·iOS 섹션 헤더와 같은 방식).
+   *
+   * ⚠️ 이것은 **오버레이**다 — 높이 0 의 sticky 상자 안에 절대 위치로 얹혀 있어
+   * 흐름을 차지하지 않는다(CSS). 자리를 차지하면 가상화가 계산한 세로 좌표와 실제
+   * 픽셀이 어긋나므로, 그 순간 이 장치가 스크롤을 망가뜨리는 원인이 된다.
+   *
+   * 화면 위 항목이 **자기 머리를 갖고 있으면 띄우지 않는다** — 같은 것이 두 번
+   * 보이는 것이 더 나쁘다. */
+  function paintSticky(visible) {
+    if (!el.stickyHead) { return; }
+    /* 묶지 않는 배치에서는 머리가 언제나 붙어 있다 — 띄울 이유가 없다. */
+    var top = groups ? topVisible(visible) : null;
+    if (!top || top.head !== false) { dom.hide(el.stickyHead); return; }
+    dom.setText(el.stickyAuthor, top.author);
+    dom.setText(el.stickyTs, timeLabel(top.ts));
+    /* 색은 CSS 가 고른다 (여기서는 슬롯 번호와 내것 여부만 넘긴다). */
+    el.stickyHead.setAttribute('data-sender', String(senderSlot(top.author)));
+    el.stickyHead.className = top.mine ? 'sticky-head mine' : 'sticky-head';
+    if (el.stickyHead.hidden) { stats.stickyShown += 1; }
+    dom.show(el.stickyHead);
   }
 
   /* ----------------------------------------- 가상화 실패 = 결함 */
@@ -316,7 +455,11 @@ export function createTimeline(env) {
     items = [];
     nodes.clear();
     lastWindow = new Set();
+    remeasure = new Set();
     brokenNode = null;
+    /* 떠 있던 머리는 **다른 방의 사람 이름**이다 — 남겨 두면 빈 화면에 그 이름이
+       걸려 있다. (다시 그리는 순간 알맞게 뜬다.) */
+    dom.hide(el.stickyHead);
     el.messages.replaceChildren();
     syncVirtual();
   }
@@ -331,20 +474,23 @@ export function createTimeline(env) {
 
   /* ---------------------------- 읽던 자리 (레이아웃 전환 = 새로고침) */
 
+  /* **화면 위에 걸려 있는 메시지.** 읽던 자리(앵커)와 떠 있는 머리(sticky)가 같은
+     질문을 하므로 답하는 곳도 하나다 — 두 곳에서 각자 세면 둘이 어긋난다. */
+  function topVisible(visible) {
+    if (!virtualizer || !items.length) { return null; }
+    var top = el.timeline ? el.timeline.scrollTop : 0;
+    var list = visible || virtualizer.getVirtualItems();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].end > top) { return items[list[i].index] || null; }
+    }
+    return items[items.length - 1] || null;
+  }
+
   /* ⭐ 픽셀이 아니라 **앵커 메시지 id** 로 남긴다. 구조가 바뀌면 높이가 달라져
      `scrollTop` 은 의미를 잃지만, "화면 위에 걸려 있던 그 메시지"는 그대로다. */
   function topVisibleId() {
-    if (!virtualizer || !items.length) { return null; }
-    var top = el.timeline ? el.timeline.scrollTop : 0;
-    var visible = virtualizer.getVirtualItems();
-    for (var i = 0; i < visible.length; i++) {
-      if (visible[i].end > top) {
-        var msg = items[visible[i].index];
-        return msg ? msg.id : null;
-      }
-    }
-    var last = items[items.length - 1];
-    return last ? last.id : null;
+    var msg = topVisible(null);
+    return msg ? msg.id : null;
   }
 
   function keepAnchor() {
@@ -568,7 +714,8 @@ export function createTimeline(env) {
     pendings['delete'](tempId);
     var node = nodes.get(tempId) || null;
     var at = items.indexOf(draft);
-    if (at >= 0) { items.splice(at, 1); }
+    /* 지운 자리의 다음 항목이 새 '직전'을 얻는다 — 그 하나만 다시 판정된다. */
+    if (at >= 0) { removeItemAt(at); }
     seen['delete'](tempId);
     delete known[tempId];
     if (node) { nodes['delete'](tempId); }
@@ -591,6 +738,14 @@ export function createTimeline(env) {
       paintState(dom, node, msg, hooks);
     }
     insertItem(msg);
+    /* ⚠️ 노드는 임시 항목 것을 **그대로 쓴다.** 그 노드의 머리는 임시 항목의
+       자리에서 정해진 것이라, 진짜 레코드의 자리에서 다시 판정한 값과 다를 수
+       있다(임시 항목은 항상 맨 아래였다). 노드를 다시 만들지 않고 그 자리만
+       맞춘다 — 높이는 뒤이은 `syncVirtual` 이 그 항목만 다시 잰다. */
+    if (node && paintHead(node, msg)) {
+      stats.headRepainted += 1;
+      remeasure.add(msg.id);
+    }
     syncVirtual();
   }
 

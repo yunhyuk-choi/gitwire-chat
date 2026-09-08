@@ -50,9 +50,12 @@ export var THEMES = [
 
 export var DEFAULT_THEME = 'default';
 
-/* 고를 수 있는 **레이아웃**. 지금은 하나만 출하한다 — 이음새를 먼저 세우고
-   겉보기는 그대로 두는 단계다. 구조 자체는 `message-node.js` 의 `STRUCTURES` 가
+/* 고를 수 있는 **레이아웃**. 구조 자체는 `message-node.js` 의 `STRUCTURES` 가
    갖고 있고, 여기 있는 이름이 그 열쇠다(둘이 어긋나면 테스트가 잡는다).
+
+   ⭐ `ide` 는 색이 아니라 **묶기**가 내용이다 — 같은 사람이 연달아 말하면 발신자
+   머리를 한 번만 찍는다. 그 판단은 모델을 소유한 `timeline.js` 가 하고(직전
+   메시지와 비교한다), 구조는 그 값만 읽는다. 여기서 아는 것은 이름뿐이다.
 
    ⭐ 레이아웃 전환은 **새로고침으로 간다.** 즉시 전환은 세 위험을 한꺼번에 안는다:
    (1) 가상 스크롤의 높이 측정값이 통째로 낡는다 (구조가 달라지면 높이가 달라진다)
@@ -62,7 +65,8 @@ export var DEFAULT_THEME = 'default';
    **앵커 메시지 id** 로 남겨 복원한다 (`timeline.js` 가 그 일을 소유한다). */
 export var LAYOUTS = [
   { id: 'bubbles', label: '말풍선', note: '지금까지의 모습 — 좌우로 갈린 말풍선.' },
-  { id: 'log', label: 'log', note: '줄 기반 — 시각·발신자·본문 3열. 내 말은 왼쪽 레일.' }
+  { id: 'log', label: 'log', note: '줄 기반 — 시각·발신자·본문 3열. 내 말은 왼쪽 레일.' },
+  { id: 'ide', label: 'ide', note: '연속 발화 묶기 — 같은 사람이 이어 말하면 이름을 한 번만.' }
 ];
 
 export var DEFAULT_LAYOUT = 'bubbles';
