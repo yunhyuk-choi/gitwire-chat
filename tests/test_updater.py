@@ -480,6 +480,68 @@ def test_바뀐_것에_자원_도장이_들어간다(no_network, tmp_path):
     assert any("자원 도장" in line for line in report.lines)
 
 
+# ======================================================= 앱 안에서 알리기
+
+
+@pytest.fixture
+def client(tmp_path):
+    from gitwire_chat.app import create_app
+    from gitwire_chat.config import Settings
+
+    app = create_app(
+        Settings(home=tmp_path / "chats", notifications=False), start=False
+    )
+    return app.test_client()
+
+
+def test_확인은_상태를_바꾸지_않고_결과만_준다(client, monkeypatch, bare_repo):
+    """⭐ 앱 안에서는 **묻기만** 한다 — 여기서 갱신을 실행하지 않는다.
+
+    인증 없는 루프백 앱에 "앱을 죽이고 갈아치우는" 엔드포인트를 두지 않는다는
+    결정의 기계 검사다. 라우트 목록에 그런 것이 없어야 한다.
+    """
+    commit_in(bare_repo)
+    monkeypatch.setattr(
+        updater, "_direct_url", lambda: direct_url(url=str(bare_repo))
+    )
+    data = client.post("/api/update/check").get_json()
+    assert data["behind"] is True
+    assert data["installed"] == "a" * 40
+    assert len(data["remote"]) == 40
+    assert data["command"] == "python -m gitwire_chat update"
+
+
+def test_최신이면_behind_가_거짓이다(client, monkeypatch, bare_repo):
+    head = commit_in(bare_repo)
+    monkeypatch.setattr(
+        updater,
+        "_direct_url",
+        lambda: direct_url(url=str(bare_repo), vcs_info={"vcs": "git", "commit_id": head}),
+    )
+    data = client.post("/api/update/check").get_json()
+    assert data["behind"] is False
+
+
+def test_확인이_실패하면_사유와_힌트를_함께_준다(client, monkeypatch):
+    """조용히 200 을 주지 않는다 — 화면이 그 힌트를 그대로 보여준다."""
+    monkeypatch.setattr(updater, "_direct_url", lambda: None)
+    response = client.post("/api/update/check")
+    assert response.status_code == 400
+    body = response.get_json()
+    assert body["error"] and "pip install" in body["hint"]
+
+
+def test_앱을_갱신하는_엔드포인트는_없다(client):
+    """⭐ 루프백·인증 없음 설계에서 원격 실행 표면을 만들지 않는다.
+
+    브라우저로 아무 페이지나 열어 둔 상태에서 그 페이지가 폼 전송 하나로 우리
+    앱을 재설치·재기동시킬 수 있게 되면, 막을 방법이 없다(인증이 없다).
+    """
+    rules = sorted(str(rule) for rule in client.application.url_map.iter_rules())
+    update_rules = [r for r in rules if "update" in r]
+    assert update_rules == ["/api/update/check"], update_rules
+
+
 # ================================================== ⭐ 진짜 프로세스 왕복
 
 

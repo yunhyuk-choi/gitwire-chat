@@ -571,6 +571,10 @@ def _find_unmanaged(known: set[int], ports: list[int]) -> list[int]:
             continue
         seen = runstate.probe(port)
         if seen is None:
+            # ⚠️ 갱신 기능이 없던 버전은 /api/version 에 404 를 준다. 그것을
+            # "없다"로 보면 **처음 한 번**이 조용히 깨진다 (섞인 상태).
+            if runstate.probe_legacy(port):
+                out.append(port)
             continue
         prefix = str(seen.get("prefix") or "")
         if prefix and Path(prefix) != Path(sys.prefix):

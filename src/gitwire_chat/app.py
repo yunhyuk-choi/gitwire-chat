@@ -7,7 +7,7 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     GET  /                                 셸 HTML (1회, **캐시 안 함**)
     GET  /assets/<도장>/<파일>             ⭐ 도장 박힌 정적 자원 (영구 캐시)
     GET  /api/version                      설치본 버전 · 자원 도장 · 이 프로세스
-    POST /api/update/check                 새 버전이 있나 (사용자가 누를 때만)
+    POST /api/update/check                 새 버전이 있나 (⭐ 사용자가 누를 때만)
     GET  /api/rooms                        방 목록 (+ 연결 상태)
     POST /api/rooms                        방 등록 → **즉시 반환**, 클론은 백그라운드
     POST /api/rooms/<id>/retry             실패한 방 다시 연결
@@ -159,6 +159,23 @@ def create_app(
                 "prefix": sys.prefix,
             }
         )
+
+    @app.post("/api/update/check")
+    def update_check():
+        """새 버전이 있나 — ⭐ **사용자가 누를 때만** 원격을 본다.
+
+        주기 폴링을 두지 않는 근거와, 여기서 갱신을 *실행하지 않는* 근거는
+        `static/js/update.js` 의 도크에 적어 뒀다 (요지: 인증 없는 루프백 앱에
+        "앱을 죽이고 갈아치우는" 엔드포인트를 두지 않는다 · CLI 가 정본이다).
+
+        이 호출이 하는 일은 ``git ls-remote`` 한 번이다. 상태를 바꾸지 않는다.
+        """
+        from . import updater
+
+        try:
+            return jsonify(updater.check().to_json())
+        except updater.UpdateError as exc:
+            return jsonify({"error": str(exc), "hint": exc.hint}), 400
 
     @app.get("/api/settings")
     def get_settings():

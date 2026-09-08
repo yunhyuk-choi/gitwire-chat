@@ -1928,6 +1928,97 @@ await test('테마가 죽어도 저장된 값은 첫 페인트 조각이 살려 
   assert.ok(indexHtml.includes("'" + THEME_ATTR + "'"), 'index.html 의 루트 속성이 다르다');
 });
 
+/* ---------------------------------------------------------- 갱신 알림 */
+
+/* 확인 응답 대역. `behind` 로 "새 것이 있다/없다"를 만든다. */
+function checkRoute(payload) {
+  return { '/api/update/check': payload };
+}
+
+await test('⭐ 켤 때 원격을 보지 않는다 (몰래 나가는 네트워크를 만들지 않는다)', async () => {
+  const { fetchStub, doc } = await boot();
+  const went = fetchStub.calls.filter((c) => c.path.indexOf('/api/update') === 0);
+  assert.equal(went.length, 0, '누르지 않았는데 원격을 봤다: ' + JSON.stringify(went));
+  /* 띠는 있고, 안내·명령은 아직 아무것도 안 쓰여 있다. */
+  assert.ok(doc.getElementById('check-update'));
+  assert.equal(doc.getElementById('update-note').textContent, '');
+  assert.equal(doc.getElementById('update-cmd').textContent, '');
+  /* 처음 상태는 템플릿이 정한다 (stub 은 HTML 을 파싱하지 않으므로 원문을 본다). */
+  assert.ok(/id="update-note"[^>]*hidden/.test(indexHtml), '안내가 처음부터 보인다');
+  assert.ok(/id="update-cmd"[^>]*hidden/.test(indexHtml), '명령이 처음부터 보인다');
+  assert.ok(/id="copy-update-cmd"[^>]*hidden/.test(indexHtml));
+});
+
+await test('누르면 확인하고, 새 것이 있으면 칠 명령을 보여준다', async () => {
+  const { doc, chat, fetchStub } = await boot({
+    routes: checkRoute({
+      behind: true, installed: 'a'.repeat(40), remote: 'b'.repeat(40),
+      command: 'python -m gitwire_chat update'
+    })
+  });
+  await chat.checkUpdate();
+  const went = fetchStub.calls.filter((c) => c.path === '/api/update/check');
+  assert.equal(went.length, 1);
+  assert.equal(went[0].init.method, 'POST');
+  const note = doc.getElementById('update-note');
+  const cmd = doc.getElementById('update-cmd');
+  assert.equal(note.hidden, false);
+  assert.ok(note.textContent.indexOf('새 버전이 있다') >= 0, note.textContent);
+  assert.equal(cmd.hidden, false);
+  assert.equal(cmd.textContent, 'python -m gitwire_chat update');
+  assert.equal(doc.getElementById('copy-update-cmd').hidden, false);
+});
+
+await test('최신이면 명령을 보여주지 않는다 (칠 것이 없다)', async () => {
+  const { doc, chat } = await boot({
+    routes: checkRoute({ behind: false, installed: 'a'.repeat(40), remote: 'a'.repeat(40) })
+  });
+  await chat.checkUpdate();
+  assert.ok(doc.getElementById('update-note').textContent.indexOf('최신이다') >= 0);
+  assert.equal(doc.getElementById('update-cmd').hidden, true);
+});
+
+await test('⭐ 확인이 실패하면 사유와 힌트가 화면에 드러난다', async () => {
+  const { doc, chat } = await boot({
+    routes: checkRoute({
+      __http: 400, error: 'git 설치본이 아니다', hint: 'pip install … 로 한 번 설치한다'
+    })
+  });
+  await chat.checkUpdate();
+  const note = doc.getElementById('update-note');
+  assert.equal(note.hidden, false);
+  assert.ok(note.className.indexOf('bad') >= 0, note.className);
+  assert.ok(note.textContent.indexOf('git 설치본이 아니다') >= 0, note.textContent);
+  assert.ok(note.textContent.indexOf('pip install') >= 0, '서버 힌트를 버렸다');
+});
+
+await test('복사할 수 없는 브라우저면 직접 복사하라고 말한다', async () => {
+  const { doc, chat, context } = await boot({
+    routes: checkRoute({
+      behind: true, installed: 'a'.repeat(40), remote: 'b'.repeat(40),
+      command: 'python -m gitwire_chat update'
+    })
+  });
+  await chat.checkUpdate();
+  context.win.navigator = {};                    /* clipboard 없음 */
+  await chat.copyUpdateCommand();
+  const note = doc.getElementById('update-note');
+  assert.ok(note.textContent.indexOf('직접 골라 복사') >= 0, note.textContent);
+  /* 명령은 그대로 남아 있어야 한다 (직접 복사할 대상이니까). */
+  assert.equal(doc.getElementById('update-cmd').hidden, false);
+});
+
+await test('갱신 알림이 못 서도 나머지 화면은 산다 (배선 실패로 실증)', async () => {
+  const { doc, chat } = await boot({
+    sabotage: (doc) => breakWiring(doc, 'check-update', '확인 버튼 배선 실패')
+  });
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  assert.ok(doc.getElementById('rooms').children.length > 0);
+  const units = chat.failures().map((f) => f.unit);
+  assert.deepEqual(units, ['갱신 알림']);
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+});
+
 /* -------------------------------------------------------------- 보고 */
 
 let failed = 0;

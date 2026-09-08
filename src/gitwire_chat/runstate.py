@@ -263,6 +263,27 @@ def probe(port: int, *, timeout: float = PROBE_TIMEOUT) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def probe_legacy(port: int, *, timeout: float = PROBE_TIMEOUT) -> bool:
+    """``/api/version`` 이 없던 **옛 버전**이 이 포트에 떠 있나.
+
+    ⚠️ 이게 없으면 큰 구멍이 하나 남는다. 갱신 기능이 없던 버전으로 떠 있는
+    인스턴스는 ``/api/version`` 에 404 를 주므로 `probe` 에게 "아무것도 없다"로
+    보인다 — 그러면 갱신이 그 앱을 못 본 채 패키지를 갈아치우고, 살아 있는 앱이
+    옛 파이썬 코드로 새 정적 파일을 서빙하는 섞인 상태가 된다. 즉 **처음 한 번,
+    바로 그 한 번**이 조용히 깨진다.
+
+    그래서 옛 버전에도 있던 경로(``/api/settings``)로 한 번 더 물어본다.
+    """
+    url = f"http://{HOST}:{int(port)}/api/settings"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return False
+    # 이 앱의 설정 응답인가 (다른 프로그램이 그 포트를 쓰는 경우를 가른다).
+    return isinstance(data, dict) and "recent_limit" in data
+
+
 def alive(instance: Instance, *, timeout: float = PROBE_TIMEOUT) -> bool:
     """대장에 적힌 **그 프로세스**가 그 포트에서 답하나.
 

@@ -123,6 +123,19 @@
 
     <ul class="rooms" id="rooms"></ul>
     <p class="empty" id="rooms-empty">등록된 방이 없다. ＋ 로 레포 주소를 넣어라.</p>
+
+    <!-- 갱신 알림 (static/js/update.js). ⭐ 여기서 앱을 갱신하지 **않는다** —
+         새 것이 있나 물어보고 칠 명령을 보여줄 뿐이다. 정본은 CLI
+         (`python -m gitwire_chat update`) 이고, 앱이 아예 안 뜨는 상태에서도
+         복구가 되어야 하므로 그 경로가 버튼일 수 없다.
+         그리고 확인은 **누를 때만** 나간다 — 주기적으로 원격을 보지 않는다
+         (그 근거는 update.js 도크). -->
+    <div class="update-bar" id="update-bar">
+      <button type="button" class="link" id="check-update">업데이트 확인</button>
+      <p class="update-note" id="update-note" hidden></p>
+      <code class="update-cmd" id="update-cmd" hidden></code>
+      <button type="button" class="link" id="copy-update-cmd" hidden>명령 복사</button>
+    </div>
   </aside>
 
   <main class="chat" id="chat">
