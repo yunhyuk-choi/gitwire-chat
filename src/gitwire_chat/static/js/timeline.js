@@ -25,6 +25,8 @@ import { buildMessage, paintState } from './message-node.js';
 
 /* 처음 그릴 때 쓰는 높이 추정치(px). 실측되면 바로 대체된다. */
 var ESTIMATED_HEIGHT = 64;
+/* 읽던 자리를 남기는 칸 (레이아웃 전환은 새로고침이라 저장소를 거쳐야 한다). */
+var ANCHOR_KEY = 'gitwire-chat.anchor';
 /* 메시지 사이 간격(px) — CSS 의 여백을 가상화 계산에 알려 준다. */
 var ITEM_GAP = 6;
 /* 화면 밖에 여유로 더 그리는 개수. 스크롤 시 빈칸이 보이지 않게. */
@@ -72,7 +74,7 @@ export function createTimeline(env) {
   var stats = {
     created: 0, appended: 0, prepended: 0, duplicates: 0,
     recycled: 0, rebuiltInView: 0, measured: 0, cleared: 0,
-    olderRequests: 0, anchored: 0, lastAnchor: 0, innerHTML: 0
+    olderRequests: 0, anchored: 0, lastAnchor: 0, innerHTML: 0, restored: 0
   };
 
   var hooks = {
@@ -114,7 +116,9 @@ export function createTimeline(env) {
       /* 창 안에 있던 것을 다시 만들었다 = 리렌더 사고. 세어 두면 테스트가 잡는다. */
       stats.rebuiltInView += 1;
     }
-    return buildMessage(dom, msg, hooks);
+    /* 레이아웃 이름은 조립소가 한 번 정해 준다 — 이 페이지가 사는 동안 안 바뀐다
+       (바꾸면 새로고침이라, 전환 중에 구조가 섞이는 상태 자체가 없다). */
+    return buildMessage(dom, msg, hooks, env.layout);
   }
 
   /* ------------------------------------------------- 가상 스크롤 */
@@ -319,6 +323,66 @@ export function createTimeline(env) {
     return gap < 80;
   }
 
+  /* ---------------------------- 읽던 자리 (레이아웃 전환 = 새로고침) */
+
+  /* ⭐ 픽셀이 아니라 **앵커 메시지 id** 로 남긴다. 구조가 바뀌면 높이가 달라져
+     `scrollTop` 은 의미를 잃지만, "화면 위에 걸려 있던 그 메시지"는 그대로다. */
+  function topVisibleId() {
+    if (!virtualizer || !items.length) { return null; }
+    var top = el.timeline ? el.timeline.scrollTop : 0;
+    var visible = virtualizer.getVirtualItems();
+    for (var i = 0; i < visible.length; i++) {
+      if (visible[i].end > top) {
+        var msg = items[visible[i].index];
+        return msg ? msg.id : null;
+      }
+    }
+    var last = items[items.length - 1];
+    return last ? last.id : null;
+  }
+
+  function keepAnchor() {
+    var id = topVisibleId();
+    try {
+      if (id) {
+        env.localStorage.setItem(ANCHOR_KEY,
+          JSON.stringify({ room: view.roomId, id: id }));
+      } else if (env.localStorage.removeItem) {
+        env.localStorage.removeItem(ANCHOR_KEY);
+      }
+    } catch (err) { /* 저장을 못 하면 맨 아래로 뜬다 — 잃는 것은 자리 하나다 */ }
+    return id;
+  }
+
+  /* **한 번만** 쓴다. 읽는 즉시 지운다 — 남겨 두면 그 뒤 모든 새로고침이 그
+     자리로 되돌아가, 사용자가 "맨 아래로 안 간다"고 느낀다. */
+  function takeAnchor(roomId) {
+    var raw = null;
+    try {
+      raw = env.localStorage.getItem(ANCHOR_KEY);
+      if (env.localStorage.removeItem) { env.localStorage.removeItem(ANCHOR_KEY); }
+    } catch (err) { return null; }
+    if (!raw) { return null; }
+    var saved = null;
+    try { saved = JSON.parse(raw); } catch (err) { return null; }
+    if (!saved || saved.room !== roomId || !saved.id) { return null; }
+    return saved.id;
+  }
+
+  function scrollToId(id) {
+    if (!virtualizer) { return false; }
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].id !== id) { continue; }
+      virtualizer.scrollToIndex(i, { align: 'start' });
+      renderWindow();
+      view.atBottom = nearBottom();
+      if (view.atBottom) { dom.hide(el.jumpLatest); }
+      stats.restored += 1;
+      return true;
+    }
+    return false;
+  }
+
   function scrollToBottom() {
     if (!el.timeline) { return; }
     /* 가상화에서는 마지막 항목으로 보내는 것이 정확하다 — DOM 높이가 아니라
@@ -424,7 +488,10 @@ export function createTimeline(env) {
            일으키는데, 그때 관찰자가 없으면 폴백 경로가 대신 발동해 의도치 않은
            시점에 과거를 불러온다(대화가 짧으면 곧바로 위 끝이기 때문이다). */
         watchOlder();
-        scrollToBottom();
+        /* 레이아웃을 바꿔 새로고침한 직후라면 읽던 자리로 돌아간다.
+           그 메시지가 이 쪽에 없으면(오래된 자리) 조용히 맨 아래로 간다. */
+        var anchor = takeAnchor(roomId);
+        if (!anchor || !scrollToId(anchor)) { scrollToBottom(); }
         status.set('');
       })['catch'](function (err) {
         if (view.roomId !== roomId) { return; }
@@ -568,6 +635,8 @@ export function createTimeline(env) {
          (내 다른 탭에서 보낸 말도 이 경로로 들어오고, 그건 내 것이다.) */
       if (append(msg)) { onNewRendered(!!msg.mine); }
     });
+    /* 레이아웃 전환 직전에 조르는 신호 (theme.js). 자리를 아는 것은 우리다. */
+    bus.on('anchor:keep', function () { return keepAnchor(); });
     bus.on('draft:add', function (e) { addPending(e.draft); });
     bus.on('draft:settle', function (e) { settlePending(e.tempId, e.message); });
     bus.on('draft:fail', function (e) { failPending(e.tempId, e.error); });
@@ -597,6 +666,7 @@ export function createTimeline(env) {
     prepend: prepend,
     clear: clear,
     load: load,
+    keepAnchor: keepAnchor,
     loadOlder: loadOlder,
     watchOlder: watchOlder
   };

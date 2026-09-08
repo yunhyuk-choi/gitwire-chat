@@ -48,6 +48,14 @@ const { createApp } = await import(
   url.pathToFileURL(path.join(STATIC, 'js', 'boot.js')).href
 );
 
+/* 레이아웃 이음새를 **직접** 들여다보는 두 모듈 (표와 목록이 짝인지 본다). */
+const nodeMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'message-node.js')).href
+);
+const themeMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'theme.js')).href
+);
+
 const results = [];
 function test(name, fn) {
   return Promise.resolve()
@@ -128,7 +136,10 @@ function stubWindow() {
       for (const t of due) { t.cleared = true; t.fn(); }
       return due.length;
     },
-    pendingTimers() { return this.timers.filter((t) => !t.cleared).map((t) => t.ms); }
+    pendingTimers() { return this.timers.filter((t) => !t.cleared).map((t) => t.ms); },
+    /* 레이아웃 전환은 **새로고침**으로 간다 — 진짜로 다시 불러올 수는 없으니 센다. */
+    reloads: 0,
+    location: null
   };
 }
 
@@ -187,7 +198,8 @@ function boot(options) {
     localStorage: {
       _v: Object.assign({}, opts.stored || {}),
       getItem(k) { return this._v[k] || null; },
-      setItem(k, v) { this._v[k] = v; }
+      setItem(k, v) { this._v[k] = v; },
+      removeItem(k) { delete this._v[k]; }
     },
     console: {
       log: console.log.bind(console),
@@ -197,6 +209,9 @@ function boot(options) {
     /* 기본은 **진짜** 엔진. 실패 경로를 보는 테스트만 여기에 다른 것을 넣는다. */
     virtual: ('virtual' in opts) ? opts.virtual : virtual
   };
+
+  /* location 은 win 을 가리켜야 하므로 리터럴 밖에서 묶는다. */
+  runtime.win.location = { reload() { runtime.win.reloads += 1; } };
 
   const chat = createApp(runtime);
   /* ⭐ 초기화 단위 하나를 **실제로 터뜨린다.** 격리는 "그렇게 짰다"가 아니라
@@ -1428,6 +1443,168 @@ await test('보내기 버튼(폼 제출)은 확정된 완전한 본문을 보낸
   assert.equal(text.value, '');
 });
 
+/* ------------------------------------------------------- 레이아웃 테마 */
+
+/*
+ * ⭐ 단계 A — **이음새만** 냈다. 구조는 지금 것(말풍선) 하나만 출하한다.
+ *
+ * 여기서 지키는 것:
+ *   · 구조 분기는 `message-node.js` 의 표 **한 곳**뿐이고, 모르는 이름은 기본으로
+ *     떨어진다 (저장값이 옛 이름일 수 있다).
+ *   · 전환은 **새로고침**으로 간다 — 그래서 "전환 중 노드 재생성"이라는 상태가
+ *     존재하지 않는다. 대신 읽던 자리를 **앵커 메시지 id** 로 복원한다.
+ *   · 테마가 못 서면 **기본으로 떨어지고 화면에 말한다.** 고르는 칸은 대화 영역
+ *     밖(사이드바)에 있어 망가진 테마에 갇히지 않는다.
+ */
+
+const LAYOUT_KEY = 'gitwire-chat.layout';
+const ANCHOR_KEY = 'gitwire-chat.anchor';
+const THEME_ATTR_FOR_FALLBACK = 'data-chat-theme';
+
+function themeAttr(doc) {
+  return doc.documentElement.getAttribute(THEME_ATTR_FOR_FALLBACK);
+}
+
+function layoutAttr(doc) {
+  return doc.documentElement.getAttribute('data-chat-layout');
+}
+
+await test('구조 분기는 한 곳이고, 모르는 레이아웃 이름은 기본으로 떨어진다', () => {
+  const names = Object.keys(nodeMod.STRUCTURES);
+  assert.deepEqual(names, ['bubbles'], '출하하는 구조가 하나가 아니다: ' + names);
+  /* 이름 → 구조 표와 고를 수 있는 목록이 **짝**이어야 한다. 어긋나면 "고를 수는
+     있는데 구조가 없는" 이름이 생긴다. */
+  assert.deepEqual(themeMod.LAYOUTS.map((l) => l.id).sort(), names.sort());
+  assert.equal(themeMod.normalizeLayout('없는배치'), 'bubbles');
+  assert.equal(themeMod.normalizeLayout(null), 'bubbles');
+
+  /* 실제로 만들어 본다 — 모르는 이름을 줘도 말풍선이 나온다(빈 화면이 아니다). */
+  const doc = new StubDocument();
+  const dom = { doc: doc, make: (t, c, x) => {
+    const n = doc.createElement(t); if (c) { n.className = c; }
+    if (x !== undefined) { n.textContent = x; } return n;
+  }, setText: (n, t) => { n.textContent = t; }, hide: (n) => { n.hidden = true; },
+    show: (n) => { n.hidden = false; } };
+  const one = msg(1, '어떤 구조로든 그려진다');
+  const built = nodeMod.buildMessage(dom, one, { lookup: () => null }, '없는배치');
+  assert.equal(String(built.className), 'msg');
+  assert.ok(built.textContent.includes('어떤 구조로든 그려진다'));
+});
+
+await test('⭐ 앵커: 읽던 자리를 메시지 id 로 남기고, 새로고침 뒤 그 자리로 돌아온다', async () => {
+  const many = manyMessages(200);
+  const first = await boot({ messages: many, viewport: 300 });
+  await settle();
+  const timeline = first.doc.getElementById('timeline');
+  timeline.scrollTop = 4000;
+  timeline.dispatch('scroll');
+  await settle();
+
+  /* 지금 화면 위에 걸린 메시지 = 읽던 자리. */
+  const anchorId = first.chat.keepAnchor();
+  assert.ok(anchorId, '앵커를 못 잡았다');
+  const saved = JSON.parse(first.context.localStorage.getItem(ANCHOR_KEY));
+  assert.deepEqual(saved, { room: 'r1', id: anchorId });
+  /* ⚠️ 픽셀이 아니다 — 구조가 바뀌면 높이가 달라져 픽셀은 의미가 없다. */
+  assert.equal(JSON.stringify(saved).indexOf('scrollTop'), -1);
+
+  /* 새로고침 = 저장소만 들고 처음부터 다시 부팅한다. */
+  const stored = {};
+  stored[ANCHOR_KEY] = JSON.stringify(saved);
+  const again = await boot({ messages: many, viewport: 300, stored: stored });
+  await settle();
+
+  const shown = again.doc.getElementById('messages').children.map((n) => n.dataset.id);
+  assert.ok(shown.indexOf(anchorId) >= 0, '읽던 메시지가 화면에 없다');
+  assert.equal(again.chat.stats.restored, 1, '복원 경로를 타지 않았다');
+  assert.equal(again.chat.state.atBottom, false, '맨 아래로 가 버렸다');
+  assert.equal(again.chat.stats.rebuiltInView, 0);
+  /* ⭐ 앵커는 **한 번만** 쓴다 — 안 지우면 그 뒤 모든 새로고침이 그 자리로 간다. */
+  assert.equal(again.context.localStorage.getItem(ANCHOR_KEY), null, '앵커가 남았다');
+
+  /* 가장 강한 증거: 다시 물어본 "화면 위에 걸린 메시지"가 **같은 메시지**다. */
+  const nowTop = again.chat.keepAnchor();
+  console.log('      앵커 복원: 남긴 것 …' + anchorId.slice(-20) +
+    ' / 복원 후 화면 위 …' + String(nowTop).slice(-20) +
+    ' (scrollTop ' + again.doc.getElementById('timeline').scrollTop + ')');
+  assert.equal(nowTop, anchorId, '읽던 자리가 아니다');
+});
+
+await test('앵커가 없거나 다른 방 것이면 조용히 맨 아래로 뜬다', async () => {
+  const many = manyMessages(50);
+  /* (1) 앵커 없음 — 지금까지의 동작 그대로. */
+  const plain = await boot({ messages: many, viewport: 300 });
+  await settle();
+  assert.equal(plain.chat.state.atBottom, true);
+  assert.equal(plain.chat.stats.restored, 0);
+
+  /* (2) 다른 방에서 남긴 앵커 — 이 방에 적용하면 엉뚱한 자리로 간다. */
+  const stored = {};
+  stored[ANCHOR_KEY] = JSON.stringify({ room: 'r2', id: many[10].id });
+  const other = await boot({ messages: many, viewport: 300, stored: stored });
+  await settle();
+  assert.equal(other.chat.stats.restored, 0, '다른 방의 앵커로 스크롤했다');
+  assert.equal(other.chat.state.atBottom, true);
+
+  /* (3) 이 방 것이지만 지금 안 불러온 메시지 — 조용히 맨 아래로. */
+  const gone = {};
+  gone[ANCHOR_KEY] = JSON.stringify({ room: 'r1', id: 'records/없는/메시지.json' });
+  const missing = await boot({ messages: many, viewport: 300, stored: gone });
+  await settle();
+  assert.equal(missing.chat.stats.restored, 0);
+  assert.equal(missing.chat.state.atBottom, true);
+});
+
+await test('같은 배치를 다시 골라도 새로고침하지 않는다', async () => {
+  const { chat, context } = await boot();
+  assert.equal(chat.layout(), 'bubbles');
+  assert.equal(chat.setLayout('bubbles'), false, '같은 값인데 전환했다');
+  assert.equal(context.win.reloads, 0, '쓸데없이 새로고침했다');
+  /* 없는 이름은 기본으로 정규화되므로 이 경우도 전환이 아니다. */
+  assert.equal(chat.setLayout('없는배치'), false);
+  assert.equal(context.win.reloads, 0);
+  assert.equal(context.localStorage.getItem(LAYOUT_KEY), 'bubbles');
+});
+
+await test('⭐ 폴백: 저장된 배치 이름이 없는 것이면 기본으로 떨어진다', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'log-옛이름';
+  const { doc, chat } = await boot({ stored: stored });
+  assert.equal(chat.layout(), 'bubbles');
+  assert.equal(layoutAttr(doc), null, '없는 배치 표식이 루트에 남았다');
+  /* 첫 페인트 조각이 찍어 둔 표식도 여기서 걷힌다 (아래 계약 테스트가 짝을 본다). */
+  assert.equal(doc.getElementById('layout-select').value, 'bubbles');
+});
+
+await test('⭐ 폴백: 테마가 못 서면 기본으로 떨어지고 **화면에 말한다**', async () => {
+  /* ⚠️ 이게 이번 단계의 가장 위험한 함정이다 — 망가진 테마가 화면을 먹으면
+     고르는 UI 도 같이 먹혀 되돌릴 방법이 없다(저장값이 남아 새로고침해도 같다).
+     그래서 실패하면 루트 표식을 걷어내 **지금까지의 모습**으로 떨어뜨린다. */
+  const stored = {};
+  stored['gitwire-chat.theme'] = 'tty';
+  stored[LAYOUT_KEY] = 'bubbles';
+  const { doc, chat, consoleErrors } = await boot({
+    stored: stored,
+    sabotage: (doc2) => breakWiring(doc2, 'toggle-theme', '테마 배선 실패')
+  });
+
+  assert.equal(themeAttr(doc), null, '실패했는데 색 표식이 남았다');
+  assert.equal(layoutAttr(doc), null, '실패했는데 배치 표식이 남았다');
+  assert.equal(chat.layout(), 'bubbles', '구조가 기본으로 떨어지지 않았다');
+
+  /* 조용히 떨어지지 않는다 — 상태줄·콘솔·failures 세 곳에 남는다. */
+  assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+  assert.ok(doc.getElementById('status').textContent.indexOf('테마') >= 0);
+  assert.ok(consoleErrors.join(' ').indexOf('테마') >= 0);
+  assert.equal(chat.failures()[0].unit, '테마');
+
+  /* 그리고 대화는 멀쩡하다 (테마 실패가 화면을 먹지 않는다). */
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  /* 고르는 칸은 **대화 영역 밖**(사이드바)에 그대로 있다 — 갇히지 않는다. */
+  assert.ok(doc.getElementById('theme-select'), '색 고르는 칸이 사라졌다');
+  assert.ok(doc.getElementById('layout-select'), '배치 고르는 칸이 사라졌다');
+});
+
 /* ------------------------------------------------------------ 색 테마 */
 
 /*
@@ -1439,10 +1616,6 @@ await test('보내기 버튼(폼 제출)은 확정된 완전한 본문을 보낸
 
 const THEME_KEY = 'gitwire-chat.theme';
 const THEME_ATTR = 'data-chat-theme';
-
-function themeAttr(doc) {
-  return doc.documentElement.getAttribute(THEME_ATTR);
-}
 
 await test('첫 방문 기본값은 `기본` — 루트에 아무 속성도 찍지 않는다', async () => {
   const { doc, chat } = await boot();
@@ -1576,9 +1749,9 @@ await test('⭐ 테마 모듈이 못 서도 나머지 화면은 산다 (배선 �
   /* 색은 기본으로 간다 (속성이 안 찍힌다) — 조용히는 아니고 드러난다. */
   assert.equal(themeAttr(doc), null);
   assert.equal(chat.failures().length, 1);
-  assert.equal(chat.failures()[0].unit, '색 테마');
+  assert.equal(chat.failures()[0].unit, '테마');
   assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
-  assert.ok(consoleErrors.join(' ').indexOf('색 테마') >= 0);
+  assert.ok(consoleErrors.join(' ').indexOf('테마') >= 0);
 });
 
 await test('테마가 죽어도 저장된 값은 첫 페인트 조각이 살려 둔다 (계약 일치)', () => {

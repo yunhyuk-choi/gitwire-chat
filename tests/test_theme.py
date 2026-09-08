@@ -298,9 +298,11 @@ def theme_ids_from_js() -> list[str]:
 def test_테마_목록이_CSS_템플릿_모듈_세_곳에서_같다():
     """어긋나면 **고를 수는 있는데 색이 안 바뀌는** 항목이 생긴다."""
     js_ids = theme_ids_from_js()
-    html_ids = re.findall(
-        r'<option value="([a-z]+)"', INDEX.read_text(encoding="utf-8")
-    )
+    # ⚠️ 템플릿에는 배치 고르는 칸도 있다 — **색 칸 안**만 본다 (안 좁히면 두
+    # 축의 option 이 섞여 이 테스트가 무엇도 확인하지 않게 된다).
+    html = INDEX.read_text(encoding="utf-8")
+    bar = html.split('id="theme-select"', 1)[1].split("</select>", 1)[0]
+    html_ids = re.findall(r'<option value="([a-z]+)"', bar)
     css_ids = re.findall(r'data-chat-theme="([a-z]+)"\]', css_text())
 
     assert js_ids == html_ids, f"모듈 {js_ids} ≠ 템플릿 {html_ids}"
@@ -311,6 +313,30 @@ def test_테마_목록이_CSS_템플릿_모듈_세_곳에서_같다():
     assert js_ids[0] == "default", "첫 방문 기본값은 `기본` 이어야 한다"
 
 
+def test_배치_목록이_템플릿_모듈_구조표_세_곳에서_같다():
+    """어긋나면 **고를 수는 있는데 구조가 없는** 배치가 생긴다.
+
+    색은 CSS 가 값을 갖고 있어 세 곳(CSS·템플릿·모듈)을 봤고, 배치는 구조를
+    `message-node.js` 의 표가 갖고 있어 그 표까지 본다.
+    """
+    js = THEME_JS.read_text(encoding="utf-8")
+    block = js.split("export var LAYOUTS", 1)[1].split("];", 1)[0]
+    mod_ids = re.findall(r"id:\s*'([a-z-]+)'", block)
+
+    html = INDEX.read_text(encoding="utf-8")
+    bar = html.split('id="layout-select"', 1)[1].split("</select>", 1)[0]
+    html_ids = re.findall(r'<option value="([a-z-]+)"', bar)
+
+    node_js = (STATIC / "js" / "message-node.js").read_text(encoding="utf-8")
+    table = re.search(r"STRUCTURES\s*=\s*\{([^}]*)\}", node_js)
+    assert table, "message-node.js 에 구조 표가 없다"
+    struct_ids = re.findall(r"([a-z-]+)\s*:", table.group(1))
+
+    assert mod_ids == html_ids, f"모듈 {mod_ids} ≠ 템플릿 {html_ids}"
+    assert sorted(mod_ids) == sorted(struct_ids), f"모듈 {mod_ids} ≠ 구조표 {struct_ids}"
+    assert mod_ids[0] == "bubbles", "기본 배치는 지금까지의 모습(말풍선)이어야 한다"
+
+
 def test_첫_페인트_조각과_모듈이_같은_저장_계약을_쓴다():
     """어긋나면 **새로고침할 때마다 테마가 풀린다.**
 
@@ -319,13 +345,17 @@ def test_첫_페인트_조각과_모듈이_같은_저장_계약을_쓴다():
     """
     js = THEME_JS.read_text(encoding="utf-8")
     html = INDEX.read_text(encoding="utf-8")
-    key = re.search(r"STORAGE_KEY = '([^']+)'", js)
-    attr = re.search(r"ROOT_ATTR = '([^']+)'", js)
-    assert key and attr, "theme.js 에서 저장 계약을 찾지 못했다"
-    assert f"'{key.group(1)}'" in html, f"템플릿이 다른 저장 키를 쓴다 ({key.group(1)})"
-    assert f"'{attr.group(1)}'" in html, f"템플릿이 다른 루트 속성을 쓴다 ({attr.group(1)})"
-    # 첫 페인트 조각은 `기본` 을 **찍지 않는다** (속성이 남으면 시스템 추종이 깨진다).
+    #: 두 축이 각자 키·속성을 갖는다 (색과 배치는 직교한다 — 합치지 않는다).
+    for name in ("STORAGE_KEY", "ROOT_ATTR", "LAYOUT_KEY", "LAYOUT_ATTR"):
+        found = re.search(name + r" = '([^']+)'", js)
+        assert found, f"theme.js 에서 {name} 을 찾지 못했다"
+        assert f"'{found.group(1)}'" in html, (
+            f"템플릿이 다른 {name} 을 쓴다 ({found.group(1)})"
+        )
+    # 첫 페인트 조각은 **기본값을 찍지 않는다** (속성이 남으면 기본 동작이 깨진다:
+    # 색은 시스템 추종, 배치는 지금까지의 모습).
     assert "!== 'default'" in html
+    assert "!== 'bubbles'" in html
 
 
 def test_테마_모듈이_UTF8_이고_LF_이다():

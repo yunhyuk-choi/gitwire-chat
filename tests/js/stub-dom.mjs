@@ -270,7 +270,8 @@ export const ELEMENT_IDS = [
   'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
   'new-repo-use', 'new-repo-error',
   'outbox', 'outbox-text', 'outbox-retry',
-  'toggle-theme', 'theme-bar', 'theme-select', 'theme-note'
+  'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',
+  'layout-select', 'layout-note'
 ];
 
 /* IntersectionObserver 대역.

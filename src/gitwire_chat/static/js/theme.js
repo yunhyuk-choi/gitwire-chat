@@ -1,6 +1,14 @@
 /*
- * 색 테마 — `#toggle-theme` · `#theme-bar` · `#theme-select` · `#theme-note` 를
- * 소유한다. 그리고 **"지금 어느 팔레트인가"** 라는 상태도 여기 것이다.
+ * 테마 — `#toggle-theme` · `#theme-bar` 와 그 안의 두 고르는 칸을 소유한다.
+ * 그리고 **"지금 어느 팔레트·어느 레이아웃인가"** 라는 상태도 여기 것이다.
+ *
+ * ⭐ 축이 **둘이고 서로 직교한다.** 색과 배치는 다른 결정이다 (`log` 배치에
+ * `ide` 팔레트를 쓰는 조합이 성립한다). 그래서 저장값도 루트 표식도 둘로 나눠
+ * 둔다 — 하나로 합치면 조합이 표현되지 않고, 나중에 갈라내려면 저장된 값을
+ * 이전해야 한다.
+ *
+ *   색 팔레트    `data-chat-theme`   — **즉시** 전환 (색은 CSS 토큰으로 흐른다)
+ *   레이아웃     `data-chat-layout`  — **새로고침**으로 전환 (아래 이유)
  *
  * ⭐ 이 모듈이 하는 일은 딱 하나다: 루트 요소에 `data-chat-theme` 를 찍고, 그
  * 선택을 이 기기에 기억한다. 색 자체는 CSS 의 팔레트 구역(style.css)이 갖고
@@ -25,6 +33,8 @@
    `tests/test_theme.py` 가 일치를 기계로 확인한다. */
 export var STORAGE_KEY = 'gitwire-chat.theme';
 export var ROOT_ATTR = 'data-chat-theme';
+export var LAYOUT_KEY = 'gitwire-chat.layout';
+export var LAYOUT_ATTR = 'data-chat-layout';
 
 /* 고를 수 있는 팔레트. `기본` 만 시스템 라이트/다크를 따르고 (속성을 아예 지운다),
    나머지는 전부 다크 계열 터미널 팔레트다.
@@ -40,6 +50,43 @@ export var THEMES = [
 
 export var DEFAULT_THEME = 'default';
 
+/* 고를 수 있는 **레이아웃**. 지금은 하나만 출하한다 — 이음새를 먼저 세우고
+   겉보기는 그대로 두는 단계다. 구조 자체는 `message-node.js` 의 `STRUCTURES` 가
+   갖고 있고, 여기 있는 이름이 그 열쇠다(둘이 어긋나면 테스트가 잡는다).
+
+   ⭐ 레이아웃 전환은 **새로고침으로 간다.** 즉시 전환은 세 위험을 한꺼번에 안는다:
+   (1) 가상 스크롤의 높이 측정값이 통째로 낡는다 (구조가 달라지면 높이가 달라진다)
+   (2) 그걸 맞추려면 창 안 노드를 다시 만들어야 한다 (= `rebuiltInView` 가 깨진다)
+   (3) 픽셀 스크롤 위치가 의미를 잃는다.
+   새로고침이면 세 위험이 **존재 자체가 사라진다.** 대신 읽던 자리는 픽셀이 아니라
+   **앵커 메시지 id** 로 남겨 복원한다 (`timeline.js` 가 그 일을 소유한다). */
+export var LAYOUTS = [
+  { id: 'bubbles', label: '말풍선', note: '지금까지의 모습 — 좌우로 갈린 말풍선.' }
+];
+
+export var DEFAULT_LAYOUT = 'bubbles';
+
+export function normalizeLayout(id) {
+  for (var i = 0; i < LAYOUTS.length; i++) {
+    if (LAYOUTS[i].id === id) { return id; }
+  }
+  return DEFAULT_LAYOUT;
+}
+
+/* ⭐ **함정 하나를 여기서 막는다.** 테마가 못 서면 화면이 망가질 수 있는데, 고르는
+   UI 가 그 망가진 영역 안에 있으면 되돌릴 방법이 없다 — 저장값이 남아 새로고침해도
+   같은 테마로 뜬다. 그래서 (1) 고르는 칸은 대화 영역 **밖**(사이드바)에 두고,
+   (2) 초기화가 실패하면 조립소가 이 함수로 **루트 표식을 걷어내** 기본으로
+   떨어뜨린다. 모듈이 생성자에서 터져도 부를 수 있어야 하므로 자유 함수다.
+   실패 사실은 조립소가 상태줄에 남긴다 — 조용히 떨어지지 않는다. */
+export function fallbackToDefault(doc) {
+  var root = doc && (doc.documentElement || doc.body);
+  if (!root || !root.removeAttribute) { return false; }
+  root.removeAttribute(ROOT_ATTR);
+  root.removeAttribute(LAYOUT_ATTR);
+  return true;
+}
+
 /* 모르는 값은 조용히 기본으로 떨어진다 (옛 이름·손으로 고친 저장값·오타).
    첫 방문도 여기로 온다 — 사용자가 고르지 않았는데 검은 화면이 되면 안 된다. */
 export function normalize(id) {
@@ -51,15 +98,20 @@ export function normalize(id) {
 
 export function createTheme(env) {
   var dom = env.dom;
+  var bus = env.bus;
+  var status = env.status;
 
   var el = {
     toggle: dom.$('toggle-theme'),
     bar: dom.$('theme-bar'),
     select: dom.$('theme-select'),
-    note: dom.$('theme-note')
+    note: dom.$('theme-note'),
+    layoutSelect: dom.$('layout-select'),
+    layoutNote: dom.$('layout-note')
   };
 
   var current = DEFAULT_THEME;
+  var layout = DEFAULT_LAYOUT;
 
   /* 토큰은 루트에서 상속돼 내려가므로 찍는 곳도 루트 하나다.
      (`documentElement` 가 없는 환경이면 body 로 내려간다 — 상속은 같다.) */
@@ -79,38 +131,76 @@ export function createTheme(env) {
     root.setAttribute(ROOT_ATTR, id);
   }
 
-  function describe(id) {
-    for (var i = 0; i < THEMES.length; i++) {
-      if (THEMES[i].id === id) { return THEMES[i].note; }
+  function describe(list, id) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) { return list[i].note; }
     }
     return '';
   }
 
-  function save(id) {
+  function save(key, id) {
     try {
-      env.localStorage.setItem(STORAGE_KEY, id);
+      env.localStorage.setItem(key, id);
     } catch (err) {
       /* 프라이빗 모드·저장소 꽉 찬 경우 — 이번 세션에는 적용됐다.
          테마 기억은 부가 기능이라 여기서 채팅을 막지 않는다. */
     }
   }
 
-  function read() {
+  function read(key, fallback, normalizer) {
     try {
-      return normalize(env.localStorage.getItem(STORAGE_KEY));
+      return normalizer(env.localStorage.getItem(key));
     } catch (err) {
-      return DEFAULT_THEME;
+      return fallback;
     }
   }
 
-  /* 화면 반영 + 기억. 새로고침을 요구하지 않는다 — 속성 하나로 즉시 바뀐다. */
+  /* 색: 화면 반영 + 기억. 새로고침을 요구하지 않는다 — 속성 하나로 즉시 바뀐다. */
   function apply(id, remember) {
     current = normalize(id);
     stamp(current);
     if (el.select) { el.select.value = current; }
-    if (el.note) { dom.setText(el.note, describe(current)); }
-    if (remember) { save(current); }
+    if (el.note) { dom.setText(el.note, describe(THEMES, current)); }
+    if (remember) { save(STORAGE_KEY, current); }
     return current;
+  }
+
+  /* 레이아웃: 표식만 맞춘다. **전환은 여기서 하지 않는다** (chooseLayout 이 한다). */
+  function applyLayout(id, remember) {
+    layout = normalizeLayout(id);
+    var root = rootNode();
+    if (root) {
+      if (layout === DEFAULT_LAYOUT) {
+        if (root.removeAttribute) { root.removeAttribute(LAYOUT_ATTR); }
+      } else {
+        root.setAttribute(LAYOUT_ATTR, layout);
+      }
+    }
+    if (el.layoutSelect) { el.layoutSelect.value = layout; }
+    if (el.layoutNote) { dom.setText(el.layoutNote, describe(LAYOUTS, layout)); }
+    if (remember) { save(LAYOUT_KEY, layout); }
+    return layout;
+  }
+
+  /* 사용자가 레이아웃을 골랐다 — 기억하고 **다시 불러온다.**
+     같은 것을 고르면 아무 일도 하지 않는다(쓸데없이 새로고침하지 않는다). */
+  function chooseLayout(id) {
+    var next = normalizeLayout(id);
+    if (next === layout) { applyLayout(next, true); return false; }
+    applyLayout(next, true);
+    /* 읽던 자리를 **앵커 메시지 id** 로 남긴다. 픽셀 위치는 구조가 바뀌면
+       의미가 없다. 자리를 아는 것은 대화를 소유한 모듈이라 그쪽에 부탁한다 —
+       그 모듈이 죽어 있으면 구독자가 없어 아무 일도 일어나지 않는다(그리고
+       복원 없이 맨 아래로 뜬다 — 잃는 것이 자리 하나다). */
+    if (bus) { bus.emit('anchor:keep', { layout: next }); }
+    if (status) { status.set('레이아웃을 바꾼다 — 다시 불러온다…'); }
+    reload();
+    return true;
+  }
+
+  function reload() {
+    var win = env.win;
+    if (win && win.location && win.location.reload) { win.location.reload(); }
   }
 
   function mount() {
@@ -124,11 +214,17 @@ export function createTheme(env) {
     dom.on(el.select, 'change', function () {
       apply(el.select.value, true);
     });
+    dom.on(el.layoutSelect, 'change', function () {
+      chooseLayout(el.layoutSelect.value);
+    });
 
     /* 저장된 값을 되살린다. index.html 의 첫 페인트 조각이 이미 같은 값을 찍어
        두었을 수 있다 — 같은 값을 다시 찍는 것은 아무 일도 아니고, 그쪽이 없었던
        환경(그 조각이 막힌 경우)에서는 여기가 유일한 적용 지점이 된다. */
-    apply(read(), false);
+    apply(read(STORAGE_KEY, DEFAULT_THEME, normalize), false);
+    /* 저장된 이름이 **없는 레이아웃**이어도 여기서 기본으로 떨어진다
+       (그리고 첫 페인트 조각이 찍어 둔 표식을 걷어낸다). */
+    applyLayout(read(LAYOUT_KEY, DEFAULT_LAYOUT, normalizeLayout), false);
   }
 
   return {
@@ -136,6 +232,11 @@ export function createTheme(env) {
     /* 바깥(테스트·디버깅)에서 고르는 길. UI 와 같은 경로를 쓴다. */
     set: function (id) { return apply(id, true); },
     current: function () { return current; },
-    themes: function () { return THEMES.map(function (t) { return t.id; }); }
+    themes: function () { return THEMES.map(function (t) { return t.id; }); },
+    /* 레이아웃은 이 페이지가 사는 동안 **바뀌지 않는다** (바꾸면 새로고침이다).
+       그래서 조립소가 이 값을 한 번 읽어 `env.layout` 으로 나눠 준다. */
+    setLayout: function (id) { return chooseLayout(id); },
+    layout: function () { return layout; },
+    layouts: function () { return LAYOUTS.map(function (l) { return l.id; }); }
   };
 }

@@ -36,7 +36,7 @@ import { createTimeline } from './timeline.js';
 import { createSearch } from './search.js';
 import { createStream } from './stream.js';
 import { createPresence } from './presence.js';
-import { createTheme } from './theme.js';
+import { createTheme, fallbackToDefault, DEFAULT_LAYOUT } from './theme.js';
 
 export function createApp(runtime) {
   var dom = createDom(runtime.doc);
@@ -120,7 +120,16 @@ export function createApp(runtime) {
     /* 여기부터는 서로 **무관한** 단위들이다. 안전장치는 순서가 아니라 격리다.
        색 테마를 먼저 세운다 — 뒤의 단위가 하나 넘어져도 화면은 고른 색으로 뜬다
        (반대로 테마가 넘어져도 나머지는 그대로 선다. 색만 기본으로 간다). */
-    modules.theme = setup('색 테마', createTheme);
+    modules.theme = setup('테마', createTheme, function () {
+      /* ⭐ 테마가 못 섰다 = 루트 표식과 실제 구조가 어긋날 수 있다(레이아웃 CSS 는
+         찍혀 있는데 그 구조를 만들 모듈이 없는 상태). 표식을 걷어내 **기본으로**
+         떨어뜨린다. 조용히 떨어지지 않는다 — 아래 report() 가 상태줄에 남긴다.
+         그리고 고르는 칸은 대화 영역 밖(사이드바)에 있어 그대로 살아 있다. */
+      fallbackToDefault(runtime.doc);
+    });
+    /* 레이아웃 이름을 **한 번** 정해 모듈들에게 나눠 준다. 이 페이지가 사는 동안
+       바뀌지 않는다(바꾸면 새로고침) — 그래서 전환 중에 구조가 섞이는 상태가 없다. */
+    env.layout = modules.theme ? modules.theme.layout() : DEFAULT_LAYOUT;
     modules.roomlist = setup('방 목록', createRoomList);
     modules.addroom = setup('방 추가', createAddRoom);
     env.roomDraft = function () {
@@ -171,6 +180,9 @@ export function createApp(runtime) {
     watchOlder: function () { if (modules.timeline) { modules.timeline.watchOlder(); } },
     theme: function () { return modules.theme ? modules.theme.current() : null; },
     setTheme: function (id) { return modules.theme ? modules.theme.set(id) : null; },
+    layout: function () { return env.layout; },
+    setLayout: function (id) { return modules.theme ? modules.theme.setLayout(id) : null; },
+    keepAnchor: function () { return modules.timeline ? modules.timeline.keepAnchor() : null; },
     switchRoom: function (id) { if (modules.roomlist) { return modules.roomlist.select(id); } },
     renderRooms: function (l) { if (modules.roomlist) { modules.roomlist.render(l); } },
     retryRoom: function (id) { if (modules.roomlist) { return modules.roomlist.retryRoom(id); } },

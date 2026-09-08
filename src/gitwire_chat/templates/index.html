@@ -20,6 +20,10 @@
     if (saved && saved !== 'default') {
       document.documentElement.setAttribute('data-chat-theme', saved);
     }
+    var box = localStorage.getItem('gitwire-chat.layout');
+    if (box && box !== 'bubbles') {
+      document.documentElement.setAttribute('data-chat-layout', box);
+    }
   } catch (e) { /* 저장소를 못 읽는 환경 — 기본 테마로 뜨면 된다 */ }
 </script>
 </head>
@@ -49,6 +53,17 @@
         </select>
       </label>
       <p class="theme-note" id="theme-note"></p>
+
+      <!-- 배치는 **다른 축**이다 (색과 조합해서 쓴다). 전환은 새로고침으로 간다 —
+           그래야 가상 스크롤의 높이 캐시·전환 중 노드 재생성·스크롤 복원이라는
+           세 위험이 존재조차 하지 않는다. 읽던 자리는 앵커 메시지로 복원한다. -->
+      <label class="field" for="layout-select">
+        <span>배치</span>
+        <select id="layout-select">
+          <option value="bubbles">말풍선</option>
+        </select>
+      </label>
+      <p class="theme-note" id="layout-note"></p>
     </div>
 
     <form class="add-room" id="add-room" hidden>

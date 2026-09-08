@@ -1,6 +1,11 @@
 /*
  * 메시지 **한 건**의 DOM. 이 파일이 메시지 노드를 만드는 유일한 곳이다.
  *
+ * ⭐ **레이아웃 테마가 갈리는 자리도 여기 하나다.** 이름 → 만드는 함수의 표
+ * (`STRUCTURES`)이고, 다른 어디에도 구조 분기가 없다. 그래서 배치를 하나 더
+ * 붙이는 일이 "이 표에 한 줄"이 되고, 무엇이 깨지면 어느 구조 탓인지 바로 좁혀진다.
+ * 모르는 이름은 **조용히 기본 구조**로 떨어진다 (저장값이 옛 이름일 수 있다).
+ *
  * 상태를 갖지 않는다 — 타임라인이 모델을 소유하고, 여기는 "모델 하나 → 노드 하나"
  * 변환만 한다. 그래서 "무엇이 노드를 다시 만들 수 있나"가 한 함수로 좁혀지고,
  * 리렌더 국소성이 감시가 아니라 **구조**에서 나온다.
@@ -16,7 +21,20 @@
 
 import { timeLabel } from './dom.js';
 
-export function buildMessage(dom, msg, hooks) {
+/* 이름 → 구조. 레이아웃 테마의 열쇠는 `theme.js` 의 `LAYOUTS` 와 같아야 한다
+   (그 일치는 `tests/test_theme.py` 가 확인한다). */
+export var STRUCTURES = { bubbles: buildBubble };
+
+export function buildMessage(dom, msg, hooks, layout) {
+  var build = STRUCTURES[layout] || STRUCTURES.bubbles;
+  var wrap = build(dom, msg, hooks);
+  /* 전송 상태는 구조와 무관하다 — 어느 구조든 같은 함수가 덧입힌다. */
+  paintState(dom, wrap, msg, hooks);
+  return wrap;
+}
+
+/* 말풍선 구조 (지금까지의 모습). 좌우 정렬은 CSS 의 `.msg.mine` 이 정한다. */
+function buildBubble(dom, msg, hooks) {
   var wrap = dom.make('article', 'msg');
   wrap.dataset.id = msg.id;
   wrap.setAttribute('data-id', msg.id);
@@ -48,7 +66,6 @@ export function buildMessage(dom, msg, hooks) {
   var slot = dom.make('div', 'msg-state');
   wrap.appendChild(slot);
   wrap.stateSlot = slot;
-  paintState(dom, wrap, msg, hooks);
   return wrap;
 }
 
