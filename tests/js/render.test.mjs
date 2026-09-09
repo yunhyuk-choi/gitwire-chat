@@ -61,6 +61,12 @@ const timelineMod = await import(
   url.pathToFileURL(path.join(STATIC, 'js', 'timeline.js')).href
 );
 
+/* ⭐ 읽음 카운트 공식의 **유일한 원천**. 테스트가 공식을 베끼면 둘이 어긋나도
+   통과하므로 원천에서 가져온다 (디바운스 값도 같은 이유). */
+const readsMod = await import(
+  url.pathToFileURL(path.join(STATIC, 'js', 'reads.js')).href
+);
+
 /* 갱신 모듈의 상수(주기·포기 횟수·화면 표식 헤더)를 **원천에서** 읽는다 —
    테스트가 숫자를 베끼면 둘이 어긋나도 통과한다. */
 const updateMod = await import(
@@ -106,6 +112,30 @@ function msg(n, text, author) {
 /* 서버가 '내 것'이라고 판정해서 보낸 레코드. */
 function mineMsg(n, text) {
   return Object.assign(msg(n, text, '기본이름'), { sender: 'me.host', mine: true });
+}
+
+/* 읽음 스냅샷 대역. 서버가 주는 모양 그대로다 (`gitwire_chat/reads.py`). */
+function emptyReads() {
+  return { me: 'me@x.io', person: 'me@x.io', cursor: '', unread: 0,
+    first_unread: null, participants: [] };
+}
+
+function who(key, cursor, senders) {
+  return {
+    person: key, key: key, cursor: cursor || '',
+    senders: senders || [key.split('@')[0] + '.host'], updated_at: ''
+  };
+}
+
+function readsOf(list, extra) {
+  return Object.assign(emptyReads(), { participants: list }, extra || {});
+}
+
+/* 노드에 그려진 읽음 카운트 (없으면 빈 문자열). */
+function readCount(node) {
+  const slot = node.readsSlot;
+  if (!slot || slot.hidden) { return ''; }
+  return slot.textContent;
 }
 
 /* 말풍선이 오른쪽(내 것)에 있나 — CSS 는 `.msg.mine` 하나로 그걸 정한다. */
@@ -189,6 +219,9 @@ function boot(options) {
     '/api/rooms/r1/messages': { messages: messages, has_more: !!opts.hasMore },
     '/api/rooms/r1/visibility': { ok: true },
     '/api/rooms/r2/visibility': { ok: true },
+    /* 읽음 스냅샷 — 커서 지도만 온다 (카운트는 화면이 파생시킨다). */
+    '/api/rooms/r1/reads': opts.reads || emptyReads(),
+    '/api/rooms/r2/reads': opts.reads2 || emptyReads(),
     '/api/rooms': { rooms: rooms }
   };
   /* 테스트가 특정 경로만 갈아끼울 수 있게 한다 (키 순서는 그대로 유지된다). */
@@ -1273,7 +1306,11 @@ function keyEvent(key, extra) {
 }
 
 function posts(context) {
-  return context.fetch.calls.filter((c) => (c.init || {}).method === 'POST');
+  /* ⚠️ **메시지 전송만** 센다. 읽음 표시(`/reads`)·가시성 보고도 POST 이므로
+     전부 세면 "Enter 로 보냈나"의 판정이 다른 기능의 유무에 묶인다. */
+  return context.fetch.calls.filter(
+    (c) => (c.init || {}).method === 'POST' && c.path.indexOf('/messages') >= 0
+  );
 }
 
 function bodyOf(call) { return JSON.parse(call.init.body); }
@@ -1285,6 +1322,14 @@ async function imeBoot() {
   booted.list = booted.doc.getElementById('messages');
   booted.before = booted.list.children.length;
   return booted;
+}
+
+/* IME 안전 타이머만 골라낸다 — 읽음 표시의 디바운스 타이머(`reads.js`)가 같은
+   창(window)의 타이머를 쓰므로, 전체 목록으로 세면 이 판정이 그 모듈의 존재
+   여부에 묶인다. 여기서 보려는 것은 **IME 타이머 하나**다. */
+function imeTimers(context) {
+  return context.win.pendingTimers()
+    .filter((ms) => ms !== readsMod.MARK_DEBOUNCE_MS);
 }
 
 await test('⭐ 조합 중 Enter: 그 자리에서 보내지 않고, 확정된 뒤 **완전한 본문**을 보낸다', async () => {
@@ -1319,7 +1364,7 @@ await test('⭐ 조합 중 Enter: 그 자리에서 보내지 않고, 확정된 �
   assert.equal(text.value, '', '전송했는데 입력칸이 남았다');
   assert.equal(list.children.length, before + 1);
   assert.ok(list.children[before].textContent.includes('안녕하세요다'));
-  assert.deepEqual(context.win.pendingTimers(), [], '안전 타이머가 남았다');
+  assert.deepEqual(imeTimers(context), [], '안전 타이머가 남았다');
 });
 
 await test('같은 판정이 `keyCode 229` 경로에서도 선다 (isComposing 을 안 주는 브라우저)', async () => {
@@ -1372,7 +1417,7 @@ await test('안전 타이머는 **취소 전용** — 만료되면 전송되지 
   text.value = '확정 신호가 안 오는 환경';
   text.dispatch('keydown', keyEvent('Enter', { isComposing: true }));
   await settle();
-  assert.deepEqual(context.win.pendingTimers(), [3000], '안전 타이머가 걸리지 않았다');
+  assert.deepEqual(imeTimers(context), [3000], '안전 타이머가 걸리지 않았다');
 
   context.win.runTimers(3000);           /* 신호를 못 받은 채 한도가 지났다 */
   await settle();
@@ -1403,7 +1448,7 @@ await test('영문 입력은 아무 변화가 없다 — Enter 한 번에 즉시
   assert.equal(bodyOf(posts(context)[0]).text, 'ship it');
   assert.equal(enter.prevented, true, '줄바꿈 기본 동작을 막지 않았다');
   assert.equal(text.value, '');
-  assert.deepEqual(context.win.pendingTimers(), [], '영문인데 IME 타이머가 걸렸다');
+  assert.deepEqual(imeTimers(context), [], '영문인데 IME 타이머가 걸렸다');
 });
 
 await test('Shift+Enter 는 줄바꿈이다 (조합 중에도 보내지 않는다)', async () => {
@@ -1642,7 +1687,9 @@ await test('log 배치로 뜨면 줄 구조로 그려진다 (시각·발신자·
   assert.equal(rows.length, 2);
   const row = rows[0];
   /* 3조각: `.ts` · `.author` · `.line`. 말풍선의 `.msg-head` 는 없다. */
-  assert.deepEqual(row.children.map((c) => String(c.className)), ['ts', 'author', 'line']);
+  /* 3조각 + 읽음 카운트 자리(마지막·절대 위치라 순서가 화면에 영향 없다). */
+  assert.deepEqual(row.children.map((c) => String(c.className)),
+    ['ts', 'author', 'line', 'msg-reads']);
   assert.equal(row.children[1].textContent, '앨리스');
   /* 시각은 초까지, 그리고 초는 **별도 조각**이다 (좁은 폭에서 CSS 가 이것만 숨긴다). */
   const when = row.children[0];
@@ -1812,7 +1859,9 @@ await test('⭐ ide 배치: 같은 사람이 이어 말하면 발신자 머리�
   const rows = doc.getElementById('messages').children;
   assert.equal(rows.length, 4);
   /* 두 조각: `.msg-head`(발신자·시각) + `.line`(인용·본문·답장·상태). */
-  assert.deepEqual(rows[0].children.map((c) => String(c.className)), ['msg-head', 'line']);
+  /* 두 조각 + 읽음 카운트 자리 (마지막·절대 위치). */
+  assert.deepEqual(rows[0].children.map((c) => String(c.className)),
+    ['msg-head', 'line', 'msg-reads']);
   assert.deepEqual(rows[0].children[0].children.map((c) => String(c.className)),
     ['author', 'ts']);
   assert.equal(rows[0].children[0].children[0].textContent, 'bc.lee');
@@ -2643,6 +2692,235 @@ await test('갱신 알림이 못 서도 나머지 화면은 산다 (배선 실�
   const units = chat.failures().map((f) => f.unit);
   assert.deepEqual(units, ['갱신 알림']);
   assert.ok(doc.getElementById('status').textContent.indexOf('초기화 실패') >= 0);
+});
+
+/* ------------------------------------------------------- 읽음 표시 */
+
+await test('⭐ 카운트는 커서에서 파생된다 — 저장값이 아니다 (공식 단위 검증)', () => {
+  const m = { id: 'records/20260903/m5.json', sender: 'a.host' };
+  /* 참가자 3명: 작성자(a) · 아직 안 읽은 b · 이미 읽은 c */
+  const list = [
+    who('a@x.io', 'records/20260903/m9.json', ['a.host']),
+    who('b@x.io', 'records/20260903/m1.json', ['b.host']),
+    who('c@x.io', 'records/20260903/m9.json', ['c.host'])
+  ];
+  assert.equal(readsMod.countUnread(list, m), 1);
+  /* 작성자는 세지 않는다 — 그의 커서가 뒤에 있어도 (`p ≠ A`). */
+  list[0].cursor = '';
+  assert.equal(readsMod.countUnread(list, m), 1);
+  /* 커서가 아예 없는 사람(설치만 하고 안 켠 **유령**)은 **그냥 센다.** */
+  list.push(who('ghost@x.io', '', ['g.host']));
+  assert.equal(readsMod.countUnread(list, m), 2);
+  /* 참가자 집합이 비어 있으면 0 (분모를 모르면 아무것도 주장하지 않는다). */
+  assert.equal(readsMod.countUnread([], m), 0);
+});
+
+await test('⭐ 커서 하나가 여러 칸 전진하면 **아래 메시지 전부**의 카운트가 줄어든다', () => {
+  /* 저장값이면 메시지마다 갱신해야 하므로 이 성질이 성립하지 않는다. */
+  const list = [
+    who('me@x.io', 'records/20260903/m9.json', ['me.host']),
+    who('b@x.io', 'records/20260903/m1.json', ['b.host'])
+  ];
+  const msgs = [2, 3, 4, 5].map((n) => (
+    { id: 'records/20260903/m' + n + '.json', sender: 'a.host' }
+  ));
+  assert.deepEqual(msgs.map((m) => readsMod.countUnread(list, m)), [1, 1, 1, 1]);
+  /* b 가 m4 까지 읽었다 — **한 번의 커서 이동**이다. */
+  list[1].cursor = 'records/20260903/m4.json';
+  assert.deepEqual(msgs.map((m) => readsMod.countUnread(list, m)), [0, 0, 0, 1]);
+});
+
+await test('⭐ 카운트가 바뀌어도 노드를 다시 만들지 않는다 (rebuiltInView 0)', async () => {
+  const list = [who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])];
+  const { doc, chat } = await boot({ reads: readsOf(list) });
+  const before = chat.nodes().get(msg(2).id);
+  const created = doc.counts.createElement;
+
+  assert.equal(readCount(before), '2', '처음 카운트가 그려지지 않았다');
+
+  /* 남이 읽었다 — 서버가 미는 갱신 (SSE `reads`). */
+  chat.bus.emit('reads:state', {
+    roomId: 'r1',
+    state: readsOf([
+      who('me@x.io', '', ['me.host']),
+      who('b@x.io', msg(3).id, ['b.host'])
+    ])
+  });
+
+  const after = chat.nodes().get(msg(2).id);
+  assert.equal(after, before, '노드를 다시 만들었다 (같은 객체가 아니다)');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(readCount(after), '1', '카운트가 줄어들지 않았다');
+  assert.ok(chat.stats.readsPainted > 0, '덧입힌 흔적이 없다');
+  assert.equal(doc.counts.innerHTML, 0);
+  assert.equal(doc.counts.createElement, created, '노드를 새로 만들었다');
+});
+
+await test('다 읽으면 숫자가 사라진다 (0 을 그리지 않는다)', async () => {
+  const list = [who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])];
+  const { chat } = await boot({ reads: readsOf(list) });
+  const node = chat.nodes().get(msg(2).id);
+  assert.equal(readCount(node), '2');
+
+  chat.bus.emit('reads:state', {
+    roomId: 'r1',
+    state: readsOf([
+      who('me@x.io', msg(3).id, ['me.host']),
+      who('b@x.io', msg(3).id, ['b.host'])
+    ])
+  });
+  assert.equal(readCount(node), '', '다 읽었는데 숫자가 남아 있다');
+  assert.equal(node.readsSlot.hidden, true);
+});
+
+await test('⭐ 창에 들어온 최대 메시지를 디바운스해서 알린다 (스크롤마다 보내지 않는다)', async () => {
+  const { chat, context, fetchStub } = await boot();
+  const posts = () => fetchStub.calls.filter(
+    (c) => c.path.indexOf('/reads') >= 0 && c.init && c.init.method === 'POST'
+  );
+  /* 그리는 동안 이미 창 안에 있었다 — 그런데 **아직 나가지 않았다.** */
+  assert.equal(posts().length, 0, '확정 신호 없이 보냈다');
+  assert.ok(chat.stats.seenEmitted > 0, '창 내용을 알리지 않았다');
+
+  /* 디바운스 타이머가 만료되면 한 번 나간다 (여러 번 알렸어도 한 번). */
+  const fired = context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  assert.ok(fired > 0, '디바운스 타이머가 없다');
+  await Promise.resolve();
+  assert.equal(posts().length, 1, posts().map((c) => c.path).join(' · '));
+  assert.equal(JSON.parse(posts()[0].init.body).cursor, msg(3).id,
+    '가장 아래까지 보인 메시지가 아니다');
+});
+
+await test('탭이 안 보이면 읽은 것으로 치지 않는다', async () => {
+  const { doc, chat, context, fetchStub } = await boot();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);   /* 처음 것을 흘려보낸다 */
+  await Promise.resolve();
+  const before = fetchStub.calls.length;
+
+  doc.visibilityState = 'hidden';
+  chat.appendMessage(msg(9, '숨은 동안 온 말'));
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await Promise.resolve();
+  const posted = fetchStub.calls.slice(before).filter(
+    (c) => c.path.indexOf('/reads') >= 0 && c.init && c.init.method === 'POST'
+  );
+  assert.deepEqual(posted, [], '탭이 숨었는데 읽었다고 알렸다');
+});
+
+await test('내 커서는 낙관적으로 먼저 움직인다 (응답을 기다리지 않는다)', async () => {
+  const list = [who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])];
+  /* 서버 응답이 아예 오지 않는 상황(느린 push·끊긴 네트워크)에서도 화면은 바로
+     반영돼야 한다 — 내가 읽은 것은 내 컴퓨터에서 이미 사실이다. */
+  const snapshot = readsOf(list, { me: 'me@x.io' });
+  const { chat, context } = await boot({
+    reads: snapshot,
+    routes: {
+      '/api/rooms/r1/reads': (p, init) => (
+        init && init.method === 'POST' ? { __down: true } : snapshot
+      )
+    }
+  });
+  const node = chat.nodes().get(msg(2).id);
+  assert.equal(readCount(node), '2');
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await Promise.resolve();
+  await Promise.resolve();
+  /* 내가 읽었으므로 내 몫이 빠진다 (서버 응답이 실패해도). */
+  assert.equal(readCount(node), '1', '낙관적 갱신이 없다');
+});
+
+await test('구분선은 방을 열 때 한 항목에만 붙고, 읽어도 사라지지 않는다', async () => {
+  const list = [who('me@x.io', msg(1).id, ['me.host'])];
+  const { chat } = await boot({
+    reads: readsOf(list, { cursor: msg(1).id, unread: 2, first_unread: msg(2).id })
+  });
+  const marked = chat.items().filter((m) => {
+    const node = chat.nodes().get(m.id);
+    return node && node.newMarkSlot && node.newMarkSlot.hidden === false;
+  });
+  assert.deepEqual(marked.map((m) => m.id), [msg(2).id]);
+  assert.equal(chat.stats.newFromPainted, 1);
+  /* 그 항목만 높이를 다시 쟀다 (전체 캐시를 비우지 않았다). */
+  assert.equal(chat.stats.headRemeasured, 1);
+
+  /* 내가 다 읽어도 눈앞의 구분선은 남는다 (어디까지가 새 것이었나의 표식이다). */
+  chat.bus.emit('reads:state', {
+    roomId: 'r1',
+    state: readsOf(list, { cursor: msg(3).id, unread: 0, first_unread: null })
+  });
+  const still = chat.nodes().get(msg(2).id);
+  assert.equal(still.newMarkSlot.hidden, false, '구분선이 사라졌다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('방을 바꾸면 구분선이 그 방의 것으로 갈린다', async () => {
+  const { chat } = await boot({
+    reads: readsOf([who('me@x.io', msg(1).id, ['me.host'])],
+      { cursor: msg(1).id, first_unread: msg(2).id })
+  });
+  assert.equal(chat.state.newFrom, msg(2).id);
+  await chat.switchRoom('r2');
+  assert.equal(chat.state.newFrom, null, '남의 방 구분선이 남았다');
+});
+
+await test('방 목록에 내가 안 읽은 개수가 뱃지로 뜬다 (999+ 상한)', async () => {
+  const { doc, chat } = await boot({
+    rooms: [
+      { id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방', unread: 0 },
+      { id: 'r2', repo_url: 'https://example.invalid/two.git', name: '둘째 방', unread: 3 }
+    ]
+  });
+  function badges() {
+    const found = [];
+    const walk = (n) => {
+      for (const c of n.children) {
+        if (String(c.className).indexOf('room-unread') >= 0) { found.push(c.textContent); }
+        walk(c);
+      }
+    };
+    walk(doc.getElementById('rooms'));
+    return found;
+  }
+  assert.deepEqual(badges(), ['3'], '뱃지가 방마다 맞지 않다 (0 은 그리지 않는다)');
+
+  chat.renderRooms([
+    { id: 'r1', repo_url: 'https://example.invalid/one.git', name: '첫 방', unread: 1200 },
+    { id: 'r2', repo_url: 'https://example.invalid/two.git', name: '둘째 방', unread: 0 }
+  ]);
+  assert.deepEqual(badges(), ['999+']);
+});
+
+await test('읽음 스냅샷을 못 받아도 대화는 그대로 뜬다 (카운트만 0)', async () => {
+  /* 읽음 표시가 없는 것은 대화가 안 되는 것과 다른 급의 사건이다. */
+  const { doc, chat } = await boot({
+    routes: { '/api/rooms/r1/reads': { __down: true } }
+  });
+  assert.equal(doc.getElementById('messages').children.length, 3);
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(readCount(chat.nodes().get(msg(2).id)), '');
+  assert.equal(doc.getElementById('status').textContent.indexOf('초기화 실패'), -1);
+});
+
+await test('읽음 카운트 자리는 세 배치 모두에 있다 (구조 분기가 새지 않는다)', async () => {
+  for (const layout of ['bubbles', 'log', 'ide']) {
+    const { doc, chat } = await boot({
+      stored: { 'gitwire-chat.layout': layout },
+      reads: readsOf([who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])])
+    });
+    assert.equal(chat.layout(), layout);
+    const node = chat.nodes().get(msg(2).id);
+    assert.ok(node.readsSlot, layout + ' 배치에 읽음 자리가 없다');
+    assert.equal(readCount(node), '2', layout + ' 배치에서 카운트가 안 그려진다');
+    /* 구분선은 **필요할 때** 그 항목에만 생긴다 (평소엔 노드가 아예 없다). */
+    assert.equal(node.newMarkSlot, undefined,
+      layout + ' 배치에서 구분선이 미리 만들어져 있다');
+    assert.equal(nodeMod.paintNewFrom(
+      { make: (t, c, x) => { const n = doc.createElement(t); n.className = c || ''; if (x !== undefined) { n.textContent = x; } return n; } },
+      node, true
+    ), true, layout + ' 배치에서 구분선이 붙지 않는다');
+    assert.ok(String(node.children[0].className).indexOf('new-mark') >= 0,
+      layout + ' 배치에서 구분선이 맨 위에 오지 않는다');
+  }
 });
 
 /* -------------------------------------------------------------- 보고 */

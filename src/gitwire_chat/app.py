@@ -21,6 +21,10 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기 (**원격 push 를 기다리지 않는다**)
     POST /api/rooms/<id>/outbox            아직 못 나간 것을 지금 다시 밀기
+    GET  /api/rooms/<id>/reads             ⭐ 읽음 스냅샷 (내 안 읽은 개수 +
+                                           참가자별 커서). **카운트는 담지 않는다** —
+                                           브라우저가 커서에서 파생시킨다
+    POST /api/rooms/<id>/reads             "여기까지 읽었다" (커서 전진, 낙관적)
     GET  /api/rooms/<id>/search?q=          서버측 레코드 검색
     POST /api/rooms/<id>/refresh           폴 주기를 기다리지 않고 즉시 당기기
     POST /api/rooms/<id>/visibility        이 탭이 방을 보고 있나 (알림 판정)
@@ -393,6 +397,45 @@ def create_app(
         except RoomError as exc:
             return jsonify({"error": str(exc)}), 404
         return jsonify({"outbox": state.to_json()})
+
+    @app.get("/api/rooms/<room_id>/reads")
+    def get_reads(room_id: str):
+        """⭐ 읽음 스냅샷 — **커서만** 싣는다 (카운트는 파생값이다).
+
+        메시지마다의 "안 읽은 수"를 서버가 계산해 실어 보내지 않는 이유: 그 값은
+        *다른 사람의 커서가 움직이면* 한꺼번에 바뀐다. 커서 지도(사람 수만큼)를
+        주면 브라우저가 화면에 있는 메시지에 대해서만 매번 계산하고, 커서가
+        움직였을 때 노드를 다시 만들지 않고 숫자만 덧입힌다
+        (`static/js/reads.js` · `message-node.js`).
+        """
+        try:
+            return jsonify(manager.read_view(room_id).to_json())
+        except RoomNotReady as exc:
+            return jsonify(
+                {"error": str(exc), "status": manager.status(room_id).to_json()}
+            ), 409
+        except RoomError as exc:
+            return jsonify({"error": str(exc)}), 404
+
+    @app.post("/api/rooms/<room_id>/reads")
+    def mark_reads(room_id: str):
+        """"여기까지 읽었다". 커서는 **단조 증가** — 뒤로 보내려 해도 안 간다.
+
+        ⚠️ 이 응답은 push 를 기다리지 않는다. 내 로컬 커서는 즉시 움직이고(뱃지가
+        바로 줄어든다), 남에게 알리는 발행은 아웃박스가 뒤에서 민다 —
+        메시지 전송이 읽음 발행 때문에 늦어지지 않는다 (`rooms.mark_read`).
+        """
+        data = request.get_json(silent=True) or request.form or {}
+        cursor = str(data.get("cursor") or "")
+        try:
+            view = manager.mark_read(room_id, cursor)
+        except RoomNotReady as exc:
+            return jsonify(
+                {"error": str(exc), "status": manager.status(room_id).to_json()}
+            ), 409
+        except RoomError as exc:
+            return jsonify({"error": str(exc)}), 404
+        return jsonify(view.to_json())
 
     @app.post("/api/rooms/<room_id>/refresh")
     def refresh(room_id: str):

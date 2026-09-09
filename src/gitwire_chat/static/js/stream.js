@@ -8,6 +8,7 @@
  *   `message:new`  → 타임라인이 붙인다
  *   `rooms:list`   → 방 목록이 그린다 (그리고 현재 방의 상태를 다시 방송한다)
  *   `outbox:state` → 아웃박스 표시 (아직 상대에게 못 간 말이 있나)
+ *   `reads`        → 읽음 모델 (남의 커서가 움직였다 — 카운트는 화면이 파생시킨다)
  *   `trouble`      → 상태줄
  */
 
@@ -50,6 +51,13 @@ export function createStream(env) {
       var data;
       try { data = JSON.parse(event.data); } catch (err) { return; }
       bus.emit('rooms:list', { rooms: data.rooms || [] });
+    });
+    /* ⭐ 읽음 — 남의 커서가 움직였다. 서버가 **바뀔 때만** 민다 (폴 한 틱마다
+       비교한다). 카운트는 담겨 오지 않는다 — 커서 지도만 오고 계산은 화면이 한다. */
+    src.addEventListener('reads', function (event) {
+      var data;
+      try { data = JSON.parse(event.data); } catch (err) { return; }
+      bus.emit('reads:state', { roomId: data.room || id, state: data });
     });
     /* 아직 원격에 못 나간 것이 있나. 서버가 **바뀔 때만** 민다. */
     src.addEventListener('outbox', function (event) {

@@ -27,7 +27,8 @@
 
 import { errText, timeLabel } from './dom.js';
 import {
-  buildMessage, paintState, paintHead, senderSlot, grouped, itemGap
+  buildMessage, paintState, paintHead, paintReads, paintNewFrom,
+  senderSlot, grouped, itemGap
 } from './message-node.js';
 
 /* 처음 그릴 때 쓰는 높이 추정치(px). 실측되면 바로 대체된다. */
@@ -132,7 +133,14 @@ export function createTimeline(env) {
     loaded: false,
     atBottom: true,
     unseen: 0,
-    broken: ''
+    broken: '',
+    /* ⭐ '여기부터 새 메시지' 구분선을 붙일 항목. **방을 열 때 한 번 정하고
+       그 방을 보는 동안 바꾸지 않는다** — 내가 읽는 즉시 서버의 '첫 안 읽음'은
+       사라지지만, 구분선이 눈앞에서 사라지면 어디까지가 새 것이었는지 알 수 없다. */
+    newFrom: null,
+    /* 지금까지 **창 안에 들어온** 최대 메시지 ID. 읽음 커서의 근거다 —
+       "탭이 열렸다"가 아니라 "그 메시지가 화면에 있었다"가 기준이다. */
+    seenMax: ''
   };
 
   var stats = {
@@ -142,8 +150,22 @@ export function createTimeline(env) {
     /* 묶기 — 머리 판정이 **뒤집힌** 횟수 · 그래서 노드에 덧입힌 횟수 · 그래서
        높이를 다시 잰 항목 수. 과거를 불러와 묶음이 이어질 때 셋 다 1 이어야
        한다 (무효화가 유계라는 증거다). */
-    headChanged: 0, headRepainted: 0, headRemeasured: 0, stickyShown: 0
+    headChanged: 0, headRepainted: 0, headRemeasured: 0, stickyShown: 0,
+    /* 읽음 — 카운트를 **덧입힌** 횟수 · 구분선을 켠 횟수 · 창에 들어온 것을
+       알린 횟수. 카운트가 바뀌어도 `rebuiltInView` 는 0 이어야 한다는 규율이
+       여기 숫자들과 함께 확인된다. */
+    readsPainted: 0, newFromPainted: 0, seenEmitted: 0
   };
+
+  /* 읽음 모델은 **남의 것**이다 (`reads.js`). 우리는 계산을 부탁하고 그 결과를
+     노드에 덧입힐 뿐이다. 그 모듈이 서지 못했으면 카운트가 0 이라 아무것도 그리지
+     않는다 — 읽음 표시가 없는 것은 대화가 안 되는 것과 다른 급의 사건이다. */
+  var NO_READS = { count: function () { return 0; }, firstUnread: function () { return null; } };
+
+  function reads() {
+    var mod = env.reads ? env.reads() : null;
+    return mod && mod.count ? mod : NO_READS;
+  }
 
   var hooks = {
     lookup: function (id) { return known[id] || null; },
@@ -300,6 +322,9 @@ export function createTimeline(env) {
   function paintWindow(v) {
     var visible = v.getVirtualItems();
     var keep = new Set();
+    var reader = reads();
+    /* 이번 창에서 **가장 아래까지** 보인 메시지. 읽음 커서의 근거다. */
+    var maxSeen = '';
     for (var i = 0; i < visible.length; i++) {
       var vi = visible[i];
       var msg = items[vi.index];
@@ -325,6 +350,16 @@ export function createTimeline(env) {
          알려 줄 때만 일어난다) 그 사실이 반영되지 않는다. 전체 캐시를 비우면
          (`measure()`) 창 안 **모든** 항목을 다시 재게 되어 "그 하나만"이라는
          성질이 사라진다 — 그래서 이 항목 하나만 갈아 준다. */
+      /* ⭐ 읽음 카운트 — **시간에 따라 변하는 파생값**이라 노드를 다시 만들지
+         않고 덧입힌다(`paintReads`). 자리를 차지하지 않으므로 높이도 그대로다. */
+      if (paintReads(node, reader.count(msg))) { stats.readsPainted += 1; }
+      /* '여기부터 새 메시지' — 그 한 항목만, 그 방을 보는 동안 한 번. 이건
+         자리를 차지하므로 머리와 같은 방식으로 그 항목만 다시 잰다. */
+      if (paintNewFrom(dom, node, view.newFrom === msg.id)) {
+        stats.newFromPainted += 1;
+        remeasure.add(msg.id);
+      }
+      if (msg.id > maxSeen) { maxSeen = msg.id; }
       if (remeasure.has(msg.id)) {
         remeasure['delete'](msg.id);
         stats.headRemeasured += 1;
@@ -344,6 +379,18 @@ export function createTimeline(env) {
     }
     lastWindow = keep;
     paintSticky(visible);
+    announceSeen(maxSeen);
+  }
+
+  /* ⭐ **창 안에 무엇이 있었나**를 읽음 모델에 알린다 (여기가 그것을 아는 곳이다).
+     단조 증가만 알린다 — 위로 스크롤해도 읽은 위치가 뒤로 가지 않는다. 디바운스와
+     발행 판단은 받는 쪽(`reads.js`)의 몫이다. */
+  function announceSeen(id) {
+    if (!id || !view.roomId) { return; }
+    if (id <= view.seenMax) { return; }
+    view.seenMax = id;
+    stats.seenEmitted += 1;
+    bus.emit('reads:seen', { roomId: view.roomId, id: id });
   }
 
   /* ⭐ **머리가 잘리는 문제**를 여기서 막는다.
@@ -456,6 +503,8 @@ export function createTimeline(env) {
     nodes.clear();
     lastWindow = new Set();
     remeasure = new Set();
+    view.newFrom = null;
+    view.seenMax = '';
     brokenNode = null;
     /* 떠 있던 머리는 **다른 방의 사람 이름**이다 — 남겨 두면 빈 화면에 그 이름이
        걸려 있다. (다시 그리는 순간 알맞게 뜬다.) */
@@ -795,6 +844,25 @@ export function createTimeline(env) {
       /* `msg.mine` 은 서버가 봉투를 보고 붙여 보냈다 — 여기서 덮지 않는다.
          (내 다른 탭에서 보낸 말도 이 경로로 들어오고, 그건 내 것이다.) */
       if (append(msg)) { onNewRendered(!!msg.mine); }
+    });
+    /* ⭐ 남의 커서가 움직였다 (또는 내 낙관적 갱신) — **같은 창을 다시 칠한다.**
+       노드를 다시 만들지 않는다(`paintWindow` 는 없는 노드만 만든다). 그래서
+       카운트가 시간에 따라 바뀌어도 `rebuiltInView` 는 0 으로 남는다. */
+    bus.on('reads:changed', function (e) {
+      if (e.roomId !== view.roomId) { return; }
+      /* 구분선 자리는 **방을 열 때 한 번** 정한다 (그 뒤 서버의 '첫 안 읽음' 은
+         내가 읽는 즉시 사라지지만, 눈앞의 구분선을 지우면 안 된다). */
+      if (view.newFrom === null) {
+        var first = reads().firstUnread();
+        if (first) { view.newFrom = first; }
+      }
+      renderWindow();
+    });
+    /* 탭이 다시 보이게 됐다 — 지금 창에 있는 것을 다시 알린다 (`reads.js` 가 조른다).
+       창 내용을 아는 것은 우리이므로 답하는 곳도 여기다. */
+    bus.on('reads:ask', function () {
+      view.seenMax = '';
+      renderWindow();
     });
     /* 레이아웃 전환 직전에 조르는 신호 (theme.js). 자리를 아는 것은 우리다. */
     bus.on('anchor:keep', function () { return keepAnchor(); });

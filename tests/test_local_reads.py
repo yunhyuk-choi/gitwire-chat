@@ -87,7 +87,13 @@ def test_HTTP_조회도_원격을_보지_않는다(manager, fake_opener):
     assert [m["text"] for m in older["messages"]] == [
         "메시지 1", "메시지 2", "메시지 3"
     ]
-    assert channel.read_fresh == [False, False]
+    # ⚠️ 개수를 고정하지 않는다 — 방을 열면 읽음 커서도 **로컬로** 한 번 읽는다
+    # (`reads.ReadTracker.ensure_local`). 여기서 보려는 것은 "몇 번 읽었나"가
+    # 아니라 **하나도 원격을 보지 않았나**다.
+    assert channel.read_fresh, "읽기가 아예 일어나지 않았다 (테스트가 헛돌았다)"
+    assert channel.read_fresh == [False] * len(channel.read_fresh), (
+        "읽기 경로 어딘가가 아직 원격을 본다"
+    )
 
     # 계약은 그대로다 — 두 쪽이 겹치지도, 빠뜨리지도 않는다.
     ids = [m["id"] for m in older["messages"]] + [m["id"] for m in latest["messages"]]
