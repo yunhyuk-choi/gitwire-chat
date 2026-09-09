@@ -98,6 +98,12 @@ def _reexec_via_module(argv: list[str], *, out) -> int | None:
     ``python -m gitwire_chat update`` 로 갈아타고, 무엇을 왜 했는지 알린다.
 
     반환값이 None 이면 갈아타지 않았다는 뜻이다(그대로 진행하면 된다).
+
+    ⚠️ **여기에는 창 억제 플래그를 걸지 않는다** (`winspawn` 을 쓰지 않는다).
+    이 경로는 *사람이 터미널에서* ``gitwire-chat update`` 를 쳤을 때만 탄다 —
+    그 콘솔을 물려받아야 진행 상황이 사람 눈에 보인다. 창 없는 콘솔을 주면
+    출력이 아무 데도 보이지 않는다. 버튼 경로는 이 함수를 타지 않는다
+    (``-m`` 으로 부르므로 ``sys.argv[0]`` 이 콘솔 스크립트가 아니다).
     """
     if os.name != "nt":
         return None
