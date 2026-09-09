@@ -103,6 +103,17 @@ MAX_BADGE = 999
 PERSON_ENV = "GITWIRE_CHAT_PERSON"
 
 
+# ⚠️ 커서 형식 판정은 기반이 준다. 그것이 없는 구버전 gitwire 와 섞이면 **조용히**
+# 나빠진다 — `local()` 에서 AttributeError 가 나고, 그것을 삼키는 넓은 except 들이
+# 뱃지를 0 으로 만든다(고치려던 그 증상과 똑같은 화면). 그래서 여기서 **크게**
+# 실패시킨다: 앱이 뜨지 않고, 무엇을 해야 하는지가 메시지에 있다.
+if not hasattr(gitwire, "is_record_id"):  # pragma: no cover — 버전 불일치 방어
+    raise ImportError(
+        "기반(gitwire)이 너무 낮다 — 읽음 커서 형식 판정(`gitwire.is_record_id`)이 "
+        "없다. `python -m gitwire_chat update` 로 함께 올려라."
+    )
+
+
 class InvalidCursor(ValueError):
     """커서로 받을 수 없는 값이다 (실제 봉투 ID 가 아니다).
 

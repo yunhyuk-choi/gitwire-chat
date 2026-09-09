@@ -113,6 +113,37 @@ def test_오염된_커서는_사전식으로_모든_실제_ID_보다_크다():
     assert gitwire.is_record_id(real)
 
 
+def test_기반이_낮으면_크게_실패한다():
+    """⚠️ 구버전 gitwire 와 섞이면 **조용히** 나빠진다 — AttributeError 를 넓은
+    except 들이 삼켜 뱃지가 0 이 되고, 그건 고치려던 증상과 똑같은 화면이다.
+    그래서 모듈을 실을 때 크게 실패시킨다 (무엇을 할지 메시지에 있다).
+
+    ⚠️ `importlib.reload` 로 재현하지 않는다 — 캐시된 모듈을 갈아치우면
+    `InvalidCursor` 클래스 객체가 새로 생겨, 그것을 이미 임포트해 둔 `app.py` 의
+    `except` 가 **다른 클래스**를 잡게 된다(그 자체가 사고다). 그래서 사본을
+    **별도 이름으로** 실어 본다 — 전역을 건드리지 않는다.
+    """
+    import importlib.util
+    import sys
+    import types
+
+    fake = types.ModuleType("gitwire")          # `is_record_id` 가 없는 구버전
+    spec = importlib.util.spec_from_file_location(
+        "_reads_lowbase_probe", reads_mod.__file__
+    )
+    module = importlib.util.module_from_spec(spec)
+    saved = sys.modules["gitwire"]
+    sys.modules["gitwire"] = fake
+    try:
+        with pytest.raises(ImportError) as caught:
+            spec.loader.exec_module(module)
+    finally:
+        sys.modules["gitwire"] = saved
+    assert "gitwire_chat update" in str(caught.value)
+    # 그리고 실제 기반으로는 그대로 실린다 (문을 너무 좁게 닫지 않았다).
+    assert hasattr(gitwire, "is_record_id")
+
+
 def test_임시_ID_는_커서로_받지_않는다_거부한다(manager, fake_opener):
     room = manager.register(REPO)
     channel = _channel(fake_opener)
