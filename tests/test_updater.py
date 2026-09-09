@@ -905,6 +905,67 @@ def test_대장에_없으면_아예_띄우지_않는다(tmp_path):
     assert not launcher.lock_path.exists(), "거절했는데 자물쇠가 남았다"
 
 
+def test_대장에_없다는_말이_원인을_단정하지_않고_재시작을_먼저_말한다(tmp_path):
+    """⭐ **틀린 단정을 고친 자리.**
+
+    이 문구는 원래 "서버가 뜰 때 자기를 대장에 적지 못했다(읽기전용·권한 없음)"고
+    원인을 단정했다. 실사용에서 그 진단은 틀렸다 — 맥 사용자의 경우는 **돌고 있는
+    서버가 그 기능이 없던 옛 버전**이었다(파일은 갱신됐어도 프로세스는 뜰 때의 코드로
+    돈다). 틀린 단정은 사람을 권한 조사로 보내고, 정작 필요한 한 가지(앱을 다시
+    띄우기)를 못 하게 만든다.
+
+    그래서 여기서 세는 것은 **순서**다: 재시작이 권한보다 먼저 나와야 한다.
+    """
+    launcher = StubLauncher(home=tmp_path / "chats", directory=tmp_path / "run")
+    with pytest.raises(updaterun.Unmanaged) as caught:
+        launcher.launch()
+    headline = str(caught.value)
+    hint = caught.value.hint
+
+    # 첫 줄부터 "다시 띄우면 풀릴 수 있다"를 말한다 — 원인을 단정하지 않는다.
+    assert "읽기전용" not in headline and "권한" not in headline, headline
+    assert "다시 띄우면" in headline, headline
+    # 가장 흔한 원인(옛 버전으로 돌고 있다)이 먼저 나온다.
+    assert "옛 버전" in hint, hint
+    assert hint.index("옛 버전") < hint.index("권한"), (
+        "권한 이야기가 옛 버전보다 먼저 나온다 (틀린 단정을 되풀이한다):\n" + hint
+    )
+    assert hint.index("다시 띄우면") < hint.index("권한"), (
+        "재시작 안내가 권한 이야기보다 뒤에 있다:\n" + hint
+    )
+    # 재시작 방법은 **OS 를 가리지 않는다** (특정 OS 의 창·서비스 이름을 쓰지 않는다).
+    assert "Ctrl+C" in hint and "python -m gitwire_chat" in hint, hint
+    for os_only in ("작업 관리자", "taskkill", "launchctl", "systemctl", "Activity Monitor"):
+        assert os_only not in hint, f"OS 에 묶인 안내가 있다: {os_only}"
+    # 대장이 비어 있는 경우다 — 어느 폴더를 보라고 말해 준다.
+    assert str(launcher.run_dir) in hint, hint
+
+
+def test_대장에_남의_항목만_있으면_다른_말을_한다(tmp_path):
+    """⭐ **두 경우는 원인이 다르다** — 그래서 문구도 달라야 한다.
+
+    적힌 것이 하나도 없는 것과, 적혀 있는데 이 pid 가 아닌 것은 다른 사건이다.
+    후자는 대장에 **쓰기가 되고 있다는 증거**라 권한을 의심할 이유가 없다 (그런데도
+    권한 이야기를 하면 사람이 엉뚱한 곳을 파게 된다).
+    """
+    run_dir = tmp_path / "run"
+    runstate.record(sample(8770, pid=41336), directory=run_dir)
+    launcher = StubLauncher(home=tmp_path / "chats", directory=run_dir)
+    with pytest.raises(updaterun.Unmanaged) as caught:
+        launcher.launch()
+    hint = caught.value.hint
+
+    # 무엇이 적혀 있는지 그대로 보여 준다 (사람이 판단할 재료를 준다).
+    assert "8770" in hint and "41336" in hint, hint
+    assert str(os.getpid()) in hint, "지금 프로세스가 누구인지 말하지 않는다"
+    # 쓰기가 되는 환경이므로 권한을 원인으로 **지목하지 않는다.**
+    assert "권한 문제는 아닐 것이다" in hint, hint
+    assert "읽기전용" not in hint, "쓰기가 되는데 읽기전용을 의심한다:\n" + hint
+    # 그리고 여기서도 할 일은 같다 — 다시 띄우기.
+    assert "옛 버전" in hint and "다시 띄우면" in hint, hint
+    assert launcher.spawned == []
+
+
 def test_두_번_눌러도_두_탭에서_눌러도_한_번만_돈다(tmp_path):
     """⭐ 같은 서버 안에서는 추측하지 않는다 — 자식에게 물어본다."""
     run_dir = tmp_path / "run"
