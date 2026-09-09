@@ -391,6 +391,162 @@ frame.addEventListener('load', function () {
 </script></body></html>"""
 
 
+#: `tty` 배치가 **실제로 카드를 버렸는지** 재는 두 페이지.
+#:
+#: ⭐ 이 배치의 요구는 "색을 어둡게"가 아니라 **"카드와 상시 버튼을 버려라"** 였다.
+#: 그래서 판정도 색이 아니라 **브라우저가 계산한 구조 값**이다 — 둥근 모서리·바닥·
+#: 테두리가 0 인가, 한 줄이 창 폭을 쓰는가, 답장 버튼이 평소 보이지 않는가.
+#:
+#: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라(네트워크·git 을 타지
+#: 않으려고) 메시지 줄이 그려지지 않는다. 그래서 `message-node.js` 의 `buildTtyRow`
+#: 가 만드는 것과 **같은 구조**를 손으로 세우고 진짜 `style.css` 를 물린다 (구조가
+#: 어긋나면 stub DOM 테스트가 먼저 깨진다 — 조각·클래스 이름을 거기서 고정한다).
+PROBE_TTY_ROWS = """<!doctype html><html lang="ko" data-chat-layout="tty"%(theme)s>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<link rel="stylesheet" href="/static/style.css"></head><body>
+<div class="app"><main class="chat"><div class="timeline"><div class="messages">
+<article class="msg" id="t0" data-row="even" data-sender="1" data-index="0">
+<div class="new-mark" id="t0mark"><span class="new-mark-label">여기부터 새 메시지</span></div>
+<time class="ts"><span class="hm">14:03</span><span class="sec" id="t0s">:22</span></time>
+<span class="prompt" id="t0p" aria-hidden="true">&#9656;</span>
+<span class="author" id="t0a">앨리스</span>
+<div class="line" id="t0l"><div class="quote" id="t0q">&#8617; 밥: 원래 말</div>
+<div class="body" id="t0b">첫 줄 — 아주 긴 URL 도 줄을 깨지 않아야 한다
+https://example.invalid/아주/긴/경로/가/이어지는/주소</div>
+<div class="msg-actions" id="t0act"><button type="button" class="link" id="t0btn">답장</button></div>
+<div class="msg-state" hidden></div></div>
+<span class="msg-reads" id="t0r">2</span></article>
+<article class="msg" id="t1" data-row="odd" data-sender="3" data-index="1">
+<time class="ts"><span class="hm">14:03</span><span class="sec">:23</span></time>
+<span class="prompt" aria-hidden="true">&#9656;</span>
+<span class="author" id="t1a">밥</span>
+<div class="line"><div class="body">둘째 줄</div>
+<div class="msg-actions"><button type="button" class="link">답장</button></div>
+<div class="msg-state" hidden></div></div>
+<span class="msg-reads" id="t1r" hidden></span></article>
+<article class="msg mine" id="t2" data-row="even" data-sender="2" data-index="2">
+<time class="ts"><span class="hm">14:03</span><span class="sec">:24</span></time>
+<span class="prompt" id="t2p" aria-hidden="true">&#9656;</span>
+<span class="author" id="t2a">나</span>
+<div class="line"><div class="body">내 줄</div>
+<div class="msg-actions"><button type="button" class="link">답장</button></div>
+<div class="msg-state" hidden></div></div>
+<span class="msg-reads" id="t2r">1</span></article>
+<article class="msg mine failed" id="t3" data-row="odd" data-sender="2" data-index="3">
+<time class="ts"><span class="hm">14:03</span><span class="sec">:25</span></time>
+<span class="prompt" aria-hidden="true">&#9656;</span>
+<span class="author">나</span>
+<div class="line"><div class="body">못 보낸 줄</div>
+<div class="msg-actions"><button type="button" class="link">답장</button></div>
+<div class="msg-state" id="t3st"><span class="state-text" id="t3stt">보내지 못했다</span>
+<button type="button" class="link retry" id="t3retry">재시도</button></div></div>
+</article>
+</div></div>
+<form class="composer" id="comp">
+<input type="text" class="author" id="compauthor" value="윤혁">
+<textarea id="comptext" rows="1"></textarea>
+<button type="submit" class="primary" id="compsend">보내기</button>
+</form>
+</main></div></body></html>"""
+
+#: 위 페이지를 정해진 폭의 iframe 에 넣고 계산된 값을 회수한다 (`log`·`ide` 과 같은
+#: 이유 — 이 환경의 헤드리스 Edge 는 뷰포트를 492px 아래로 못 내린다. iframe 은
+#: 자기 폭이 곧 뷰포트다).
+PROBE_TTY_FRAME = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+</head><body style="margin:0">
+<iframe id="f" src="/__test__/probetty/%(theme)s/0"
+        style="width:%(width)dpx;height:640px;border:0"></iframe>
+<pre id="out"></pre>
+<script>
+var frame = document.getElementById('f');
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow;
+  var doc = frame.contentDocument;
+  function cs(id) { return win.getComputedStyle(doc.getElementById(id)); }
+  function box(id) { return doc.getElementById(id).getBoundingClientRect(); }
+  /* ⭐ 답장 버튼: 평소 → 키보드로 초점을 받은 뒤. 두 값의 차이가 "감췄지만
+     도달할 수 있다"의 증거다. 초점은 **진짜로** 준다 (`focus()`) — 그래서
+     `display:none` 이었다면 여기서 활성 요소가 되지 못하고 값이 안 바뀐다. */
+  var idle = cs('t0act').opacity;
+  doc.getElementById('t0btn').focus();
+  var focusedActive = doc.activeElement ? doc.activeElement.id : '';
+  var focused = cs('t0act').opacity;
+  var ring = cs('t0btn').outlineWidth;
+  doc.getElementById('t0btn').blur();
+  document.getElementById('out').textContent = JSON.stringify({
+    viewport: win.innerWidth,
+    /* (1) 카드가 사라졌나 — 계산된 값으로 */
+    radius: cs('t0').borderRadius,
+    background: cs('t0').backgroundColor,
+    mine_background: cs('t2').backgroundColor,
+    border_top: cs('t0').borderTopWidth,
+    border_right: cs('t0').borderRightWidth,
+    border_bottom: cs('t0').borderBottomWidth,
+    border_left: cs('t0').borderLeftWidth,
+    max_width: cs('t0').maxWidth,
+    display: cs('t0').display,
+    line_display: cs('t0l').display,
+    author_display: cs('t0a').display,
+    /* (2) 한 줄이 창 폭을 쓰나 */
+    row_width: Math.round(box('t0').width),
+    mine_left: Math.round(box('t2').left),
+    other_left: Math.round(box('t1').left),
+    /* (3) 촘촘한가 — 한 줄 메시지의 실제 높이 */
+    row_height: Math.round(box('t1').height),
+    line_height: cs('t0').lineHeight,
+    /* (4) 상시 버튼이 없나 · 그래도 도달할 수 있나 */
+    actions_idle_opacity: idle,
+    actions_focus_opacity: focused,
+    actions_display: cs('t0act').display,
+    actions_focus_active: focusedActive,
+    actions_focus_ring: ring,
+    /* 감추기가 **자리를 비우지 않나** — 비우면 드러날 때 줄 높이가 바뀐다 */
+    actions_width: Math.round(box('t0act').width) > 0,
+    /* (5) 한 줄로 흐르나 (시각·프롬프트·발신자가 같은 줄) */
+    prompt_text: doc.getElementById('t0p').textContent,
+    prompt_color: cs('t0p').color,
+    mine_prompt_color: cs('t2p').color,
+    time_top: Math.round(doc.querySelector('#t1 .ts').getBoundingClientRect().top),
+    author_top: Math.round(box('t1a').top),
+    body_top: Math.round(doc.querySelector('#t1 .body').getBoundingClientRect().top),
+    sec_display: cs('t0s').display,
+    /* (6) 내것/남의것 — 레일 + 이름 색 (위치는 안 옮긴다) */
+    mine_rail: cs('t2').borderLeftColor,
+    other_rail: cs('t1').borderLeftColor,
+    sender1: cs('t0a').color,
+    sender3: cs('t1a').color,
+    mine_author: cs('t2a').color,
+    /* (7) 살아 있는 것들 — 읽음 카운트 · 구분선 · 인용 · 전송 상태 */
+    reads_visible: box('t0r').width > 0 && box('t0r').height > 0,
+    reads_hidden_when_zero: cs('t1r').display === 'none',
+    reads_position: cs('t0r').position,
+    reads_inside_row: box('t0r').right <= box('t0').right + 1,
+    reads_color: cs('t0r').color,
+    mark_height: Math.round(box('t0mark').height),
+    mark_full_width: Math.round(box('t0mark').width) >= Math.round(box('t0').width) - 48,
+    quote_visible: box('t0q').width > 0 && box('t0q').height > 0,
+    quote_background: cs('t0q').backgroundColor,
+    quote_radius: cs('t0q').borderRadius,
+    quote_border_left: cs('t0q').borderLeftWidth,
+    state_display: cs('t3st').display,
+    state_visible: box('t3st').width > 0 && box('t3st').height > 0,
+    state_color: cs('t3stt').color,
+    retry_visible: box('t3retry').width > 0,
+    /* (8) 입력창이 프롬프트 모양인가 */
+    composer_marker: win.getComputedStyle(doc.getElementById('comp'), '::before').content,
+    composer_author_border: cs('compauthor').borderTopWidth,
+    composer_author_background: cs('compauthor').backgroundColor,
+    composer_author_color: cs('compauthor').color,
+    composer_text_border: cs('comptext').borderTopWidth,
+    composer_send_background: cs('compsend').backgroundColor,
+    composer_send_visible: box('compsend').width > 0,
+    /* (9) 가로 스크롤이 생기지 않나 (320px 규율) */
+    overflow: doc.documentElement.scrollWidth > win.innerWidth + 1
+  });
+});
+</script></body></html>"""
+
+
 #: ⭐ **읽음 표시가 실제로 보이는지** 재는 페이지 (배치 3종 × 팔레트 × 좁은 폭).
 #:
 #: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라(네트워크·git 을 타지
@@ -578,6 +734,13 @@ def attach_test_routes(app) -> None:
         body = PROBE_IDE_FRAME % {"theme": name, "width": width}
         return Response(body, mimetype="text/html")
 
+    def probetty(name: str, width: int):
+        theme = "" if name == "default" else f' data-chat-theme="{name}"'
+        if width <= 0:
+            return Response(PROBE_TTY_ROWS % {"theme": theme}, mimetype="text/html")
+        body = PROBE_TTY_FRAME % {"theme": name, "width": width}
+        return Response(body, mimetype="text/html")
+
     def probe(name: str):
         attr = "" if name == "default" else f' data-chat-theme="{name}"'
         return Response(PROBE_PAGE % {"attr": attr}, mimetype="text/html")
@@ -613,6 +776,7 @@ def attach_test_routes(app) -> None:
     app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
     app.add_url_rule("/__test__/probelog/<name>/<int:width>", "test_probelog", probelog)
     app.add_url_rule("/__test__/probeide/<name>/<int:width>", "test_probeide", probeide)
+    app.add_url_rule("/__test__/probetty/<name>/<int:width>", "test_probetty", probetty)
     app.add_url_rule(
         "/__test__/probereads/<layout>/<name>/<int:width>",
         "test_probereads", probereads,
@@ -638,12 +802,17 @@ def served(tmp_path):
 
 
 def open_headless(
-    url: str, profile: Path, window: str | None = None
+    url: str, profile: Path, window: str | None = None,
+    extra: tuple[str, ...] = (),
 ) -> tuple[str, str]:
     """헤드리스로 페이지를 열고 (DOM, 콘솔) 을 돌려준다.
 
     `window` 로 창 폭을 준다 — 좁은 폭 동작은 CSS 미디어 쿼리라 **실제 폭**에서만
     재진다 (JS 가 폭을 재서 분기하지 않는다).
+
+    `extra` 는 **기기 성질을 흉내 내는** 스위치 자리다 (예: 호버가 없는 터치 기기 —
+    `--blink-settings=primaryHoverType=1,…`). 그런 조건은 JS 로 만들 수 없고
+    브라우저가 만들어 줘야 한다.
     """
     profile.mkdir(parents=True, exist_ok=True)
     argv = [
@@ -661,6 +830,7 @@ def open_headless(
     ]
     if window:
         argv.append(f"--window-size={window}")
+    argv.extend(extra)
     argv.append(url)
     proc = subprocess.run(
         argv, capture_output=True, timeout=BROWSER_TIMEOUT,
@@ -782,7 +952,7 @@ def run_until_report(url: str, profile: Path, app, *, seconds: float = 40.0) -> 
 
 
 @needs_browser
-@pytest.mark.parametrize("layout", ["bubbles", "log", "ide"])
+@pytest.mark.parametrize("layout", ["bubbles", "log", "ide", "tty"])
 def test_실제_앱에서_읽음_카운트가_세_배치_모두에_보인다(
     served_with_room, tmp_path, layout
 ):
@@ -1015,6 +1185,9 @@ def test_각_팔레트의_계산된_색이_정의와_같다(theme, served, tmp_p
 LAYOUT_CASES = [
     ("default", "bubbles"), ("default", "log"), ("tty", "log"),
     ("default", "ide"), ("tty", "ide"),
+    # ⭐ `tty` **배치**는 팔레트 `tty` 와 다른 축이다 — 그 직교성을 조합으로 본다
+    # (배치 tty + 색 ide 가 성립해야 한다).
+    ("default", "tty"), ("ide", "tty"),
 ]
 
 
@@ -1611,10 +1784,166 @@ def test_다른_페이지는_갱신을_시작시킬_수_없고_우리_화면은_
 # ------------------------------------------------------------- 읽음 표시
 
 #: 배치 × 팔레트 조합. 색과 배치는 직교하므로 둘을 섞어 본다.
+def _tty_probe(served, tmp_path, theme: str, width: int, extra=()) -> dict:
+    import html as html_mod
+    import json
+    import re as re_mod
+
+    dom, console = open_headless(
+        f"{served.url}__test__/probetty/{theme}/{width}",
+        tmp_path / f"profile-tty-{theme}-{width}-{len(extra)}",
+        extra=extra,
+    )
+    assert not uncaught_lines(console), console[-1500:]
+    found = re_mod.search(r'<pre id="out">(.*?)</pre>', dom, re_mod.S)
+    assert found and found.group(1).strip(), dom[-1500:]
+    return json.loads(html_mod.unescape(found.group(1)))
+
+
+@needs_browser
+@pytest.mark.parametrize("theme,width", [("ide", 900), ("default", 320)])
+def test_tty_배치가_카드와_상시_버튼을_실제로_버렸다(theme, width, served, tmp_path):
+    """⭐ 요구의 본체를 **브라우저가 계산한 값**으로 본다.
+
+    사용자가 "터미널스럽지 않다"고 말한 것의 실체는 폰트가 아니라 **카드**(둥근
+    모서리·바닥·테두리·폭 제한)와 **상시 노출된 답장 버튼**이었다. 그래서 여기서
+    보는 것은 색이 아니라 그 넷이 실제로 0 이 됐는지다 — "적용했다"는 클레임이
+    아니라 `getComputedStyle` 값이 근거다.
+
+    ⭐ 팔레트와 **직교**한다는 것도 여기서 함께 재진다: 넓은 폭은 `ide` 팔레트로
+    열어 (`tty` 배치 + `ide` 색 조합) 색 토큰이 그 팔레트 값으로 계산되는지 본다.
+    """
+    import json
+
+    got = _tty_probe(served, tmp_path, theme, width)
+    print(f"  [tty · {theme} · {width}px] {json.dumps(got, ensure_ascii=False)}")
+    tokens = palette(theme)
+    assert got["viewport"] == width, f"뷰포트가 {width} 가 아니다 ({got['viewport']})"
+
+    # (1) ⭐ 카드가 사라졌다 — 모서리·바닥·테두리·폭 제한.
+    assert got["radius"] == "0px", f"둥근 모서리가 남았다: {got['radius']}"
+    assert got["background"] == "rgba(0, 0, 0, 0)", f"카드 바닥이 남았다: {got['background']}"
+    assert got["mine_background"] == "rgba(0, 0, 0, 0)", got["mine_background"]
+    for side in ("border_top", "border_right", "border_bottom"):
+        assert got[side] == "0px", f"카드 테두리가 남았다 ({side}={got[side]})"
+    # 왼쪽 2px 만 남는다 — 내 말을 가리키는 레일이다(남의 줄에서는 투명).
+    assert got["border_left"] == "2px", got["border_left"]
+    assert got["max_width"] == "none", f"폭 제한이 남았다: {got['max_width']}"
+
+    # (2) 한 줄이 **창 폭을 그대로 쓴다** (말풍선처럼 잘리지 않는다).
+    assert got["row_width"] >= width - 4, got
+    assert got["mine_left"] == got["other_left"], "내 줄이 오른쪽으로 옮겨졌다"
+
+    # (3) 촘촘하다 — 짧은 메시지 한 건이 **글자 한 줄 높이**에 들어온다 (여백이 없다).
+    assert got["row_height"] <= 24, f"줄이 촘촘하지 않다 ({got['row_height']}px)"
+
+    # (4) ⭐ 상시 노출 버튼이 없고, 그래도 **키보드로 도달한다.**
+    assert got["actions_idle_opacity"] == "0", (
+        f"답장 버튼이 상시 노출돼 있다 (opacity {got['actions_idle_opacity']})"
+    )
+    assert got["actions_display"] != "none", (
+        "답장 자리가 display:none 이다 — 초점에서 빠져 키보드로 도달할 수 없다"
+    )
+    assert got["actions_focus_active"] == "t0btn", (
+        f"초점이 답장 버튼에 앉지 않았다 (활성 요소 {got['actions_focus_active']!r})"
+    )
+    assert got["actions_focus_opacity"] == "1", (
+        f"키보드로 초점을 받았는데 여전히 안 보인다 ({got['actions_focus_opacity']})"
+    )
+    assert got["actions_focus_ring"] != "0px", (
+        f"초점 링이 없다 — 어디 있는지 알 수 없다 ({got['actions_focus_ring']})"
+    )
+    # 감추기가 **자리를 비우지 않는다** (비우면 드러날 때 줄 높이가 바뀐다).
+    assert got["actions_width"] is True, "답장 자리가 흐름에서 빠졌다"
+
+    # (5) ⭐ 시각 · ▸ · 발신자 · 본문이 **한 줄로 흐른다** — 그리고 그 흐름이
+    #     **인라인**이다. 플렉스·격자로 하면 긴 말이 통째로 다음 줄로 떨어져 머리만
+    #     남은 줄이 생긴다 (터미널의 줄바꿈은 글자가 오른쪽 끝에서 이어지는 것이다).
+    #     ⚠️ 좁은 폭에서도 같다 — 접는 규칙이 아예 없다는 것이 이 배치의 성질이다.
+    assert got["display"] == "block", f"줄이 인라인 흐름이 아니다: {got['display']}"
+    assert got["line_display"] == "inline", got["line_display"]
+    # (이름만 inline-block 이다 — 인라인은 `text-overflow` 로 자를 수 없다.)
+    assert got["author_display"] == "inline-block", got["author_display"]
+    assert got["prompt_text"] == "▸", got["prompt_text"]
+    assert got["prompt_color"] == rgb(tokens["--muted"]), got["prompt_color"]
+    assert got["mine_prompt_color"] == rgb(tokens["--mine-ink"]), got["mine_prompt_color"]
+    assert got["sec_display"] == "none", "프롬프트 줄에 초가 자리를 먹는다"
+    assert abs(got["author_top"] - got["time_top"]) <= 4, "발신자가 시각과 다른 줄이다"
+    assert abs(got["body_top"] - got["time_top"]) <= 4, (
+        f"본문이 머리와 다른 줄로 떨어졌다 (body {got['body_top']} / ts {got['time_top']})"
+    )
+
+    # (6) 내것/남의것 — 레일 + 이름 색. 발신자마다 다른 색이 실제로 계산된다.
+    assert got["mine_rail"] == rgb(tokens["--mine-ink"]), got["mine_rail"]
+    assert got["other_rail"] == "rgba(0, 0, 0, 0)", got["other_rail"]
+    assert got["sender1"] == rgb(tokens["--sender-1"]), got["sender1"]
+    assert got["sender3"] == rgb(tokens["--sender-3"]), got["sender3"]
+    assert got["mine_author"] == rgb(tokens["--mine-ink"]), got["mine_author"]
+    assert len({got["sender1"], got["sender3"], got["mine_author"]}) == 3
+
+    # (7) ⭐ 다른 배치에서 되던 것들이 **여기서도 보인다.**
+    assert got["reads_visible"] is True, "읽음 카운트가 안 보인다"
+    assert got["reads_hidden_when_zero"] is True, "0 인데 자리를 차지한다"
+    assert got["reads_position"] == "absolute", "읽음 카운트가 줄을 밀 수 있다"
+    assert got["reads_inside_row"] is True, "읽음 카운트가 줄 밖으로 삐져나갔다"
+    assert got["mark_height"] > 0, "'여기부터 새 메시지' 구분선이 안 보인다"
+    assert got["mark_full_width"] is True, "구분선이 한 칸에 갇혔다 (줄을 못 가로지른다)"
+    assert got["quote_visible"] is True, "답장 인용이 안 보인다"
+    # 인용도 상자를 버렸다 — 작은 카드가 남으면 그것도 카드다.
+    assert got["quote_background"] == "rgba(0, 0, 0, 0)", got["quote_background"]
+    assert got["quote_radius"] == "0px", got["quote_radius"]
+    assert got["quote_border_left"] == "0px", got["quote_border_left"]
+    assert got["state_visible"] is True, "'보내지 못했다'가 안 보인다"
+    assert got["state_color"] == rgb(tokens["--danger"]), got["state_color"]
+    assert got["retry_visible"] is True, "재시도가 안 보인다"
+
+    # (8) 입력창이 프롬프트 모양이다 (`윤혁 ▸`).
+    assert "▸" in got["composer_marker"], (
+        f"프롬프트 표식이 없다: {got['composer_marker']!r}"
+    )
+    assert got["composer_author_border"] == "0px", got["composer_author_border"]
+    assert got["composer_author_background"] == "rgba(0, 0, 0, 0)", got
+    assert got["composer_author_color"] == rgb(tokens["--mine-ink"]), got
+    assert got["composer_text_border"] == "0px", got["composer_text_border"]
+    assert got["composer_send_background"] == "rgba(0, 0, 0, 0)", got
+    # ⚠️ 보내기는 **없애지 않는다** — 터치·마우스만 쓰는 사람에게는 유일한 길이다.
+    assert got["composer_send_visible"] is True, "보내기 버튼이 사라졌다"
+
+    # (9) 320px 규율.
+    assert got["overflow"] is False, "가로 스크롤이 생겼다"
+
+
+@needs_browser
+def test_호버가_없는_기기에서는_답장이_상시_보인다(served, tmp_path):
+    """⭐ 터치 기기에는 **호버가 없다** — 감추면 답장에 도달할 방법이 사라진다.
+
+    그래서 `@media (hover: none)` 에서는 상시 노출로 되돌린다. 상시 노출이
+    터미널스럽지 않은 것보다 답장을 못 하는 것이 훨씬 나쁘다.
+
+    판정은 클레임이 아니라 **그 조건을 실제로 만든 브라우저**의 계산값이다 —
+    호버 없는 기기로 흉내 내고(`--blink-settings=…HoverType=1`) 같은 페이지를
+    다시 잰다. 두 실행의 차이가 이 규칙이 실제로 걸린다는 증거다.
+    """
+    import json
+
+    touch = ("--blink-settings=primaryHoverType=1,availableHoverTypes=1,"
+             "primaryPointerType=2,availablePointerTypes=2")
+    got = _tty_probe(served, tmp_path, "default", 900, extra=(touch,))
+    print(f"  [tty · hover:none] {json.dumps(got, ensure_ascii=False)}")
+    assert got["actions_idle_opacity"] == "1", (
+        "호버가 없는 기기인데 답장 버튼이 감춰져 있다 — 도달할 방법이 없다 "
+        f"(opacity {got['actions_idle_opacity']})"
+    )
+    # 자리 계산은 그대로다 (감추기를 투명도로만 했다는 뜻 — 높이가 변하지 않는다).
+    assert got["actions_display"] == "inline", got["actions_display"]
+    assert got["row_height"] <= 24, got["row_height"]
+
+
 READS_CASES = [
     ("bubbles", "default"), ("bubbles", "tty"),
     ("log", "default"), ("log", "log"), ("log", "tui"),
     ("ide", "default"), ("ide", "ide"), ("ide", "tty"),
+    ("tty", "default"), ("tty", "tty"), ("tty", "ide"),
 ]
 
 
@@ -1672,7 +2001,7 @@ def test_읽음_카운트가_세_배치_모든_팔레트에서_보인다(layout,
 
 
 @needs_browser
-@pytest.mark.parametrize("layout", ["bubbles", "log", "ide"])
+@pytest.mark.parametrize("layout", ["bubbles", "log", "ide", "tty"])
 def test_320px_에서도_읽음_표시가_가로_스크롤을_만들지_않는다(layout, served, tmp_path):
     """320px 규율 — 좁은 폭은 미디어 쿼리라 **실제 뷰포트**에서만 재진다.
 

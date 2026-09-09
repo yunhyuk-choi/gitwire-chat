@@ -316,17 +316,26 @@ def test_배치_규칙은_대화_영역에만_걸린다():
     배치 규칙이 사이드바·고르는 칸·상태줄에 손을 대면, 배치가 깨질 때 그것을
     되돌릴 방법이 함께 사라진다 (저장값이 남아 새로고침해도 같은 상태로 뜬다).
     그래서 `[data-chat-layout=…]` 규칙은 **대화 영역 안에서만** 산다.
+
+    ⚠️ **입력창(`.composer`)은 이 목록에서 빠졌다** (`tty` 배치가 그것을 프롬프트
+    모양으로 바꾼다 — `윤혁 ▸`). 이 테스트가 지키려는 것은 "대화 영역 밖을 건드리지
+    말라"가 아니라 **되돌릴 길이 살아 있으라**이고, 되돌리는 길은 사이드바의 고르는
+    칸(+ 초기화 실패 시 자동 폴백)이다. 입력창은 그 길 위에 없다 — 입력창이
+    이상해져도 배치는 되돌릴 수 있다. 반대로 상태줄(`.status`)은 **실패를 말하는
+    자리**라 목록에 남는다.
     """
     css = strip_comments(css_text())
     off_limits = (
         ".sidebar", ".theme-bar", "#theme-select", "#layout-select", ".rooms",
-        ".room-btn", ".room-name", ".status", ".composer", ".brand", ".icon-btn",
+        ".room-btn", ".room-name", ".status", ".brand", ".icon-btn",
         ".add-room", ".search-bar",
     )
     # ⚠️ 떠 있는 머리(`.sticky-head`)는 이 목록에 없다 — 그 규칙에는
     # `data-chat-layout` 이 붙지 않기 때문이다(배치와 무관하게 같은 자리이고,
     # 띄울지 말지는 타임라인이 `hidden` 으로 정한다).
-    allowed = (".msg", ".timeline", ".messages", ".older-sentinel", ".jump")
+    allowed = (
+        ".msg", ".timeline", ".messages", ".older-sentinel", ".jump", ".composer",
+    )
     problems = []
     for line in css.splitlines():
         if "data-chat-layout" not in line:
