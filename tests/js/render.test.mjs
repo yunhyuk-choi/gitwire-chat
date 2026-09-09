@@ -2901,6 +2901,171 @@ await test('읽음 스냅샷을 못 받아도 대화는 그대로 뜬다 (카운
   assert.equal(doc.getElementById('status').textContent.indexOf('초기화 실패'), -1);
 });
 
+/* --------------------- ⭐ 실사용 경로 — 낙관적 전송을 거친 커서 전진
+ *
+ * ⚠️ **기존 테스트가 이 버그를 놓친 이유가 여기 있다.** 위의 읽음 테스트들은
+ * 전부 `msg(N).id`(실제 봉투 ID)를 커서로 기대하거나 `POST /reads` 를 직접
+ * 불렀다. 실사용은 그 앞에 한 단계가 더 있다 — **보내는 중인 낙관적 항목이
+ * 타임라인에 들어 있는 상태**에서 창 스캔이 최대값을 고른다. 임시 ID 는 사전식
+ * 최대값이 되도록 만든 값이라 그 상태에서만 오염이 발생한다.
+ *
+ * 그래서 여기서는 커서를 손으로 넘기지 않는다. `chat.send()` 로 낙관적 항목을
+ * 만들고, 디바운스를 실제로 만료시켜 **POST 로 나가는 몸통**을 검사한다.
+ */
+
+/* boot 의 라우트(특히 `/reads`)를 살린 채, `POST /messages` 만 내가 원할 때
+   응답하는 대역으로 갈아끼운다 — "보내는 중" 상태를 실제로 만들어야 한다. */
+function deferredOverBoot(booted) {
+  const inner = booted.fetchStub;
+  const waiting = [];
+  const fetch = function (path, init) {
+    const opts = init || {};
+    fetch.calls.push({ path, init: opts });
+    if (path.indexOf('/messages') >= 0 && opts.method === 'POST') {
+      return new Promise((resolve) => { waiting.push(resolve); });
+    }
+    return inner(path, init);
+  };
+  fetch.calls = [];
+  fetch.waiting = waiting;
+  fetch.answer = function (body, code) {
+    const resolve = waiting.shift();
+    assert.ok(resolve, '기다리는 POST 가 없다');
+    resolve({ ok: code === undefined || code < 300, status: code || 201,
+      json: () => Promise.resolve(body) });
+    return settle();
+  };
+  booted.context.fetch = fetch;
+  return fetch;
+}
+
+function readPosts(fetch) {
+  return fetch.calls.filter(
+    (c) => c.path.indexOf('/reads') >= 0 && c.init && c.init.method === 'POST'
+  ).map((c) => JSON.parse(c.init.body).cursor);
+}
+
+await test('⭐ 실사용 경로: 보내는 중인 낙관적 항목이 읽음 커서가 되지 않는다', async () => {
+  const booted = await boot();
+  const { doc, chat, context } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);      /* 부팅 몫을 흘려보낸다 */
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  doc.getElementById('text').value = '보내는 중인 말';
+  const sending = chat.send();
+  await settle();
+
+  /* 전제: 낙관적 항목이 **정말로** 타임라인의 최대 ID 다 (이 조건이 없으면
+     테스트가 버그를 재현할 수 없다 — 대조군이 성립하지 않는다). */
+  const ids = chat.items().map((m) => m.id);
+  const temp = ids.filter((id) => id.indexOf('~pending/') === 0);
+  assert.equal(temp.length, 1, '낙관적 항목이 없다 — 실사용 경로를 밟지 못했다');
+  assert.equal(ids.slice().sort().pop(), temp[0], '임시 ID 가 최대값이 아니다');
+  assert.ok(chat.nodes().get(temp[0]), '낙관적 항목이 창 안에 그려지지 않았다');
+
+  /* ⭐ 그 상태에서 디바운스가 만료된다 = 실사용에서 커서가 전진하는 순간. */
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  const posted = readPosts(fetch);
+  for (const cur of posted) {
+    assert.ok(readsMod.isMessageId(cur),
+      '읽음 커서로 실제 봉투 ID 가 아닌 값이 나갔다: ' + cur);
+    assert.equal(cur.indexOf('~'), -1, '임시 ID 가 서버로 나갔다: ' + cur);
+  }
+  /* 커서는 **실제로 본 마지막 봉투**까지만 간다 (조용히 안 보내는 것도 결함이다). */
+  assert.deepEqual(posted, [], '아직 나갈 것이 없다 — 부팅 몫은 이미 흘려보냈다');
+  assert.equal(chat.readsStats().skipped >= 0, true);
+
+  /* 봉투가 도착하면 그 **실제 ID** 로 커서가 전진한다. */
+  const real = msg(30, '보내는 중인 말', '기본이름');
+  await fetch.answer({ message: real });
+  await sending;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const after = readPosts(fetch);
+  assert.deepEqual(after, [real.id],
+    '봉투가 도착했는데 커서가 실제 ID 로 전진하지 않았다: ' + JSON.stringify(after));
+});
+
+await test('⭐ 임시 ID 가 창에 있어도 단조 증가가 굳지 않는다 (실제 ID 로 되돌아온다)', async () => {
+  /* ⚠️ 이것이 이 버그의 **되돌릴 수 없음**이다 — `~`(0x7E) 가 `records/`(0x72)
+     보다 사전식 뒤라 임시 ID 가 한 번 최대값으로 채택되면, 커서가 `max()` 인
+     구조에서는 그 뒤 어떤 실제 ID 도 커서를 움직이지 못한다. 알리는 쪽에서
+     걸러야 하는 이유가 이것이다 (받는 쪽만 막으면 `seenMax` 가 굳는다). */
+  const booted = await boot();
+  const { doc, chat, context } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  doc.getElementById('text').value = '먼저 보내는 말';
+  const sending = chat.send();
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);      /* 오염될 수 있던 순간 */
+  await settle();
+
+  /* 그 뒤 **남의 새 메시지**가 도착한다 (실제 봉투 ID). */
+  chat.appendMessage(msg(40, '남이 한 말'));
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  const posted = readPosts(fetch);
+  assert.ok(posted.indexOf(msg(40).id) >= 0,
+    '임시 ID 때문에 실제 ID 가 커서로 나가지 못했다: ' + JSON.stringify(posted));
+  assert.ok(posted.every((c) => readsMod.isMessageId(c)), JSON.stringify(posted));
+
+  await fetch.answer({ message: msg(30, '먼저 보내는 말', '기본이름') });
+  await sending;
+});
+
+await test('⭐ 오염된 커서(`~pending/…`)를 만나면 카운트가 되살아난다 (복구 경로)', () => {
+  /* 실제 방에 저장돼 있던 그 값이다 (원격까지 올라가 있었다). 서버가 위생을
+     하더라도 화면이 스스로 지켜야 한다 — 그 값이 그대로 들어오면 `cursor < M`
+     이 **모든** 참가자에게 거짓이라 카운트가 조용히 0 이 된다. */
+  const m = { id: msg(2).id, sender: 'a.host' };
+  const dirty = [
+    who('b@x.io', '~pending/000001', ['b.host']),
+    who('c@x.io', '~pending/000004', ['c.host'])
+  ];
+  /* 원본 공식은 오염 값을 "읽었다"로 읽는다 — 그게 이 버그의 조용한 얼굴이다. */
+  assert.equal(readsMod.countUnread(dirty, m), 0, '전제가 깨졌다 (오염이 0 을 만든다)');
+  /* 판정 함수가 그것을 커서로 인정하지 않는다. */
+  assert.equal(readsMod.isMessageId('~pending/000001'), false);
+  assert.equal(readsMod.isMessageId(msg(2).id), true);
+});
+
+await test('⭐ 오염된 스냅샷이 들어와도 화면 카운트가 뜬다 (모델이 떨군다)', async () => {
+  const { chat } = await boot({
+    reads: readsOf([
+      who('me@x.io', '~pending/000004', ['me.host']),
+      who('b@x.io', '~pending/000001', ['b.host'])
+    ], { cursor: '~pending/000004' })
+  });
+  /* 오염 값을 "없음"으로 떨궜으므로 두 사람 다 안 읽은 것으로 세어진다.
+     (조용히 0 이 되는 것보다 과다가 낫다 — 사람이 알아채고 스크롤하면 사라진다.) */
+  assert.equal(readCount(chat.nodes().get(msg(2).id)), '2',
+    '오염된 커서 때문에 카운트가 조용히 사라졌다');
+  assert.equal(chat.reads().cursor, '', '오염된 내 커서를 그대로 들고 있다');
+  assert.deepEqual(chat.reads().participants.map((p) => p.cursor), ['', '']);
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('임시 ID 를 커서로 밀어 넣으려 하면 거부하고 콘솔에 남긴다 (조용한 실패 금지)', async () => {
+  const { chat, context, fetchStub } = await boot();
+  const before = fetchStub.calls.length;
+  assert.equal(chat.markRead('~pending/000009'), false, '임시 ID 를 받아들였다');
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const posted = fetchStub.calls.slice(before).filter(
+    (c) => c.path.indexOf('/reads') >= 0 && c.init && c.init.method === 'POST'
+  ).map((c) => JSON.parse(c.init.body).cursor);
+  assert.deepEqual(posted.filter((c) => c.indexOf('~') === 0), [],
+    '임시 ID 가 서버로 나갔다');
+});
+
 await test('읽음 카운트 자리는 세 배치 모두에 있다 (구조 분기가 새지 않는다)', async () => {
   for (const layout of ['bubbles', 'log', 'ide']) {
     const { doc, chat } = await boot({

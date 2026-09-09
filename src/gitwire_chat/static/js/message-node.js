@@ -86,7 +86,11 @@ export function buildMessage(dom, msg, hooks, layout) {
   readSlots(dom, wrap);
   /* 전송 상태는 구조와 무관하다 — 어느 구조든 같은 함수가 덧입힌다. */
   paintState(dom, wrap, msg, hooks);
-  paintReads(wrap, msg.reads);
+  /* ⚠️ 읽음 카운트는 여기서 그리지 않는다. 한때 `paintReads(wrap, msg.reads)` 가
+     있었는데 **서버는 `reads` 를 싣지 않는다** — 그 숫자는 남의 커서가 움직이면
+     한꺼번에 바뀌는 파생값이라 메시지에 담을 수 없다(`app.py` 의 `/reads` 도크).
+     그래서 그 줄은 언제나 `undefined` 를 그렸고, "서버가 reads 를 안 채운다"는
+     오진의 출처가 됐다. 카운트를 덧입히는 곳은 창을 아는 `timeline.js` 한 곳이다. */
   paintNewFrom(dom, wrap, msg.newFrom === true);
   return wrap;
 }

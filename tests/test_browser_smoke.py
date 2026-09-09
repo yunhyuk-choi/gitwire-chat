@@ -35,14 +35,20 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 from werkzeug.serving import make_server
 
 import gitwire_chat
+from gitwire_chat import reads as reads_mod
 from gitwire_chat.app import create_app
 from gitwire_chat.config import Settings
+from gitwire_chat.events import EventBus
+from gitwire_chat.rooms import RoomManager
+
+from conftest import RecordingNotifier
 
 #: 브라우저 기동에 주는 시간(초). 헤드리스 첫 실행은 프로필을 만드느라 느리다.
 BROWSER_TIMEOUT = 120
@@ -488,11 +494,69 @@ frame.addEventListener('load', function () {
 </script></body></html>"""
 
 
+#: ⭐ **실제 앱**의 읽음 카운트를 회수하는 프로브.
+#:
+#: 왜 `--dump-dom` 이 아닌가: 방이 있는 앱은 **SSE 스트림을 열어 둔다.** 그러면
+#: 문서 로드가 끝나지 않아 `--dump-dom` 이 영원히 돌아오지 않는다(실측 — 120초
+#: 타임아웃). 다른 브라우저 테스트가 이 문제를 안 겪는 이유는 방을 0개로 두어
+#: 스트림이 없기 때문이고, 그래서 그 테스트들로는 읽음 카운트를 원리상 못 잰다.
+#:
+#: 그래서 방향을 뒤집는다 — 페이지가 앱을 iframe 에 띄우고 스스로 화면을 들여다본
+#: 뒤 **결과를 서버로 POST 한다.** 판정 근거는 브라우저가 실제로 그린 DOM 이고,
+#: 서버는 그것을 받아 적기만 한다.
+PROBE_APP_READS = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+</head><body style="margin:0"><script>
+try {
+  localStorage.setItem('gitwire-chat.theme', 'default');
+  localStorage.setItem('gitwire-chat.layout', %(layout)s);
+} catch (e) {}
+var frame = document.createElement('iframe');
+frame.style.cssText = 'width:1024px;height:720px;border:0';
+frame.src = '/';
+document.body.appendChild(frame);
+var tries = 0;
+function snapshot() {
+  var doc = frame.contentDocument;
+  if (!doc) { return { ready: false }; }
+  var slots = doc.querySelectorAll('.msg-reads');
+  var shown = [];
+  for (var i = 0; i < slots.length; i++) {
+    if (!slots[i].hidden) { shown.push(slots[i].textContent); }
+  }
+  return {
+    ready: true,
+    layout: doc.documentElement.getAttribute('data-chat-layout'),
+    messages: doc.querySelectorAll('.msg').length,
+    slots: slots.length,
+    badges: shown,
+    errors: (frame.contentWindow.__probeErrors || []).slice(0, 5)
+  };
+}
+function look() {
+  tries += 1;
+  var out;
+  try { out = snapshot(); } catch (e) { out = { ready: false, error: String(e) }; }
+  out.tries = tries;
+  /* 숫자가 뜨면 바로, 아니면 시간을 다 써 보고 **그 사실 그대로** 보고한다
+     (조용히 성공으로 넘어가지 않는다 — 빈 결과도 결과다). */
+  if ((out.badges && out.badges.length) || tries >= 40) {
+    fetch('/__test__/report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(out)
+    });
+    return;
+  }
+  setTimeout(look, 250);
+}
+setTimeout(look, 400);
+</script></body></html>"""
+
+
 def attach_test_routes(app) -> None:
     """씨앗·측정 페이지를 붙인다. **테스트 안에서만** 존재한다."""
     import json as _json
 
-    from flask import Response
+    from flask import Response, request
 
     def seed(name: str, layout: str = "bubbles"):
         body = SEED_PAGE % {
@@ -531,6 +595,19 @@ def attach_test_routes(app) -> None:
         }
         return Response(body, mimetype="text/html")
 
+    reports: list = []
+    app.test_reports = reports          # 테스트가 여기서 결과를 읽는다
+
+    def appreads(layout: str):
+        body = PROBE_APP_READS % {"layout": _json.dumps(layout)}
+        return Response(body, mimetype="text/html")
+
+    def report():
+        reports.append(request.get_json(silent=True) or {})
+        return Response('{"ok":true}', mimetype="application/json")
+
+    app.add_url_rule("/__test__/appreads/<layout>", "test_appreads", appreads)
+    app.add_url_rule("/__test__/report", "test_report", report, methods=["POST"])
     app.add_url_rule("/__test__/seed/<name>", "test_seed", seed)
     app.add_url_rule("/__test__/seed/<name>/<layout>", "test_seed2", seed)
     app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
@@ -603,6 +680,139 @@ def uncaught_lines(console: str) -> list[str]:
         line for line in console.splitlines()
         if "Uncaught" in line and "chrome-extension://" not in line
     ]
+
+
+@pytest.fixture
+def served_with_room(tmp_path, bare_repo):
+    """⭐ **방이 있는** 앱을 띄운다 — 진짜 git, 진짜 레코드, 진짜 커서 파일.
+
+    다른 브라우저 테스트는 방을 0개로 두어 git 을 안 탄다. 그런데 읽음 카운트는
+    *방 안의 메시지*에 붙는 숫자라 그 상태에서는 원리상 잴 수 없고, 손으로 세운
+    마크업(`PROBE_READS_ROWS`)으로는 **CSS 만** 증명된다 — 실사용에서 무너진 것은
+    CSS 가 아니라 배선이었다(커서가 오염돼 카운트가 언제나 0). 그래서 여기서는
+    실제 앱이 실제 방을 그리게 한다.
+
+    참가자를 하나 더 심어 두는 이유: 카운트는 "**남이** 안 읽은 수"라 나 혼자면
+    정의상 0 이다 (분모가 없다).
+    """
+    settings = Settings(
+        home=tmp_path / "chats",
+        author="브라우저테스트",
+        poll_interval=0.5,
+        notifications=False,
+    )
+    manager = RoomManager(
+        settings, bus=EventBus(keepalive=0.2), notifier=RecordingNotifier()
+    )
+    app = create_app(settings, manager, start=False)
+    attach_test_routes(app)
+    room = manager.register(str(bare_repo))
+    manager.wait_for_connect()
+    assert manager.status(room.id).state == "ready", manager.status(room.id).detail
+    manager.timeline(room.id)                     # = 방을 열었다 (내 커서 파일)
+    manager.send(room.id, "읽음 숫자가 붙어야 하는 말")
+    manager.send(room.id, "두 번째 말")
+    # ⭐ 남 하나 — 그 사람의 발행 커서를 **실제 방에 저장돼 있던 오염 값**으로
+    #    둔다. 이것이 실사용에서 화면이 죽은 상태 그 자체다: `~`(0x7E) 가
+    #    `records/`(0x72) 보다 사전식 뒤라 `cursor(p) < M` 이 거짓이 되고, 그 사람이
+    #    "다 읽은 사람"으로 세어져 카운트가 **0** 이 된다(= 숫자가 아예 안 뜬다).
+    #    새 코드는 이 값을 커서 없음으로 떨궈 안 읽은 것으로 세므로 카운트 = 1 이다.
+    channel = manager.reads(room.id).channel
+    channel.write_state(
+        "bob@example.com",
+        reads_mod.build_value("~pending/000001", ["bob.host"]),
+        identity="bob@example.com",
+    )
+    manager.start()
+    try:
+        with RecordingServer(app) as server:
+            yield server, app
+    finally:
+        manager.stop()
+
+
+def run_until_report(url: str, profile: Path, app, *, seconds: float = 40.0) -> dict:
+    """브라우저를 띄우고 프로브가 보내오는 **한 건**을 회수한다.
+
+    ⚠️ 이 경로는 `--dump-dom` 을 쓸 수 없다 (위 `PROBE_APP_READS` 도크 — 방이 있는
+    앱은 SSE 를 열어 둬서 로드가 끝나지 않는다). 그래서 브라우저를 살려 둔 채
+    **서버에 도착한 보고**를 기다리고, 받으면 브라우저를 끝낸다. 못 받으면 그
+    사실이 곧 실패다 — 여기서 임의로 성공을 만들지 않는다.
+    """
+    profile.mkdir(parents=True, exist_ok=True)
+    argv = [
+        BROWSER,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--enable-logging=stderr",
+        "--log-level=0",
+        "--window-size=1200,900",
+        url,
+    ]
+    # ⚠️ `--virtual-time-budget` 을 주지 않는다 — 프로브가 실시간 타이머로
+    # 화면을 다시 보는데, 가상 시간은 그 폴링을 앞질러 태워 버린다.
+    proc = subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    reports = app.test_reports
+    try:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not reports:
+            time.sleep(0.25)
+    finally:
+        proc.kill()
+        try:
+            _, console = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:      # pragma: no cover — 방어
+            console = ""
+    if not reports:
+        # 조용히 넘어가지 않는다 — 콘솔을 그대로 실어 실패시킨다.
+        raise AssertionError(
+            "브라우저가 화면 보고를 보내지 못했다 (앱이 뜨지 않았거나 프로브가 죽었다)."
+            + chr(10) + "브라우저 콘솔:" + chr(10) + console[-4000:]
+        )
+    bad = uncaught_lines(console)
+    assert not bad, chr(10).join(bad)
+    return reports[0]
+
+
+@needs_browser
+@pytest.mark.parametrize("layout", ["bubbles", "log", "ide"])
+def test_실제_앱에서_읽음_카운트가_세_배치_모두에_보인다(
+    served_with_room, tmp_path, layout
+):
+    """⭐ 실사용 신고를 정면으로 겨냥한다 — "안 읽음 카운트가 UI 에 안 보인다".
+
+    ⚠️ 이 테스트가 없어서 놓쳤다. 손으로 세운 마크업 프로브(`PROBE_READS_ROWS`)는
+    **CSS 만** 봤고, stub DOM 테스트는 커서를 실제 봉투 ID 로 직접 넘겨 줬다. 실제로
+    무너진 지점은 앱이 스스로 커서를 전진시키는 그 사이(낙관적 임시 ID 채택)였고,
+    그 결과 카운트가 언제나 0 이라 세 배치 모두에서 아무 숫자도 뜨지 않았다
+    (`ide` 만의 문제가 아니었다 — 신고가 `ide` 에서 먼저 올라온 것일 뿐이다).
+    """
+    server, app = served_with_room
+    got = run_until_report(
+        server.url + f"__test__/appreads/{layout}",
+        tmp_path / f"profile-{layout}",
+        app,
+    )
+    assert got.get("ready"), got
+    # `bubbles` 는 기본값이라 속성을 찍지 않는다 (다른 프로브도 같은 규약).
+    assert got.get("layout") == (None if layout == "bubbles" else layout), got
+    assert got.get("messages", 0) >= 2, f"메시지가 그려지지 않았다: {got}"
+    assert got.get("slots", 0) >= 2, f"읽음 자리가 없다 ({layout}): {got}"
+    # ⭐ 화면에 **실제로 보이는** 숫자. 남 한 명이 아직 안 읽었으므로 전부 1 이다.
+    #    (그 사람의 발행 커서는 오염 값이다 — 복구 경로가 진짜 브라우저에서 도는지가
+    #     여기서 판정된다. 떨구지 않으면 이 목록이 비고, 그것이 실사용 신고다.)
+    assert got.get("badges"), (
+        f"{layout} 배치에서 읽음 카운트가 화면에 하나도 없다 — 실사용 신고와 같은 상태다:"
+        f" {got}"
+    )
+    assert set(got["badges"]) == {"1"}, got
 
 
 @needs_browser
