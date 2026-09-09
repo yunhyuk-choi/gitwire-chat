@@ -21,6 +21,18 @@
  * 있었는지 정확히 알고 있으므로(`timeline.js` 가 `reads:seen` 으로 알려 준다) 그
  * 최대값을 쓴다. 그리고 **디바운스**한다 — 스크롤 한 번에 push 를 만들지 않는다.
  *
+ * ⚠️⭐ 그 "최대 메시지"에 **낙관적 항목이 섞이면 안 된다** (실측된 전면 고장)
+ * ---------------------------------------------------------------------
+ * 보내는 중인 항목의 임시 ID(`~pending/…`, `composer.js`)는 정렬을 위해 실제 봉투
+ * ID 보다 사전식으로 **뒤**가 되도록 만들었다. 그래서 그것이 창 안에 있으면 언제나
+ * 최대값이고, 그 값이 커서로 채택돼 서버·원격까지 올라갔다. 커서는 단조 증가라
+ * (`max()`) **한 번 오염되면 실제 ID 로 되돌아갈 수 없다** — 그 뒤로 안 읽은
+ * 개수와 방 안 카운트가 영구히 0 이 됐다 (숫자가 아예 화면에 뜨지 않는다).
+ *
+ * 그래서 커서로 받는 값은 **실제 봉투 ID 만**이다 (`isMessageId`). 판정을 세 곳에
+ * 둔다 — 알리는 쪽(`timeline.js`), 받는 쪽(여기 `seen`), 저장하는 쪽(서버
+ * `gitwire_chat/reads.py`, 아니면 HTTP 400). 하나만 두면 새 호출자가 우회한다.
+ *
  * ⭐ 발행은 best-effort 이고 메시지에 양보한다
  * -----------------------------------------
  * POST 는 서버의 로컬 커서만 즉시 움직이고, 원격 push 는 아웃박스가 뒤에서 민다
@@ -42,6 +54,25 @@ import { errText } from './dom.js';
  * 어차피 상대가 그것을 보는 시점은 자기 폴 주기에 묶인다.
  */
 export var MARK_DEBOUNCE_MS = 1200;
+
+/* ⭐ **실제 봉투 ID 인가** — 커서가 받을 수 있는 값의 유일한 판정이다.
+ *
+ * 형식은 기반(gitwire)이 정한다: `records/<날짜8>/<타임스탬프17>-<발신자>-<난수>.json`
+ * (파이썬 쪽 정본은 `gitwire.is_record_id`). 여기서 다시 쓰는 이유는 브라우저가
+ * 그 모듈을 부를 수 없기 때문이고, 둘이 어긋나지 않게 **테스트가 같은 값으로 양쪽을
+ * 검증한다**(`tests/js/render.test.mjs` · `tests/test_reads.py`).
+ *
+ * 앞이 고정폭 타임스탬프라는 성질이 판정의 힘이다 — 임시 ID(`~pending/000004`)나
+ * 아직 아무것도 아닌 값(`''`·`'?'`)은 여기를 통과하지 못한다.
+ */
+var MESSAGE_ID_RE = /^records\/(\d{8})\/(\d{8}T\d{9}Z)-[A-Za-z0-9_.@+]+-[A-Za-z0-9]+\.json$/;
+
+export function isMessageId(value) {
+  if (typeof value !== 'string') { return false; }
+  var m = MESSAGE_ID_RE.exec(value);
+  /* 날짜 칸은 타임스탬프에서 파생된 값이다 — 어긋난 경로는 이 채널이 만든 것이 아니다. */
+  return !!m && m[1] === m[2].slice(0, 8);
+}
 
 /* ⭐ 카운트 공식 — **여기가 유일한 원천**이다 (서버에도, 다른 파일에도 없다).
  *
@@ -92,14 +123,31 @@ export function createReads(env) {
     return !vs || vs === 'visible';
   }
 
+  /* 서버가 준 커서를 그대로 믿지 않는다 — 형식이 아니면 **없음**으로 본다.
+     서버도 같은 위생을 하지만(`gitwire_chat/reads.py`), 화면이 스스로 지키지
+     않으면 구버전 서버·원격에 남은 오염 값 하나가 카운트를 전부 0 으로 만든다.
+     "없음"으로 떨구면 그 사람은 안 읽은 것으로 세어진다 — 과다는 눈에 보이고
+     사라지지만, 조용한 0 은 아무도 못 알아챈다. */
+  function sane(cursor) {
+    return isMessageId(cursor) ? cursor : '';
+  }
+
   function apply(data) {
     if (!data) { return; }
+    var list = data.participants || [];
+    var clean = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (!p) { continue; }
+      clean.push(sane(p.cursor) === (p.cursor || '')
+        ? p : Object.assign({}, p, { cursor: sane(p.cursor) }));
+    }
     model = {
       me: data.me || '',
       person: data.person || '',
-      cursor: data.cursor || '',
+      cursor: sane(data.cursor),
       firstUnread: data.first_unread || null,
-      participants: data.participants || []
+      participants: clean
     };
     stats.applied += 1;
     bus.emit('reads:changed', { roomId: roomId });
@@ -126,6 +174,9 @@ export function createReads(env) {
     var id = pending;
     var room = roomId;
     if (!room || !id) { return; }
+    /* POST 로 나가는 값의 **마지막 관문**. `seen` 이 이미 걸렀지만, 서버에
+       보내는 자리에서 한 번 더 본다 — 오염이 원격까지 올라간 사고였다. */
+    if (!isMessageId(id)) { pending = ''; stats.skipped += 1; return; }
     if (model.cursor && id <= model.cursor) { stats.skipped += 1; return; }
     pending = '';
     /* 내 쪽 낙관적 갱신: 내 커서가 앞으로 갔으므로 내가 세어지던 카운트가
@@ -161,6 +212,16 @@ export function createReads(env) {
   /* 타임라인이 "이것까지 화면에 들어왔다"를 알려 준다. 단조 증가만 받는다. */
   function seen(id) {
     if (!id || !roomId) { return false; }
+    /* ⭐ 커서는 **실제 봉투 ID 만** 받는다. 보내는 중인 낙관적 항목의 임시
+       ID(`~pending/…`)가 여기로 들어와 커서가 됐고, 그것이 사전식 최대값이라
+       단조 증가에 굳어 카운트가 영구히 0 이 됐다 (위 도크). 조용히 넘기지 않고
+       콘솔에 남긴다 — 이 경로로 뭔가 들어오면 그것은 결함이다. */
+    if (!isMessageId(id)) {
+      if (env.console && env.console.warn) {
+        env.console.warn('[gitwire-chat] 읽음 커서로 쓸 수 없는 ID 를 무시했다 — ' + id);
+      }
+      return false;
+    }
     if (!visible()) { return false; }        /* 탭이 안 보이면 읽은 것이 아니다 */
     if (id <= pending) { return false; }
     if (model.cursor && id <= model.cursor) { return false; }

@@ -26,6 +26,9 @@
  */
 
 import { errText, timeLabel } from './dom.js';
+/* 읽음 커서가 받을 수 있는 ID 의 판정. **원천이 하나여야 한다** — 여기서 다시
+   `indexOf('~')` 같은 것을 세면 임시 ID 규약이 바뀌는 날 조용히 어긋난다. */
+import { isMessageId } from './reads.js';
 import {
   buildMessage, paintState, paintHead, paintReads, paintNewFrom,
   senderSlot, grouped, itemGap
@@ -359,7 +362,14 @@ export function createTimeline(env) {
         stats.newFromPainted += 1;
         remeasure.add(msg.id);
       }
-      if (msg.id > maxSeen) { maxSeen = msg.id; }
+      /* ⭐ **낙관적 항목은 읽음 커서의 근거가 될 수 없다.** 보내는 중인 항목의
+         임시 ID 는 정렬을 위해 실제 봉투 ID 보다 사전식 뒤가 되도록 만들었으므로
+         (`composer.js`) 그냥 최대값을 취하면 그것이 채택된다. 실제로 그 값이
+         서버·원격까지 올라가 커서를 굳혔고(단조 증가라 되돌릴 수 없다) 카운트가
+         영구히 0 이 됐다. 그래서 **여기서** 걸러야 한다 — 받는 쪽에서만 막으면
+         `view.seenMax` 가 임시 ID 로 굳어 그 뒤 실제 ID 를 아예 알리지 못한다
+         (같은 함정의 다른 얼굴이다). */
+      if (msg.id > maxSeen && isMessageId(msg.id)) { maxSeen = msg.id; }
       if (remeasure.has(msg.id)) {
         remeasure['delete'](msg.id);
         stats.headRemeasured += 1;
@@ -387,6 +397,10 @@ export function createTimeline(env) {
      발행 판단은 받는 쪽(`reads.js`)의 몫이다. */
   function announceSeen(id) {
     if (!id || !view.roomId) { return; }
+    /* `view.seenMax` 는 단조 증가로 굳는 값이다 — 실제 봉투 ID 가 아닌 값이 여기
+       들어오면 그 뒤의 어떤 실제 ID 도 이 문을 통과하지 못한다. 위 창 스캔이
+       이미 걸렀지만, 굳는 값의 문 앞에서 한 번 더 본다. */
+    if (!isMessageId(id)) { return; }
     if (id <= view.seenMax) { return; }
     view.seenMax = id;
     stats.seenEmitted += 1;

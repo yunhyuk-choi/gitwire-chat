@@ -25,6 +25,8 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
                                            참가자별 커서). **카운트는 담지 않는다** —
                                            브라우저가 커서에서 파생시킨다
     POST /api/rooms/<id>/reads             "여기까지 읽었다" (커서 전진, 낙관적)
+                                           ⭐ **실제 봉투 ID 만** 받는다 — 화면의
+                                           임시 ID 는 400 (`reads.InvalidCursor`)
     GET  /api/rooms/<id>/search?q=          서버측 레코드 검색
     POST /api/rooms/<id>/refresh           폴 주기를 기다리지 않고 즉시 당기기
     POST /api/rooms/<id>/visibility        이 탭이 방을 보고 있나 (알림 판정)
@@ -49,6 +51,7 @@ from flask import (
 
 from . import assets, csrf, events, forges, updaterun
 from .config import Settings, load_settings
+from .reads import InvalidCursor
 from .rooms import RoomError, RoomManager, RoomNotReady
 
 log = logging.getLogger(__name__)
@@ -424,11 +427,18 @@ def create_app(
         ⚠️ 이 응답은 push 를 기다리지 않는다. 내 로컬 커서는 즉시 움직이고(뱃지가
         바로 줄어든다), 남에게 알리는 발행은 아웃박스가 뒤에서 민다 —
         메시지 전송이 읽음 발행 때문에 늦어지지 않는다 (`rooms.mark_read`).
+
+        ⭐ 커서로 받을 수 있는 값은 **실제 봉투 ID 뿐**이다. 화면의 낙관적 임시
+        ID(`~pending/…`)가 여기로 들어와 그대로 저장되고 원격까지 올라간 사고가
+        있었다 — 그래서 **400 으로 거부한다.** 조용히 저장하면 그 값이 항상
+        최대값이라(사전식) 커서가 실제 ID 로 되돌아갈 수 없다 (`reads` 모듈 도크).
         """
         data = request.get_json(silent=True) or request.form or {}
         cursor = str(data.get("cursor") or "")
         try:
             view = manager.mark_read(room_id, cursor)
+        except InvalidCursor as exc:
+            return jsonify({"error": str(exc)}), 400
         except RoomNotReady as exc:
             return jsonify(
                 {"error": str(exc), "status": manager.status(room_id).to_json()}

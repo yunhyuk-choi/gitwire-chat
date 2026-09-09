@@ -770,6 +770,9 @@ class RoomManager:
         ⭐ **내 쪽은 낙관적이다**: 로컬 커서는 즉시 움직이고(그래서 뱃지가 바로
         줄어든다), 남에게 알리는 push 는 뒤에서 나간다. 커서가 안 움직였으면
         발행도 하지 않는다 — 같은 값을 되풀이해 push 하지 않는다.
+
+        ⭐ 실제 봉투 ID 가 아니면 `reads.InvalidCursor` 가 올라간다 (여기서 삼키지
+        않는다 — HTTP 400 이 되어 화면에 드러난다).
         """
         tracker = self.reads(room_id)
         moved = tracker.mark(message_id)

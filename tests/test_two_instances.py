@@ -678,6 +678,104 @@ def test_유령_참가자의_커서는_계속_세어진다(pair, bare_repo):
     assert b.manager.person in {p["key"] for p in view["participants"]}
 
 
+#: 실제 방의 `participants/*.json` 에 **정말로 저장돼 있던** 오염 값. 화면의
+#: 낙관적 항목의 임시 ID 가 커서로 채택돼 원격까지 올라갔다.
+DIRTY_CURSOR = "~pending/000004"
+
+
+@needs_node
+def test_원격에_올라간_오염_커서를_만나도_카운트가_동작한다(pair, bare_repo):
+    """⭐ **복구 경로** — 실제 git 으로, 실제 오염 값으로.
+
+    구버전이 올린 `~pending/…` 이 원격 `participants/` 에 남아 있는 상태다.
+    그 값은 사전식으로 모든 실제 ID 보다 크므로 그대로 쓰면 그 사람은 "다 읽은
+    사람"이 되어 카운트가 **조용히 0** 이 된다 (실측된 고장).
+
+    ⚠️ 사용자 방 파일을 손으로 고치지 않아도 되어야 한다 — 여기서 고치는 것은
+    **코드**이고, 이 테스트는 오염이 남아 있는 채로 카운트가 사는지를 본다.
+    """
+    a, b, repo_url = pair
+    room = a.join(repo_url, "우리 방")
+    b.join(repo_url, "우리 방")
+    a.manager.start()
+    b.manager.start()
+    _open_room(a)
+    _open_room(b)
+    a.settle()
+    b.settle()
+
+    # (1) B 가 **구버전처럼** 오염된 커서를 발행한다 (기반 API 를 직접 쓴다 —
+    #     새 코드의 쓰기 경로는 이제 이 값을 거부하므로 앱으로는 만들 수 없다).
+    channel = b.manager.reads(b.room_id).channel
+    channel.write_state(
+        b.manager.reads(b.room_id).key,
+        reads_mod.build_value(DIRTY_CURSOR, [channel.sender]),
+        identity=b.manager.person,
+    )
+    b.manager.poll_now(b.room_id)
+    b.settle()
+
+    # 지상 검증 — 원격 레포 안에 그 오염 값이 **정말로** 있다.
+    landed = _wait(lambda: (
+        _cursors_in_bare(bare_repo)
+        if _cursors_in_bare(bare_repo).get(b.manager.person) == DIRTY_CURSOR
+        else None
+    ))
+    assert landed is not None, _cursors_in_bare(bare_repo)
+
+    # (2) A 가 말한다. B 의 커서는 오염된 값 그대로다.
+    said = a.say("오염된 커서 옆에서도 세어져야 한다")
+    a.settle()
+
+    view = _wait(lambda: (
+        _reads(a) if len(_reads(a)["participants"]) == 2 else None
+    ))
+    assert view is not None, "A 가 B 의 커서 파일을 보지 못했다"
+    seen = {p["key"]: p["cursor"] for p in view["participants"]}
+    assert seen[b.manager.person] == "", f"오염 값을 커서로 들고 있다: {seen}"
+
+    # ⭐ (3) 카운트가 **1** 이다 — 조용히 0 이 되지 않았다.
+    assert _wait(lambda: _counts(_reads(a), [said]) == [1]),         f"오염된 커서 때문에 카운트가 사라졌다: {_reads(a)['participants']}"
+
+    # (4) 그리고 B 가 실제로 읽으면 정상적으로 0 이 된다 (오염이 굳지 않았다 —
+    #     단조 증가가 `~pending` 을 최대값으로 붙들고 있으면 여기서 막힌다).
+    got = _wait(lambda: [
+        m for m in _timeline_after_poll(b) if m["id"] == said["id"]
+    ])
+    assert got, "B 가 A 의 말을 받지 못했다"
+    _mark(b, said["id"])
+    b.settle()
+    assert _wait(lambda: _cursors_in_bare(bare_repo).get(b.manager.person) == said["id"]),         _cursors_in_bare(bare_repo)
+    assert _wait(lambda: _counts(_reads(a), [said]) == [0]),         f"실제 ID 로 되돌아오지 못했다: {_reads(a)['participants']}"
+
+
+def test_임시_ID_는_실제_git_경로에서도_커서가_되지_않는다(pair, bare_repo):
+    """⭐ 쓰기 문 — 임시 ID 는 400 이고 **원격에 아무것도 남지 않는다.**"""
+    a, b, repo_url = pair
+    a.join(repo_url, "우리 방")
+    b.join(repo_url, "우리 방")
+    a.manager.start()
+    b.manager.start()
+    _open_room(a)
+    _open_room(b)
+    a.settle()
+    b.settle()
+
+    said = a.say("이 말의 카운트가 살아 있어야 한다")
+    a.settle()
+    assert _wait(lambda: [
+        m for m in _timeline_after_poll(b) if m["id"] == said["id"]
+    ])
+
+    res = b.client.post(
+        f"/api/rooms/{b.room_id}/reads", json={"cursor": DIRTY_CURSOR}
+    )
+    assert res.status_code == 400, res.get_data(as_text=True)
+    b.settle()
+    # 지상 검증 — 원격 레포의 B 커서에 그 값이 없다.
+    assert _cursors_in_bare(bare_repo).get(b.manager.person) != DIRTY_CURSOR,         _cursors_in_bare(bare_repo)
+
+
 def test_한_사람_두_기기는_한_파일을_공유한다(tmp_path, bare_repo):
     """같은 사람(같은 이메일)의 노트북·데스크탑 — 참가자는 **한 명**이다.
 

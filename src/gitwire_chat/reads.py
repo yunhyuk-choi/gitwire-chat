@@ -42,6 +42,28 @@
 뒤로 가면 카운트가 **늘어나** 사람 눈에 고장으로 보인다. 그래서 로컬·발행 양쪽
 모두 항상 `max()` 다. 되돌리는 API 를 두지 않는다.
 
+⭐ 커서는 **실제 봉투 ID 만** 받는다 (`gitwire.is_record_id`)
+-----------------------------------------------------------
+단조 증가에는 함정이 하나 있다 — **오염된 값이 최대값이면 되돌릴 수 없다.**
+실측된 사고: 화면의 낙관적 임시 ID(`~pending/000004`)가 커서로 저장돼 원격까지
+올라갔다. `~`(0x7E) 가 `records/`(0x72…) 보다 사전식으로 뒤라 그 값은 **모든**
+실제 ID 보다 크고, 커서가 항상 `max()` 이므로 그 뒤로는 어떤 실제 ID 도 커서를
+전진시키지 못했다. 결과는 조용한 전면 고장이었다:
+
+* 내 뱃지 — `rid <= cursor` 가 모든 레코드에 참이라 **안 읽은 개수가 영구히 0**.
+* 방 안 카운트 — `cursor(p) < M` 이 모든 참가자에게 거짓이라 **영구히 0**
+  (= 아무 숫자도 화면에 뜨지 않는다).
+
+그래서 이 모듈은 커서를 **두 방향에서** 지킨다:
+
+| 방향 | 규율 |
+|---|---|
+| **쓰기** (내가 전진) | 형식을 검증하고 아니면 **거부한다**(`InvalidCursor`). 조용히 저장하지 않는다 — HTTP 400 으로 화면에 드러난다 |
+| **읽기** (저장된 값·남의 값) | 형식이 아닌 값은 **커서 없음으로 취급한다**(`sane_cursor`). 이미 원격에 올라간 오염 값을 사람 손으로 고치지 않아도 다음 순간부터 카운트가 정상으로 돌아온다 |
+
+읽기 쪽을 "없음"으로 떨구는 이유: 안 읽음이 **과다**로 보이는 것은 사람이 알아채고
+스크롤하면 사라진다. 반대(조용히 다 읽음)는 아무도 못 알아챈다.
+
 유령 참가자는 그냥 센다
 ----------------------
 설치했지만 앱을 안 켜는 사람의 커서는 움직이지 않고, 그러면 카운트가 영구히
@@ -79,6 +101,46 @@ MAX_BADGE = 999
 #: 성격이다 — git 신원을 넣을 수 없는 환경(컨테이너)과, 한 머신에서 서로 다른
 #: 사람으로 두 인스턴스를 띄워야 하는 경우(테스트·공용 PC)를 위한 문이다.
 PERSON_ENV = "GITWIRE_CHAT_PERSON"
+
+
+# ⚠️ 커서 형식 판정은 기반이 준다. 그것이 없는 구버전 gitwire 와 섞이면 **조용히**
+# 나빠진다 — `local()` 에서 AttributeError 가 나고, 그것을 삼키는 넓은 except 들이
+# 뱃지를 0 으로 만든다(고치려던 그 증상과 똑같은 화면). 그래서 여기서 **크게**
+# 실패시킨다: 앱이 뜨지 않고, 무엇을 해야 하는지가 메시지에 있다.
+if not hasattr(gitwire, "is_record_id"):  # pragma: no cover — 버전 불일치 방어
+    raise ImportError(
+        "기반(gitwire)이 너무 낮다 — 읽음 커서 형식 판정(`gitwire.is_record_id`)이 "
+        "없다. `python -m gitwire_chat update` 로 함께 올려라."
+    )
+
+
+class InvalidCursor(ValueError):
+    """커서로 받을 수 없는 값이다 (실제 봉투 ID 가 아니다).
+
+    **쓰기 경로에서만** 던진다. 읽기는 관대하게 — `sane_cursor` 가 떨군다.
+    """
+
+
+def sane_cursor(cursor: Any, *, where: str = "") -> str:
+    """읽어 들인 커서를 **믿을 수 있는 값으로만** 좁힌다. 아니면 빈 문자열.
+
+    형식 판정은 ID 의 주인인 기반이 한다 (`gitwire.is_record_id`) — 여기서
+    `records/` 접두를 손으로 세면 두 곳이 어긋난다.
+
+    ⚠️ 조용히 넘기지 않는다 — 떨굴 때마다 로그를 남긴다. 이 값은 원격에 올라가
+    있을 수 있고(다른 참가자·과거 버전의 나), 그 사실을 사람이 알아야 한다.
+    """
+    value = str(cursor or "").strip()
+    if not value:
+        return ""
+    if gitwire.is_record_id(value):
+        return value
+    log.warning(
+        "커서가 실제 봉투 ID 가 아니다 — 커서 없음으로 취급한다%s: %r",
+        f" ({where})" if where else "",
+        value,
+    )
+    return ""
 
 
 def person_id(home=None, *, runner=None) -> str:
@@ -150,6 +212,15 @@ def build_value(cursor: str, senders: Iterable[str]) -> dict:
     }
 
 
+def _state_label(state: Any) -> str:
+    """로그에 쓸 참가자 식별 문자열 (실패해도 절대 던지지 않는다).
+
+    ⚠️ 기반의 `gitwire.state_key`(신원 → 파일명 슬러그)와 **다른 것**이다 —
+    여기 것은 사람이 읽을 라벨뿐이라 이름을 헷갈리지 않게 갈라 둔다.
+    """
+    return str(getattr(state, "identity", "") or getattr(state, "key", "") or "?")
+
+
 def parse_state(state: Any) -> ReadCursor | None:
     """기반의 `ParticipantState` → `ReadCursor`. **절대 예외를 던지지 않는다.**
 
@@ -161,7 +232,10 @@ def parse_state(state: Any) -> ReadCursor | None:
         return None
     if str(value.get("kind") or CURSOR_KIND) != CURSOR_KIND:
         return None
-    cursor = value.get("cursor")
+    # ⭐ 남이 쓴 커서도 **형식이 맞아야** 커서다. 오염된 값(과거 버전이 올린
+    # `~pending/…`)을 그대로 쓰면 그 사람은 "모든 메시지를 읽은 사람"이 되어
+    # 카운트에서 조용히 사라진다 — 없음으로 떨궈 안 읽은 것으로 센다.
+    cursor = sane_cursor(value.get("cursor"), where=f"참가자 {_state_label(state)}")
     senders = value.get("senders")
     if not isinstance(senders, list):
         senders = []
@@ -231,8 +305,14 @@ class ReadTracker:
     # ------------------------------------------------------------- 내 커서
 
     def local(self) -> str:
-        """내가 읽은 위치 (로컬 커서). 없으면 빈 문자열."""
-        return self._store.load().watermark or ""
+        """내가 읽은 위치 (로컬 커서). 없으면 빈 문자열.
+
+        ⭐ 저장된 값이 실제 봉투 ID 가 아니면 **없음으로 취급한다.** 오염된 커서를
+        디스크에서 읽어 올 때가 유일한 복구 지점이다 — 사람이 파일을 고치지 않아도
+        이 순간부터 뱃지가 다시 맞는다. (파일 자체의 정정은 `ensure_local` 이 방을
+        열 때 한 번 한다.)
+        """
+        return sane_cursor(self._store.load().watermark, where="로컬 커서")
 
     def _save_local(self, cursor: str) -> None:
         cur = self._store.load()
@@ -255,7 +335,15 @@ class ReadTracker:
             # 재설정된다 — 그 사이 도착한 남의 메시지가 안 읽음으로 세어지지
             # 않고, 읽음 발행도 "이미 읽었다"며 나가지 않는다 (실측된 사고).
             if cur.started:
-                return cur.watermark or ""
+                good = sane_cursor(cur.watermark, where="로컬 커서")
+                if good != (cur.watermark or ""):
+                    # ⭐ 오염된 값을 **디스크에서도** 지운다. 읽을 때마다 떨구기만
+                    # 하면 경고가 영원히 반복되고, 무엇보다 그 값이 남아 있는 동안
+                    # 다른 소비자가 그것을 그대로 읽을 수 있다. `started` 는 그대로
+                    # 둔다 — 이 방은 이미 시작한 방이라 "지금까지 다 읽음"으로
+                    # 재설정하면 안 읽은 말이 조용히 사라진다.
+                    self._save_local(good)
+                return good
             latest = ""
             if self._seed_latest:
                 ids = self.channel.record_ids(limit=1, fresh=False)
@@ -272,6 +360,12 @@ class ReadTracker:
         message_id = (message_id or "").strip()
         if not message_id:
             return False
+        # ⭐ **실제 봉투 ID 만** 커서가 된다. 조용히 저장하지 않고 거부한다 —
+        # 여기가 오염이 들어오는 유일한 문이었다 (모듈 도크 「커서 형식」).
+        if not gitwire.is_record_id(message_id):
+            raise InvalidCursor(
+                f"읽음 커서는 실제 봉투 ID 여야 한다 (받은 값: {message_id!r})"
+            )
         with self._lock:
             now = self.local()
             if now and message_id <= now:
@@ -331,6 +425,10 @@ class ReadTracker:
                 log.debug("내 커서 파일을 읽지 못했다: %s", exc)
             sender = str(getattr(self.channel, "sender", "") or "")
             senders = set(stored.senders) if stored else set()
+            # 두 값 모두 이미 위생을 통과했다 (`local` · `parse_state`) — 그래서
+            # `max` 가 오염된 값을 최대값으로 집어 올릴 수 없다. 저장된 값이 오염돼
+            # 있었다면 `stored.cursor` 가 "" 이므로 내 실제 커서가 그것을 덮어쓴다
+            # (= 원격의 오염이 다음 발행에 저절로 정정된다).
             candidates = [c for c in (mine, stored.cursor if stored else "") if c]
             cursor = max(candidates) if candidates else ""
             if stored is not None and not force:

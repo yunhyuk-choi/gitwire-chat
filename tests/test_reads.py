@@ -14,11 +14,18 @@
 * **R-6** 남의 커서가 움직이면 **폴 한 틱**에 그것을 알아채고 화면에 알린다
   (레코드가 0건인 변화다 — 구독 콜백은 불리지 않는다). 안 움직였으면 안 민다.
 * **R-7** 발행은 **아웃박스에 얹힌다** (메시지 건수를 오염시키지 않는다).
+* **R-8** ⭐ 커서는 **실제 봉투 ID 만** 받는다 — 화면의 낙관적 임시
+  ID(`~pending/…`)를 밀어 넣으면 **거부**하고(400), 이미 오염된 값을 **읽을 때는**
+  커서 없음으로 취급해 카운트를 되살린다. 실측된 전면 고장의 재발 방지선이다
+  (`reads` 모듈 도크 「커서 형식」).
 """
 
 from __future__ import annotations
 
+import json
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +92,199 @@ def test_모르는_종류의_상태는_건너뛴다():
 
     assert reads_mod.parse_state(State()) is None
     assert reads_mod.parse_state(None) is None
+
+
+# ------------------------- R-8. 커서 형식 (실제 봉투 ID 만)
+
+#: 실제 방(`participants/…json`)에 **정말로 저장돼 있던** 값이다. 화면의 낙관적
+#: 항목의 임시 ID 가 커서로 채택돼 원격까지 올라갔다.
+DIRTY = "~pending/000004"
+
+
+def test_오염된_커서는_사전식으로_모든_실제_ID_보다_크다():
+    """⭐ 이 성질이 고장을 **되돌릴 수 없게** 만든 원인이다 (그래서 먼저 못 박는다).
+
+    커서는 단조 증가(`max`)이므로, 한 번 이 값이 들어가면 어떤 실제 ID 도
+    커서를 전진시키지 못한다 — 안 읽은 개수와 방 안 카운트가 영구히 0 이 된다.
+    """
+    real = "records/20260909/20260909T001442118Z-a-53032f.json"
+    assert DIRTY > real
+    assert not gitwire.is_record_id(DIRTY)
+    assert gitwire.is_record_id(real)
+
+
+def test_기반이_낮으면_크게_실패한다():
+    """⚠️ 구버전 gitwire 와 섞이면 **조용히** 나빠진다 — AttributeError 를 넓은
+    except 들이 삼켜 뱃지가 0 이 되고, 그건 고치려던 증상과 똑같은 화면이다.
+    그래서 모듈을 실을 때 크게 실패시킨다 (무엇을 할지 메시지에 있다).
+
+    ⚠️ `importlib.reload` 로 재현하지 않는다 — 캐시된 모듈을 갈아치우면
+    `InvalidCursor` 클래스 객체가 새로 생겨, 그것을 이미 임포트해 둔 `app.py` 의
+    `except` 가 **다른 클래스**를 잡게 된다(그 자체가 사고다). 그래서 사본을
+    **별도 이름으로** 실어 본다 — 전역을 건드리지 않는다.
+    """
+    import importlib.util
+    import sys
+    import types
+
+    fake = types.ModuleType("gitwire")          # `is_record_id` 가 없는 구버전
+    spec = importlib.util.spec_from_file_location(
+        "_reads_lowbase_probe", reads_mod.__file__
+    )
+    module = importlib.util.module_from_spec(spec)
+    saved = sys.modules["gitwire"]
+    sys.modules["gitwire"] = fake
+    try:
+        with pytest.raises(ImportError) as caught:
+            spec.loader.exec_module(module)
+    finally:
+        sys.modules["gitwire"] = saved
+    assert "gitwire_chat update" in str(caught.value)
+    # 그리고 실제 기반으로는 그대로 실린다 (문을 너무 좁게 닫지 않았다).
+    assert hasattr(gitwire, "is_record_id")
+
+
+def test_임시_ID_는_커서로_받지_않는다_거부한다(manager, fake_opener):
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    recs = [
+        channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": f"{i}"})
+        for i in range(2)
+    ]
+    manager.mark_read(room.id, recs[0].id)
+
+    # ⭐ 조용히 저장하지 않는다 — 던진다.
+    with pytest.raises(reads_mod.InvalidCursor):
+        manager.mark_read(room.id, DIRTY)
+
+    view = manager.read_view(room.id)
+    assert view.cursor == recs[0].id, "임시 ID 가 커서를 덮었다"
+    assert view.unread == 1
+
+
+def test_API_는_임시_ID_를_400_으로_거부한다(manager, fake_opener):
+    app = create_app(manager.settings, manager, start=False)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    rec = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "하나"})
+
+    res = client.post(f"/api/rooms/{room.id}/reads", json={"cursor": DIRTY})
+    assert res.status_code == 400, res.get_data(as_text=True)
+    assert "봉투" in res.get_json()["error"]
+
+    # 그리고 아무것도 저장되지 않았다 — 뱃지는 그대로 1 이다.
+    assert client.get(f"/api/rooms/{room.id}/reads").get_json()["unread"] == 1
+    # 실제 ID 는 그대로 받는다 (문을 너무 좁게 닫지 않았다).
+    assert client.post(
+        f"/api/rooms/{room.id}/reads", json={"cursor": rec.id}
+    ).status_code == 200
+
+
+def test_오염된_로컬_커서는_없음으로_취급되고_파일이_정정된다(manager, fake_opener, caplog):
+    """⭐ 복구 경로 — 사람이 파일을 고치지 않아도 뱃지가 되살아난다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    recs = [
+        channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": f"{i}"})
+        for i in range(3)
+    ]
+
+    # 실제 방과 같은 상태를 만든다 — 오염된 값이 **이미 디스크에** 있다.
+    tracker = manager.reads(room.id)
+    cur = tracker._store.load()
+    cur.watermark = DIRTY
+    cur.started = True
+    tracker._store.save(cur)
+
+    with caplog.at_level("WARNING"):
+        # 오염된 값이면 `rid <= cursor` 가 모든 레코드에 참이라 0 이 됐었다.
+        assert manager.read_view(room.id).unread == 3
+    assert "봉투 ID" in caplog.text, "조용히 넘어갔다 (로그가 없다)"
+
+    # 방을 다시 열면 **파일 자체가** 정정된다 (경고가 영원히 반복되지 않게).
+    manager.enter_room(room.id)
+    assert tracker._store.load().watermark == ""
+    assert tracker._store.load().started is True, "'지금까지 다 읽음'으로 재설정됐다"
+
+    # 그리고 그 뒤 실제 ID 로 정상 전진한다 (단조 증가가 굳지 않았다).
+    assert manager.mark_read(room.id, recs[1].id).cursor == recs[1].id
+    assert manager.read_view(room.id).unread == 1
+
+
+def test_남의_오염된_커서는_안_읽은_것으로_센다(manager, fake_opener):
+    """⭐ 조용한 0 보다 과다가 낫다 — 과다는 사람이 알아채고 사라진다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    channel.inject_state("bob@example.com", reads_mod.build_value(DIRTY, ["bob.host"]))
+
+    view = manager.read_view(room.id)
+    bob = [p for p in view.participants if p.key == "bob@example.com"]
+    assert bob and bob[0].cursor == "", "오염된 커서를 그대로 들고 있다"
+
+
+def test_내_발행이_원격의_오염을_덮어쓴다(manager, fake_opener):
+    """오염이 내 파일에 올라가 있어도 다음 발행에 저절로 정정된다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    rec = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "하나"})
+    channel.inject_state(
+        gitwire.state_key(manager.person),
+        reads_mod.build_value(DIRTY, [channel.sender]),
+    )
+
+    manager.mark_read(room.id, rec.id)
+    stored = reads_mod.parse_state(channel.read_state(gitwire.state_key(manager.person)))
+    assert stored is not None and stored.cursor == rec.id, "오염된 값이 살아남았다"
+
+
+def test_형식_판정이_화면과_서버에서_같다():
+    """⭐ 판정이 두 곳(파이썬 `gitwire.is_record_id` · JS `reads.js`)에 있으므로
+    **같은 표본으로 양쪽을 검증한다.** 어긋나면 한쪽만 막히고 오염이 다시 샌다.
+    """
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        pytest.skip("node 가 없다 — 화면 쪽 판정을 부를 수 없다")
+    samples = [
+        "records/20260909/20260909T001442118Z-yh.choi@interxlab.com.c587c2-53032f.json",
+        "records/20260903/20260903T100000123Z-alice-abc123.json",
+        "records/20260903/20260903T100000123Z-alice+tag-abc123.json",
+        DIRTY,
+        "~pending/000001",
+        "",
+        "?",
+        "records/",
+        "archive/20260903.jsonl",
+        "participants/alice@x.io.json",
+        "records/20260904/20260903T100000123Z-a-abc123.json",
+        "records/20260903/20260903T100000123Z-a-abc123.txt",
+    ]
+    script = (
+        "import { isMessageId } from "
+        f"{json.dumps(_reads_js_url())};"
+        "let raw='';process.stdin.on('data',(c)=>raw+=c).on('end',()=>{"
+        "process.stdout.write(JSON.stringify(JSON.parse(raw).map(isMessageId)));});"
+    )
+    proc = subprocess.run(
+        [node_bin, "--input-type=module", "-e", script],
+        input=json.dumps(samples), capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [gitwire.is_record_id(x) for x in samples]
+
+
+def _reads_js_url() -> str:
+    path = (
+        Path(reads_mod.__file__).resolve().parent / "static" / "js" / "reads.js"
+    )
+    return path.as_uri()
 
 
 # --------------------------------- R-2. 참가자 집합 = 커서 파일 집합
