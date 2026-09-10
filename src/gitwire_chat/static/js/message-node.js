@@ -51,7 +51,9 @@ export function senderSlot(name) {
 
 /* 이름 → 구조. 레이아웃 테마의 열쇠는 `theme.js` 의 `LAYOUTS` 와 같아야 한다
    (그 일치는 `tests/test_theme.py` 가 확인한다). */
-export var STRUCTURES = { bubbles: buildBubble, log: buildLogRow, ide: buildIdeRow };
+export var STRUCTURES = {
+  bubbles: buildBubble, log: buildLogRow, ide: buildIdeRow, tty: buildTtyRow
+};
 
 /* ⭐ **묶는 구조인가** — 같은 사람이 연달아 말하면 발신자 머리를 한 번만 찍는가.
    구조가 정하는 성질이라 구조 표와 **같은 자리**에 둔다. 타임라인은 이름으로
@@ -68,8 +70,11 @@ export function grouped(layout) {
    그래서 구조가 아는 값을 여기 표에 두고 타임라인이 이름으로 조회한다.
 
    `ide` 만 작다: 한 묶음 안의 줄은 **붙어 있어야** 왼쪽 레일이 끊기지 않는다.
-   묶음 **사이**의 간격은 머리가 붙는 줄의 위쪽 여백이 대신 벌려 준다(CSS). */
-export var GAPS = { bubbles: 6, log: 6, ide: 2 };
+   묶음 **사이**의 간격은 머리가 붙는 줄의 위쪽 여백이 대신 벌려 준다(CSS).
+
+   `tty` 는 **0** 이다 — 터미널은 줄 사이에 간격이 없다. 간격을 주는 순간 그게
+   "항목이 카드다"라는 신호가 되고, 이 배치가 버리려는 것이 정확히 그것이다. */
+export var GAPS = { bubbles: 6, log: 6, ide: 2, tty: 0 };
 
 export function itemGap(layout) {
   return GAPS[layout] === undefined ? GAPS.bubbles : GAPS[layout];
@@ -211,6 +216,78 @@ function buildLogRow(dom, msg, hooks) {
   /* 초는 별도 조각 — 좁은 폭에서 CSS 가 이것만 숨긴다. */
   when.appendChild(dom.make('span', 'sec', parts ? parts.sec : ''));
   wrap.appendChild(when);
+
+  wrap.appendChild(dom.make('span', 'author', msg.author));
+
+  var line = dom.make('div', 'line');
+  if (msg.reply_to) {
+    var quote = dom.make('div', 'quote');
+    var target = hooks.lookup ? hooks.lookup(msg.reply_to) : null;
+    dom.setText(quote, '↩ ' + (target ? target.author + ': ' + target.text : '이전 메시지'));
+    line.appendChild(quote);
+  }
+  line.appendChild(dom.make('div', 'body', msg.text));
+
+  var actions = dom.make('div', 'msg-actions');
+  var reply = dom.make('button', 'link', '답장');
+  reply.setAttribute('type', 'button');
+  reply.addEventListener('click', function () { hooks.onReply(msg); });
+  actions.appendChild(reply);
+  line.appendChild(actions);
+
+  var slot = dom.make('div', 'msg-state');
+  line.appendChild(slot);
+  wrap.stateSlot = slot;
+  wrap.appendChild(line);
+  return wrap;
+}
+
+/* 프롬프트 줄 구조 (배치 `tty`) — **터미널 한 줄**이다.
+ *
+ * ⭐ 이 배치가 `log` 과 다른 점은 색이 아니라 **버리는 것**이다. 카드(둥근 모서리·
+ * 바닥·테두리·폭 제한)와 상시 노출 버튼을 버린다 — 사용자가 "터미널스럽지 않다"고
+ * 말한 것의 실체가 그 둘이었다. 버리는 일 자체는 CSS 가 하고(그래서 이 함수는
+ * `log` 과 거의 같다), 여기서 다른 것은 조각이 하나 더 있는 것뿐이다:
+ *
+ *   시각 · `▸` · 발신자 · 본문   ← 한 줄로 흐른다 (격자가 아니다)
+ *
+ * ⚠️ `▸` 는 **꾸밈**이라 `aria-hidden` 을 붙인다. 스크린 리더가 메시지마다
+ * "검은 오른쪽 삼각형"을 읽으면 프롬프트 흉내가 낭독을 망친다. CSS 의
+ * `content:` 로 넣으면 그 제어를 못 하므로(가상 요소에는 `aria-hidden` 이 없다)
+ * 굳이 진짜 요소로 만든다 — 이 한 가지가 `log` 을 재사용하지 않는 이유다.
+ *
+ * 말풍선·log·ide 과 **같은 조각들**을 쓴다(`.body`·`.quote`·`.msg-actions`·
+ * `.msg-state`). 그래서 답장 인용·"보내는 중"·전송 실패·재시도가 배치와 무관하게
+ * 그대로 살고, 상태를 덧입히는 함수도 하나로 유지된다.
+ *
+ * ⭐ **답장 버튼은 지우지 않는다.** 터미널에 버튼이 없다는 것은 "상시 보이지
+ * 않는다"는 뜻이고, "도달할 수 없다"는 뜻이 아니다. 그래서 DOM·탭 순서·스크린
+ * 리더에는 그대로 있고, **평소 안 보이게 하는 일만** CSS 가 한다 (호버·초점에
+ * 드러나고, 호버가 없는 기기에서는 상시 보인다 — style.css 의 그 구역 도크).
+ * ⚠️ 그 감추기는 **자리를 비우지 않는다**(투명하게 만든다) — 드러날 때 줄 높이가
+ * 바뀌면 가상 스크롤이 그 항목을 다시 재야 하고, 호버는 매우 잦다.
+ */
+function buildTtyRow(dom, msg, hooks) {
+  var wrap = dom.make('article', 'msg');
+  wrap.dataset.id = msg.id;
+  wrap.setAttribute('data-id', msg.id);
+  /* 발신자 색 슬롯 (log·ide 과 같은 규칙 — JS 는 색을 모른다. 시안의 단색 초록은
+     사람이 늘면 이름만으로 훑게 되므로, 팔레트가 가진 6슬롯을 그대로 쓴다). */
+  wrap.setAttribute('data-sender', String(senderSlot(msg.author)));
+
+  var parts = timeParts(msg.ts);
+  var when = dom.make('time', 'ts');
+  when.appendChild(dom.make('span', 'hm', parts ? parts.head : ''));
+  /* 초는 별도 조각 — 이 배치에서는 CSS 가 늘 숨긴다(프롬프트 줄은 짧아야 한다).
+     조각을 없애지 않는 이유는 `log` 과 같은 구조를 유지하는 값이 더 크기
+     때문이다 — 좁은 폭 규칙도, 읽음·구분선 배선도 그 덕에 그대로 쓴다. */
+  when.appendChild(dom.make('span', 'sec', parts ? parts.sec : ''));
+  wrap.appendChild(when);
+
+  /* 프롬프트 표식. 뜻은 없고 모양만 있다 — 그래서 낭독에서 뺀다. */
+  var mark = dom.make('span', 'prompt', '▸');
+  mark.setAttribute('aria-hidden', 'true');
+  wrap.appendChild(mark);
 
   wrap.appendChild(dom.make('span', 'author', msg.author));
 

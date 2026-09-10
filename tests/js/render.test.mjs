@@ -1527,7 +1527,7 @@ function layoutAttr(doc) {
 
 await test('구조 분기는 한 곳이고, 모르는 레이아웃 이름은 기본으로 떨어진다', () => {
   const names = Object.keys(nodeMod.STRUCTURES);
-  assert.deepEqual(names, ['bubbles', 'log', 'ide'], '구조 표가 달라졌다: ' + names);
+  assert.deepEqual(names, ['bubbles', 'log', 'ide', 'tty'], '구조 표가 달라졌다: ' + names);
   /* 구조가 아는 나머지 두 표(묶는가 · 항목 간격)도 **같은 이름 공간**을 쓴다.
      어긋나면 "구조는 있는데 묶기·간격이 없는" 배치가 생긴다. */
   for (const name of Object.keys(nodeMod.GROUPED)) {
@@ -1796,6 +1796,108 @@ await test('log 배치에서도 답장 인용·보내는 중·재시도가 산�
   await sending;
   assert.ok(bubble.textContent.includes('보내지 못했다'));
   assert.ok(findByClass(bubble, 'retry'), '재시도가 없다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+/* ------------------------------------------- 배치 `tty` — 프롬프트 줄 */
+
+/*
+ * ⭐ 여기서 지키는 것은 "터미널처럼 보이나"가 아니다 — 그건 CSS 의 계산된 값으로
+ * 봐야 하고 `tests/test_browser_smoke.py` 가 본다 (stub DOM 에는 CSS 가 없다).
+ * 여기서 보는 것은 **구조**다: 조각이 무엇이고, 그 조각들 덕분에 살아 있는
+ * 기능(읽음·구분선·인용·전송 상태·재시도)이 배치와 무관하게 그대로 도는가.
+ *
+ * ⚠️ 그리고 **답장 버튼이 DOM 에서 사라지지 않았나.** 이 배치의 요구는 "상시
+ * 노출하지 말라"였고 "없애라"가 아니었다 — 없애면 키보드·스크린 리더·터치에서
+ * 답장이 불가능해진다. 감추는 일은 CSS 가 투명도로만 하고, 그 사실을 여기서
+ * 구조로 못 박는다.
+ */
+
+await test('tty 배치로 뜨면 프롬프트 줄로 그려진다 (시각 · ▸ · 발신자 · 본문)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'tty';
+  const { doc, chat } = await boot({
+    stored: stored,
+    messages: [msg(1, '첫 줄', '앨리스'), mineMsg(2, '내 줄')]
+  });
+  assert.equal(chat.layout(), 'tty');
+  assert.equal(layoutAttr(doc), 'tty', '루트 표식이 없다 — CSS 가 안 걸린다');
+
+  const rows = doc.getElementById('messages').children;
+  assert.equal(rows.length, 2);
+  const row = rows[0];
+  /* 네 조각 + 읽음 카운트 자리(마지막·절대 위치라 순서가 화면에 영향 없다). */
+  assert.deepEqual(row.children.map((c) => String(c.className)),
+    ['ts', 'prompt', 'author', 'line', 'msg-reads']);
+  assert.equal(row.children[2].textContent, '앨리스');
+  /* ⚠️ 프롬프트 표식은 **뜻이 없는 꾸밈**이다 — 낭독에서 빠져야 한다. 빼지 않으면
+     스크린 리더가 메시지마다 삼각형을 읽어 대화를 따라갈 수 없다. */
+  assert.equal(row.children[1].textContent, '▸');
+  assert.equal(row.children[1].getAttribute('aria-hidden'), 'true',
+    '프롬프트 표식이 낭독에 노출된다');
+  /* 시각 조각은 `log` 과 같다 (초 조각은 남기고 CSS 가 숨긴다) — 그래서 좁은 폭
+     규칙도, 읽음·구분선 배선도 그대로 쓴다. */
+  const when = row.children[0];
+  assert.deepEqual(when.children.map((c) => String(c.className)), ['hm', 'sec']);
+  /* 내 것은 **위치가 아니라** 클래스로 갈린다 (줄 기반에서 좌우는 성립하지 않는다). */
+  assert.equal(isMine(rows[1]), true);
+  /* 발신자 색 슬롯 — 시안의 단색 초록이 아니라 팔레트의 6슬롯을 쓴다. */
+  assert.equal(row.getAttribute('data-sender'), String(nodeMod.senderSlot('앨리스')));
+  /* 터미널은 촘촘하다 — 항목 사이 간격이 0 이다 (가상화가 더하는 값이라 JS 가 안다). */
+  assert.equal(nodeMod.itemGap('tty'), 0);
+  assert.equal(nodeMod.grouped('tty'), false, 'tty 는 묶는 구조가 아니다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+  assert.equal(doc.counts.innerHTML, 0);
+});
+
+await test('⭐ tty 배치에서도 답장 버튼은 DOM 에 남아 있다 (감추는 것은 CSS 뿐)', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'tty';
+  const { doc, chat } = await boot({ stored: stored, messages: [msg(1, '어떤 말')] });
+  const row = doc.getElementById('messages').children[0];
+  const actions = findByClass(row, 'msg-actions');
+  assert.ok(actions, '답장 자리가 통째로 사라졌다');
+  const button = findByClass(actions, 'link');
+  assert.ok(button, '답장 버튼이 없다 — 키보드·터치에서 답장이 불가능해진다');
+  assert.equal(String(button.tagName).toLowerCase(), 'button',
+    '답장이 버튼이 아니다 (탭 순서에서 빠진다)');
+  assert.equal(button.getAttribute('type'), 'button');
+  assert.notEqual(button.hidden, true, '답장 버튼이 hidden 이다 (초점에서 빠진다)');
+  assert.equal(button.textContent, '답장');
+  /* 눌리면 실제로 답장 대상이 잡힌다 — 보이지 않는 것과 죽은 것은 다르다. */
+  button.dispatch('click');
+  await settle();
+  assert.equal(doc.getElementById('reply-chip').hidden, false,
+    '답장 버튼을 눌렀는데 답장 대상이 잡히지 않았다');
+  assert.equal(chat.stats.rebuiltInView, 0);
+});
+
+await test('tty 배치에서도 답장 인용·보내는 중·재시도가 산다', async () => {
+  const stored = {};
+  stored[LAYOUT_KEY] = 'tty';
+  const quoted = msg(1, '원래 말', '앨리스');
+  const reply = msg(2, '답장이다', '밥');
+  reply.reply_to = quoted.id;
+  const { doc, chat, context } = await boot({
+    stored: stored, messages: [quoted, reply]
+  });
+  const rows = doc.getElementById('messages').children;
+  /* 인용은 본문 줄(`.line`) 안 맨 앞이다 — 다른 배치와 같은 조각이다. */
+  const line = rows[1].children[3];
+  assert.equal(String(line.children[0].className), 'quote');
+  assert.ok(line.children[0].textContent.includes('앨리스: 원래 말'), '인용이 비었다');
+
+  /* 낙관적 전송 → 실패 → 재시도가 같은 노드 위에서 돈다 (구조와 무관하다). */
+  context.fetch = deferredFetch();
+  doc.getElementById('text').value = '보내는 중이 보여야 한다';
+  const sending = chat.send();
+  await settle();
+  const row = doc.getElementById('messages').children[2];
+  assert.ok(row.textContent.includes('보내는 중'), '보내는 중이 안 보인다');
+  await context.fetch.answer({ error: '원격이 죽었다' }, 500);
+  await sending;
+  assert.ok(row.textContent.includes('보내지 못했다'));
+  assert.ok(findByClass(row, 'retry'), '재시도가 없다');
   assert.equal(chat.stats.rebuiltInView, 0);
 });
 
@@ -3066,8 +3168,8 @@ await test('임시 ID 를 커서로 밀어 넣으려 하면 거부하고 콘솔�
     '임시 ID 가 서버로 나갔다');
 });
 
-await test('읽음 카운트 자리는 세 배치 모두에 있다 (구조 분기가 새지 않는다)', async () => {
-  for (const layout of ['bubbles', 'log', 'ide']) {
+await test('읽음 카운트 자리는 네 배치 모두에 있다 (구조 분기가 새지 않는다)', async () => {
+  for (const layout of ['bubbles', 'log', 'ide', 'tty']) {
     const { doc, chat } = await boot({
       stored: { 'gitwire-chat.layout': layout },
       reads: readsOf([who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])])

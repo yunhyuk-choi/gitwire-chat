@@ -100,11 +100,23 @@ class Busy(Exception):
 
 
 class Unmanaged(Exception):
-    """이 인스턴스가 대장에 없다 — 화면에서 갱신하면 섞인 상태가 된다."""
+    """이 인스턴스가 대장에 없다 — 화면에서 갱신하면 섞인 상태가 된다.
+
+    ⚠️ **원인을 단정하지 않는다.** 한때 이 문구가 "서버가 뜰 때 자기를 대장에 적지
+    못했다(읽기전용·권한 없음)"고 말했는데, 실사용에서 그 진단은 틀렸다 — 훨씬 흔한
+    원인은 **돌고 있는 서버가 그 기능이 없던 옛 버전**인 것이다 (파일은 갱신됐어도
+    프로세스는 뜰 때의 코드로 계속 돈다). 틀린 단정은 사람을 권한 조사로 보내고,
+    정작 필요한 한 가지(앱을 다시 띄우기)를 못 하게 만든다.
+
+    그래서 문구는 (1) **가장 흔한 원인부터** 말하고 (2) 대장의 **실제 상태**로 두
+    경우를 가른다 — 적힌 것이 하나도 없는 것과, 적혀 있는데 이 pid 가 아닌 것은
+    원인이 다르다 (`Launcher.unmanaged_hint`).
+    """
 
     def __init__(self, hint: str) -> None:
         super().__init__(
-            "이 인스턴스가 돌고 있는 인스턴스 대장에 없다 — 화면에서 갱신할 수 없다"
+            "돌고 있는 이 앱이 인스턴스 대장에 없다 — 화면에서는 갱신할 수 없다 "
+            "(앱을 다시 띄우면 풀릴 가능성이 크다)"
         )
         self.hint = hint
 
@@ -235,6 +247,54 @@ class Launcher:
                 return instance
         return None
 
+    def unmanaged_hint(self) -> str:
+        """대장에 내가 없을 때 사람에게 할 말. **대장의 실제 상태로 갈린다.**
+
+        두 경우는 원인이 다르므로 다른 말을 한다:
+
+        * **적힌 것이 하나도 없다** — 옛 버전으로 돌고 있거나(대장에 적는 기능이
+          없던 버전), 대장을 아예 쓸 수 없는 환경이다. 서버 로그에 "대장을 쓰지
+          못했다" 경고가 있으면 후자다 (`runstate.record` 가 남긴다).
+        * **적혀 있는데 이 pid 가 아니다** — 쓰기는 **되는** 환경이라는 뜻이므로
+          권한은 거의 아니다. 그 항목은 다른 인스턴스이거나 먼저 죽은 프로세스의
+          잔재이고, 이 앱은 자기를 적지 않는 옛 버전으로 떠 있을 가능성이 크다.
+
+        어느 쪽이든 **먼저 할 일은 같다 — 앱을 다시 띄우는 것**이다. 그래서 그것을
+        앞에 놓고, 권한 이야기는 "다시 띄워도 같으면" 뒤로 보낸다. 안내는 OS 를
+        가리지 않는다 (이 앱은 Windows·macOS·리눅스에서 돈다).
+        """
+        others = runstate.load_all(directory=self._directory)
+        me = os.getpid()
+        common = (
+            "가장 흔한 원인은 돌고 있는 서버가 이 기능이 없던 옛 버전인 것이다 — "
+            "파일이 갱신돼도 프로세스는 뜰 때의 코드로 계속 돈다."
+        )
+        restart = (
+            "앱을 껐다 다시 띄우면 지금 프로세스가 자기를 대장에 적는다 — "
+            "터미널에서 띄웠으면 그 창에서 Ctrl+C 로 멈추고 다시 "
+            "`python -m gitwire_chat`, 아이콘·자동 시작으로 떠 있으면 그 앱을 "
+            "종료한 뒤 같은 방법으로 띄운다."
+        )
+        cli = (
+            "그래도 같으면 터미널에서 갱신해라 — CLI 가 무엇이 걸리는지 말해 준다:"
+            "  python -m gitwire_chat update"
+        )
+        if others:
+            listed = ", ".join(f"포트 {i.port}(pid {i.pid})" for i in others[:4])
+            first = (
+                f"대장에는 {listed} 가 적혀 있는데 지금 이 프로세스(pid {me})는 없다. "
+                f"{common} 대장에 쓰기는 되고 있으니 권한 문제는 아닐 것이다."
+            )
+            return "\n".join([first, restart, cli])
+        first = (
+            f"대장에 적힌 인스턴스가 하나도 없다 (그 폴더: {self.run_dir}). {common}"
+        )
+        permission = (
+            "다시 띄워도 같은 말이 나오면 그때는 대장을 쓸 수 없는 환경일 수 있다 "
+            "(읽기전용·권한 없음) — 서버 로그의 \"대장을 쓰지 못했다\" 경고가 그 증거다."
+        )
+        return "\n".join([first, restart, permission, cli])
+
     # ------------------------------------------------------------ 자물쇠
 
     def _read_lock(self) -> Run | None:
@@ -292,13 +352,7 @@ class Launcher:
             if live is not None:
                 raise Busy(live)
             if self.self_recorded() is None:
-                raise Unmanaged(
-                    "서버가 뜰 때 자기를 대장에 적지 못했다(읽기전용·권한 없음). "
-                    "그 상태로 갱신하면 이 앱은 멈춰지지도 다시 띄워지지도 않고, "
-                    "옛 파이썬 코드로 새 정적 파일을 서빙하는 섞인 상태가 된다.\n"
-                    "터미널에서 갱신하면 CLI 가 무엇이 걸리는지 말해 준다:\n"
-                    "  python -m gitwire_chat update"
-                )
+                raise Unmanaged(self.unmanaged_hint())
             argv = self.command()
             run = Run(
                 launcher_pid=os.getpid(),
