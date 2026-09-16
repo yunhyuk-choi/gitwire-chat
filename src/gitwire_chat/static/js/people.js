@@ -36,7 +36,6 @@ export function createPeople(env) {
     count: dom.$('people-count'),
     countN: dom.$('people-count-n'),
     card: dom.$('user-card'),
-    cardDot: dom.$('user-card-dot'),
     cardName: dom.$('user-card-name'),
     cardStatus: dom.$('user-card-status'),
     cardRead: dom.$('user-card-read')

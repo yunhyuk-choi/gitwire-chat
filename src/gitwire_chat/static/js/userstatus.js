@@ -83,7 +83,6 @@ export function createUserStatus(env) {
 
   var el = {
     btn: dom.$('my-status'),
-    dot: dom.$('my-status-dot'),
     label: dom.$('my-status-label'),
     menu: dom.$('my-status-menu')
   };
