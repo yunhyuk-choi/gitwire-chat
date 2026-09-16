@@ -1301,11 +1301,9 @@ a.button {
 .status-option:hover { background: var(--bg); }
 .status-option.on { background: var(--accent); color: var(--accent-ink); }
 
-/* 참여자 요약 버튼 — 서랍의 **발견성**을 담당한다 (제목 클릭은 지름길일 뿐이다). */
-.people-btn { display: flex; align-items: center; gap: 3px; font-size: 13px; }
-
-/* ⭐ 제목도 서랍을 연다. 누를 수 있다는 것이 **보여야** 한다 — 안 보이면 없는
-   기능과 같다. 색을 바꾸지 않고 밑줄만 준다 (제목은 강조가 아니다). */
+/* ⭐ **방 이름이 서랍을 여는 유일한 길이다.** 누를 수 있다는 것이 보여야 한다 —
+   안 보이면 없는 기능과 같다. 색을 바꾸지 않고 밑줄만 준다 (제목은 강조가 아니다).
+   초점 링은 전역 `:focus-visible` 이 그린다 — 키보드로도 같은 길을 쓴다. */
 #room-title { cursor: pointer; }
 #room-title:hover { text-decoration: underline; }
 
@@ -1327,19 +1325,70 @@ a.button {
   border-bottom: 1px solid var(--line);
 }
 .people-title { flex: 1; margin: 0; font-size: 15px; }
-.people-list { flex: 1; margin: 0; padding: 6px; list-style: none; overflow-y: auto; min-height: 0; }
-.person {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 7px 8px;
-  border-radius: var(--radius);
+.people-list {
+  flex: 1;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  overflow-y: auto;
+  /* ⚠️ 가로는 **스크롤되지 않는다.** 여기 들어오는 이름은 이메일처럼 공백 없는 긴
+     문자열이라, 가로 스크롤이 생기면 사람이 그것을 끌어야 이름을 다 볼 수 있다.
+     넘칠 일 자체를 아래 격자가 없애고, 이 줄은 그 규율을 못 박는 자리다. */
+  overflow-x: hidden;
+  min-height: 0;
 }
+
+/* ⭐ 서랍 한 줄과 정보 카드는 **같은 격자**를 쓴다 (한 번 고치면 둘 다 고쳐진다):
+ *
+ *     ● │ 이름(남는 폭 전부)     │ 상태
+ *       │ 마지막으로 읽은 시각        (둘째 줄, 2~끝 칸)
+ *
+ * ⚠️ **flex 가 아니라 grid 인 이유** (실측된 결함 두 개를 동시에 없앤다):
+ *   1. flex 에서는 `flex: 0 0 100%` 인 셋째 조각이 `flex-wrap` 없이는 자기 줄로
+ *      내려가지 못한다 — 넘쳐서 윗줄과 **겹쳤다.** 격자는 줄을 구조로 정한다.
+ *   2. `minmax(0, 1fr)` 은 이름 칸의 **최소 폭 바닥(min-content)을 없앤다.** flex
+ *      에서는 `overflow-wrap: anywhere` 가 min-content 를 1글자로 만들고, 그러면
+ *      이름 칸이 형제(상태)에게 자리를 다 내주며 **한 글자씩 세로로 쏟아졌다.**
+ */
+.person,
+.user-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 6px;
+}
+.person { padding: 7px 8px; border-radius: var(--radius); }
 .person:nth-child(odd) { background: var(--stripe); }
-.person-name { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+/* ⚠️ 이름은 `anywhere` 가 아니라 **`break-word`** 로 감싼다. 둘 다 긴 단어를
+   쪼개지만, `anywhere` 만 **min-content 계산에 끼어든다** — 그것이 위 2번 사고의
+   원인이었다. 그리고 `word-break` 도 되돌린다: 이 앱은 `body` 에서 그것을
+   `break-word` 로 물려주는데, 그 값은 `anywhere` 와 같은 효과를 낸다(상속으로
+   사고가 되살아난다). 줄바꿈 자체는 **반드시 필요하다** — 공백 없는 이메일이
+   들어오는 자리다. */
+.person-name,
+.user-card-name {
+  grid-column: 2;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
 .person-name.me { color: var(--mine-ink); }
-.person-status { flex: none; font-size: 12px; }
-.person-read { flex: 0 0 100%; font-size: 11px; color: var(--muted); }
+.person-status,
+.user-card-status {
+  grid-column: 3;
+  /* 상태 이름은 **쪼개지 않는다** (세 값 모두 짧다). 대신 남는 폭은 이름이 쓴다. */
+  white-space: nowrap;
+}
+.person-status { font-size: 12px; }
+.person-read,
+.user-card-read {
+  /* 둘째 줄 — 이름 칸에서 시작해 끝까지. 격자가 줄을 정하므로 겹칠 수 없다. */
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: var(--muted);
+}
 .people-hint { margin: 0; padding: 8px 12px; border-top: 1px solid var(--line); }
 
 /* --- 작성자 정보 카드 ----------------------------------------------- */
@@ -1349,10 +1398,6 @@ a.button {
 .user-card {
   position: fixed;
   z-index: 8;
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 6px;
   max-width: 240px;
   padding: 6px 9px;
   border: 1px solid var(--line);
@@ -1363,8 +1408,7 @@ a.button {
      카드가 깜빡인다. */
   pointer-events: none;
 }
-.user-card-name { font-weight: 600; overflow-wrap: anywhere; }
-.user-card-read { flex: 0 0 100%; color: var(--muted); font-size: 11px; }
+
 
 /* 이름이 눌릴 수 있다는 표시 (카드가 뜨는 자리다). 밑줄·색을 바꾸지 않는다 —
    발신자 색은 이미 뜻이 있고, 줄 기반 배치에서는 그 색이 사람 구분에 쓰인다. */

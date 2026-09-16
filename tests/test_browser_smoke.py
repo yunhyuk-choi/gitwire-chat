@@ -710,10 +710,16 @@ setTimeout(look, 400);
 
 #: ⭐ **참여자 서랍 · 내 상태**가 폭에 따라 어떻게 놓이는지 재는 페이지.
 #:
-#: 재는 것은 한 가지다 — **사이드바가 쓰는 관례를 그대로 따르나.**
-#:   넓은 폭(≥720): 3단 — 서랍이 대화를 **밀어낸다** (겹치지 않는다)
-#:   좁은 폭(<720): 서랍이 대화를 **덮는다** (겹친다)
-#: 그리고 두 폭 모두에서 **가로 스크롤이 0** 이어야 한다.
+#: 재는 것이 둘이다:
+#:   ① 놓이는 방식 — 사이드바가 쓰는 관례 그대로인가
+#:      넓은 폭(≥720): 3단, 서랍이 대화를 **밀어낸다** / 좁은 폭(<720): **덮는다**
+#:   ② ⚠️ **서랍 자신의 내부 오버플로** — 페이지가 아니라 서랍·목록·한 줄 각각의
+#:      `scrollWidth > clientWidth` 다. 지난번에 페이지 오버플로만 재고 이걸 빼먹어,
+#:      사용자 화면에 **서랍 안 가로 스크롤바**가 있는데 "오버플로 0" 으로 보고했다.
+#:
+#: ⚠️ 이름은 **실사용 길이의 이메일**이다. `alice` 같은 짧은 이름으로는 이 결함이
+#: 재현되지 않는다 — 결함의 원인이 "남는 폭을 형제에게 다 내주고 이름 칸이 1글자로
+#: 줄어든다"였고, 그건 이름이 길 때만 보인다.
 #:
 #: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라 서랍을 열 계기가
 #: 없다(그리고 방이 있으면 SSE 때문에 `--dump-dom` 이 끝나지 않는다). 그래서
@@ -727,7 +733,8 @@ PROBE_PEOPLE_ROWS = """<!doctype html><html lang="ko"%(theme)s>
 <aside class="sidebar" id="sb"><ul class="rooms"><li class="room"><button class="room-btn">
 <span class="room-name">방</span></button></li></ul></aside>
 <main class="chat" id="chat"><header class="chat-head" id="head">
-<div class="titles"><h2 id="room-title">우리 방</h2><p class="sub">주소</p></div>
+<div class="titles"><h2 id="room-title" tabindex="0">우리 방</h2>
+<p class="sub">주소</p></div>
 <div class="my-status"><button type="button" class="status-btn" id="mystatus"
  data-status="away"><span class="status-dot" id="mydot">●</span>
 <span class="status-label" id="mylabel">자리 비움</span>
@@ -735,8 +742,6 @@ PROBE_PEOPLE_ROWS = """<!doctype html><html lang="ko"%(theme)s>
 <div class="status-menu" id="menu"><button type="button" class="status-option on"
  data-status="active"><span class="status-dot">●</span>
 <span class="status-option-label">활동 중</span></button></div></div>
-<button type="button" class="icon-btn people-btn" id="pbtn"><span>👤</span>
-<span>2</span></button>
 <button type="button" class="icon-btn" id="refresh">↻</button>
 <button type="button" class="icon-btn" id="search">⌕</button></header>
 <div class="timeline"><div class="messages">
@@ -745,23 +750,29 @@ PROBE_PEOPLE_ROWS = """<!doctype html><html lang="ko"%(theme)s>
 https://example.invalid/아주/긴/경로/가/이어지는/주소</div></article>
 </div></div></main>
 <aside class="people" id="people">
-<div class="people-head"><h2 class="people-title">참여자</h2>
+<div class="people-head"><h2 class="people-title" id="ptitle">참여자 3</h2>
 <button type="button" class="icon-btn" id="pclose">×</button></div>
 <ul class="people-list" id="plist">
 <li class="person" id="p0" data-status="active"><span class="status-dot" id="d0">●</span>
-<span class="person-name me">나</span><span class="person-status">활동 중</span>
-<span class="person-read">14:03 까지 읽음</span></li>
+<span class="person-name me" id="n0">나</span>
+<span class="person-status" id="s0">활동 중</span>
+<span class="person-read" id="r0">14:03 까지 읽음</span></li>
 <li class="person" id="p1" data-status="dnd"><span class="status-dot" id="d1">●</span>
-<span class="person-name">아주아주긴이름의동료@example.invalid</span>
-<span class="person-status">방해 금지</span>
-<span class="person-read">아직 읽은 표시가 없다</span></li>
+<span class="person-name" id="n1">hyl0108@echomarketing.co.kr</span>
+<span class="person-status" id="s1">방해 금지</span>
+<span class="person-read" id="r1">아직 읽은 표시가 없다</span></li>
+<li class="person" id="p2" data-status="away"><span class="status-dot" id="d2">●</span>
+<span class="person-name" id="n2">verylongname.with.dots+tag@subdomain.echomarketing.co.kr</span>
+<span class="person-status" id="s2">자리 비움</span>
+<span class="person-read" id="r2">9/15 17:48 까지 읽음</span></li>
 </ul>
 <p class="hint people-hint">상태는 각자 선언한 값이다.</p>
 </aside>
 <div class="user-card" id="card" data-status="away" style="left:10px;top:60px">
-<span class="status-dot" id="cdot">●</span><span class="user-card-name">앨리스</span>
-<span class="user-card-status">자리 비움</span>
-<span class="user-card-read">14:03 까지 읽음</span></div>
+<span class="status-dot" id="cdot">●</span>
+<span class="user-card-name" id="cname">hyl0108@echomarketing.co.kr</span>
+<span class="user-card-status" id="cstatus">자리 비움</span>
+<span class="user-card-read" id="cread">9/15 17:48 까지 읽음</span></div>
 </div></body></html>"""
 
 #: 위 페이지를 정해진 폭의 iframe 에 넣고 계산된 값을 회수한다 (다른 프로브와 같은
@@ -776,42 +787,62 @@ var frame = document.getElementById('f');
 frame.addEventListener('load', function () {
   var win = frame.contentWindow;
   var doc = frame.contentDocument;
-  function cs(id) { return win.getComputedStyle(doc.getElementById(id)); }
-  function box(id) { return doc.getElementById(id).getBoundingClientRect(); }
+  function el(id) { return doc.getElementById(id); }
+  function cs(id) { return win.getComputedStyle(el(id)); }
+  function box(id) { return el(id).getBoundingClientRect(); }
+  /* 내부 오버플로 — **그 요소 자신**이 가로로 넘치나 (페이지가 아니다). */
+  function inner(id) { return el(id).scrollWidth - el(id).clientWidth; }
+  /* 두 상자가 실제로 겹치나 (교차 판정). 겹치면 글자가 글자 위에 얹힌다. */
+  function hits(a, b) {
+    var x = box(a), y = box(b);
+    return x.left < y.right - 0.5 && y.left < x.right - 0.5 &&
+      x.top < y.bottom - 0.5 && y.top < x.bottom - 0.5;
+  }
   var chat = box('chat');
   var people = box('people');
   document.getElementById('out').textContent = JSON.stringify({
     viewport: win.innerWidth,
-    /* 놓이는 방식 — 밀어내기(static)냐 덮기(absolute)냐 */
+    /* --- 놓이는 방식 --- */
     drawer_position: cs('people').position,
     drawer_width: Math.round(people.width),
     drawer_left: Math.round(people.left),
-    drawer_right: Math.round(people.right),
     chat_right: Math.round(chat.right),
     chat_width: Math.round(chat.width),
-    /* 겹치나 — 넓으면 안 겹치고(3단), 좁으면 덮는다 */
     overlaps: people.left < chat.right - 1,
-    /* 서랍이 화면 안에 있나 (오른쪽으로 새지 않는다) */
     drawer_inside: people.right <= win.innerWidth + 1,
-    /* ⭐ 가로 오버플로 — 두 폭 모두 0 이어야 한다 */
-    overflow_px: Math.max(0, doc.documentElement.scrollWidth - win.innerWidth),
-    /* 머리가 넘치지 않나 · 아주 좁을 때 상태 이름은 점만 남기고 접힌다 */
-    head_overflow: doc.getElementById('head').scrollWidth >
-      doc.getElementById('head').clientWidth + 1,
+    /* --- ⚠️ 서랍 **자신의** 내부 오버플로 (px · 0 이어야 한다) --- */
+    page_overflow_px: Math.max(0, doc.documentElement.scrollWidth - win.innerWidth),
+    drawer_overflow_px: inner('people'),
+    list_overflow_px: inner('plist'),
+    row_overflow_px: [inner('p0'), inner('p1'), inner('p2')],
+    /* --- 이름 칸이 1글자로 쭈그러들지 않나 (px) --- */
+    name_widths: [Math.round(box('n0').width), Math.round(box('n1').width),
+      Math.round(box('n2').width)],
+    row_heights: [Math.round(box('p0').height), Math.round(box('p1').height),
+      Math.round(box('p2').height)],
+    /* --- 겹침 (전부 false 여야 한다) --- */
+    overlap_name_read: [hits('n1', 'r1'), hits('n2', 'r2')],
+    overlap_name_status: [hits('n1', 's1'), hits('n2', 's2')],
+    overlap_dot_name: [hits('d1', 'n1'), hits('d2', 'n2')],
+    /* 읽은 시각은 **둘째 줄**이다 (이름보다 아래에 온다) */
+    read_below_name: [box('r1').top >= box('n1').bottom - 1,
+      box('r2').top >= box('n2').bottom - 1],
+    /* --- 정보 카드도 같은 격자를 쓴다 --- */
+    card_position: cs('card').position,
+    card_overflow_px: inner('card'),
+    card_name_width: Math.round(box('cname').width),
+    card_overlap: hits('cname', 'cread') || hits('cname', 'cstatus'),
+    card_visible: box('card').width > 0 && box('card').height > 0,
+    /* --- 머리 --- */
+    head_overflow: el('head').scrollWidth > el('head').clientWidth + 1,
     status_label_display: cs('mylabel').display,
     status_btn_visible: box('mystatus').width > 0,
+    title_cursor: cs('room-title').cursor,
     /* 점 색 — 상태마다 다른가 (팔레트 토큰이 실제로 흐르는가) */
     dot_my: cs('mydot').color,
     dot_active: cs('d0').color,
     dot_dnd: cs('d1').color,
-    dot_card: cs('cdot').color,
-    /* 정보 카드는 스크롤 상자 밖 좌표계(fixed)여야 한다 */
-    card_position: cs('card').position,
-    card_visible: box('card').width > 0 && box('card').height > 0,
-    /* 제목이 누를 수 있게 보이나 */
-    title_cursor: cs('room-title').cursor,
-    /* 서랍 안에서 긴 이름이 줄을 깨지 않나 */
-    row_inside: box('p1').right <= people.right + 1
+    dot_away: cs('d2').color
   });
 });
 </script></body></html>"""
@@ -2141,15 +2172,8 @@ def test_320px_에서도_읽음_표시가_가로_스크롤을_만들지_않는�
 
 
 @needs_browser
-#: 320px 는 이 앱이 스스로 정한 **바닥**이다 (카톡처럼 아주 작은 창).
-@pytest.mark.parametrize("width,pushes", [(900, True), (360, False), (320, False)])
-def test_참여자_서랍이_폭에_따라_밀거나_덮는다(width, pushes, served, tmp_path):
-    """⭐ 서랍의 폭 규칙은 **사이드바가 쓰는 관례 그대로**다 — 그것을 실측한다.
-
-    넓은 폭(≥720): 3단으로 **밀어낸다** (대화와 겹치지 않는다)
-    좁은 폭(<720): 대화를 **덮는다**
-    두 폭 모두 **가로 오버플로 0px** 이고, 상태 점 색은 팔레트에서 나온다.
-    """
+def _probe_people(width: int, served, tmp_path) -> dict:
+    """서랍 프로브를 정해진 폭으로 열고 **브라우저가 계산한 값**을 회수한다."""
     import html as html_mod
     import json
     import re as re_mod
@@ -2162,44 +2186,95 @@ def test_참여자_서랍이_폭에_따라_밀거나_덮는다(width, pushes, se
     assert found and found.group(1).strip(), dom[-1500:]
     got = json.loads(html_mod.unescape(found.group(1)))
     print(f"  [참여자 · {width}px] {json.dumps(got, ensure_ascii=False)}")
+    return got
+
+
+#: 폭 네 종류. 320px 은 이 앱이 스스로 정한 **바닥**이고(모바일 퍼스트),
+#: 1440px 은 서랍이 240px 로 고정돼 이름 칸이 **가장 좁아지는** 쪽이다.
+PEOPLE_WIDTHS = [(1440, True), (900, True), (480, False), (320, False)]
+
+
+@needs_browser
+@pytest.mark.parametrize("width,pushes", PEOPLE_WIDTHS)
+def test_참여자_서랍이_폭에_따라_밀거나_덮는다(width, pushes, served, tmp_path):
+    """⭐ 서랍의 폭 규칙은 **사이드바가 쓰는 관례 그대로**다 — 그것을 실측한다.
+
+    넓은 폭(≥720): 3단으로 **밀어낸다** (대화와 겹치지 않는다)
+    좁은 폭(<720): 대화를 **덮는다**
+    """
+    got = _probe_people(width, served, tmp_path)
 
     tokens = palette("ide")
     assert got["viewport"] == width, f"뷰포트가 {width} 가 아니다 ({got['viewport']})"
-
-    # ⭐ 두 폭 **모두**에서 가로 스크롤이 0 이다.
-    assert got["overflow_px"] == 0, f"가로 오버플로 {got['overflow_px']}px"
+    assert got["page_overflow_px"] == 0, f"페이지 가로 오버플로 {got['page_overflow_px']}px"
     assert got["drawer_inside"], "서랍이 화면 오른쪽으로 샜다"
-    assert got["row_inside"], "긴 이름이 서랍을 뚫고 나갔다"
     assert got["head_overflow"] is False, "머리가 넘쳤다"
 
     if pushes:
-        # 넓은 창 — 3단. 겹치지 않고, 대화가 그만큼 좁아진다.
         assert got["drawer_position"] == "static", got["drawer_position"]
         assert got["drawer_width"] == 240, got["drawer_width"]
         assert got["overlaps"] is False, "넓은데 대화를 덮었다"
         assert got["chat_right"] <= got["drawer_left"] + 1, got
         assert got["status_label_display"] != "none", "넓은데 상태 이름이 숨었다"
     else:
-        # 좁은 창 — 덮는다 (사이드바와 같은 방식).
         assert got["drawer_position"] == "absolute", got["drawer_position"]
         assert got["overlaps"] is True, "좁은데 밀어냈다 (대화가 찌그러진다)"
         assert got["drawer_width"] == width, got["drawer_width"]
-        # 아주 좁으면 상태는 **점만** 남는다 (이름은 title·메뉴에 그대로 있다).
-        assert got["status_label_display"] == "none", got["status_label_display"]
     assert got["status_btn_visible"], "내 상태 버튼이 사라졌다"
 
-    # 점 색은 팔레트 토큰에서 나온다 (JS 가 색을 모른다).
     assert got["dot_active"] == rgb(tokens["--status-active"]), got["dot_active"]
     assert got["dot_dnd"] == rgb(tokens["--status-dnd"]), got["dot_dnd"]
-    assert got["dot_my"] == rgb(tokens["--status-away"]), got["dot_my"]
-    assert got["dot_card"] == rgb(tokens["--status-away"]), got["dot_card"]
-    assert len({got["dot_active"], got["dot_dnd"], got["dot_my"]}) == 3
+    assert got["dot_away"] == rgb(tokens["--status-away"]), got["dot_away"]
+    assert len({got["dot_active"], got["dot_dnd"], got["dot_away"]}) == 3
 
-    # 정보 카드는 스크롤 상자 밖 좌표계다 (대화가 스크롤돼도 따라가지 않는다).
     assert got["card_position"] == "fixed", got["card_position"]
     assert got["card_visible"], "카드가 화면에 나오지 않는다"
-    # 제목이 **누를 수 있게** 보인다 (서랍을 여는 지름길이다).
     assert got["title_cursor"] == "pointer", got["title_cursor"]
+
+
+@needs_browser
+@pytest.mark.parametrize("width", [w for w, _ in PEOPLE_WIDTHS])
+def test_서랍_한_줄이_넘치지도_겹치지도_않는다(width, served, tmp_path):
+    """⚠️ **실측된 결함의 재발 방지선** (사용자 화면에서 나온 것이다).
+
+    증상: 이메일 이름이 **한 글자씩 세로로** 떨어지고, 상태·읽은 시각 줄과
+    **겹치고**, 서랍 안에 **가로 스크롤바**가 생겼다.
+
+    원인 둘: (A) `flex` 에서 셋째 조각이 자기 줄로 내려갈 수 없었다(`flex-wrap`
+    없음) (B) `overflow-wrap: anywhere` 가 min-content 를 1글자로 만들어 이름 칸이
+    형제에게 자리를 다 내줬다.
+
+    그래서 여기서 재는 것은 페이지가 아니라 **서랍 자신**이다 — 지난 검증이
+    페이지만 재서 이 결함을 놓쳤다.
+    """
+    got = _probe_people(width, served, tmp_path)
+
+    # ⭐ ① 내부 가로 오버플로 0 — 서랍·목록·각 줄 **자신**의 것.
+    assert got["drawer_overflow_px"] == 0, f"서랍 안이 넘쳤다 {got['drawer_overflow_px']}px"
+    assert got["list_overflow_px"] == 0, f"목록이 넘쳤다 {got['list_overflow_px']}px"
+    assert got["row_overflow_px"] == [0, 0, 0], got["row_overflow_px"]
+    assert got["card_overflow_px"] == 0, f"카드가 넘쳤다 {got['card_overflow_px']}px"
+
+    # ⭐ ② 이름 칸이 1글자로 쭈그러들지 않는다. 한 글자는 8~14px 이다 —
+    # 60px 이면 최소 네 글자는 들어간다(실제 값은 위 print 에 남는다).
+    for i, px in enumerate(got["name_widths"]):
+        assert px >= 60, f"{i}번 이름 칸이 {px}px 다 (한 글자 수준으로 쭈그러들었다)"
+    assert got["card_name_width"] >= 60, got["card_name_width"]
+
+    # ⭐ ③ 겹침 0 — 경계 상자 교차로 판정한다 (눈이 아니라 좌표다).
+    assert got["overlap_name_read"] == [False, False], got["overlap_name_read"]
+    assert got["overlap_name_status"] == [False, False], got["overlap_name_status"]
+    assert got["overlap_dot_name"] == [False, False], got["overlap_dot_name"]
+    assert got["card_overlap"] is False, "카드 안에서 글자가 겹쳤다"
+    # 읽은 시각은 **둘째 줄**이다 (격자가 줄을 정한다).
+    assert got["read_below_name"] == [True, True], got["read_below_name"]
+
+    # 긴 이름은 **감싼다** (줄바꿈 자체는 반드시 있어야 한다 — 공백 없는 이메일이라
+    # 감싸지 못하면 넘치거나 잘린다). 판정은 **어느 폭에서도 한 줄에 못 들어가는**
+    # 셋째 줄(56자)로 한다 — 실사용 길이(27자)는 서랍이 넓으면 정당하게 한 줄이다.
+    assert got["row_heights"][2] > got["row_heights"][0], (
+        f"아주 긴 이름이 감싸지 않았다 {got['row_heights']}"
+    )
 
 
 @needs_browser
@@ -2224,5 +2299,13 @@ def test_실제_앱에서_내_상태_메뉴가_JS_로_세워진다(served, tmp_p
         "서랍이 처음부터 열려 있다"
     )
     assert re.search(r'id="user-card"[^>]*hidden', dom), "카드가 처음부터 떠 있다"
+    # ⭐ **서랍을 여는 요소는 하나뿐**이다 — 사용자가 본 결함(같은 일을 하는 버튼이
+    # 둘)의 재발 방지선이다. 방 이름은 키보드로도 닿아야 한다(버튼을 없앴으니
+    # `tabindex` 가 유일한 길이다).
+    assert "people" + "-count" not in dom, "요약 버튼이 아직 화면에 있다"
+    assert "people-btn" not in dom, "요약 버튼 클래스가 남아 있다"
+    assert re.search(r'id="room-title"[^>]*tabindex="0"', dom), (
+        "방 이름이 키보드 초점을 받지 못한다 (서랍을 열 길이 마우스뿐이 된다)"
+    )
     # 상태 선언은 방이 있어야 나간다 — 방 0개인 이 앱에서는 요청이 없다.
     assert not [p for p in served.paths if p.endswith("/reads")], served.paths

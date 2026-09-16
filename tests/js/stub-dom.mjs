@@ -287,8 +287,7 @@ export const ELEMENT_IDS = [
   'update-compare', 'run-update', 'confirm-update', 'cancel-update',
   /* 가용 상태 · 참여자 서랍 · 작성자 정보 카드 */
   'my-status', 'my-status-label', 'my-status-menu',
-  'people-count', 'people-count-n', 'people', 'people-list', 'people-empty',
-  'people-close',
+  'people', 'people-title', 'people-list', 'people-empty', 'people-close',
   'user-card', 'user-card-name', 'user-card-status',
   'user-card-read'
 ];

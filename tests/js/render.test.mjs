@@ -3359,7 +3359,7 @@ await test('저장소를 못 읽어도 화면이 뜬다 (기본값 · 활동 중
   assert.equal(broken.chat.userStatus(), statusMod.STATUS_AWAY);
 });
 
-await test('참여자 서랍 — 요약 버튼과 **제목 클릭**이 같은 트리거다', async () => {
+await test('참여자 서랍 — **방 이름 클릭이 유일한 진입점**이다 (키보드도 같은 길)', async () => {
   const { doc, chat } = await boot({
     reads: readsOf([
       who('me@x.io', '', ['me.host'], 'active'),
@@ -3368,9 +3368,10 @@ await test('참여자 서랍 — 요약 버튼과 **제목 클릭**이 같은 �
   });
 
   assert.equal(chat.peopleOpen(), false, '서랍이 처음부터 열려 있다');
-  assert.equal(doc.getElementById('people-count-n').textContent, '2');
+  /* 사람 수는 **서랍 제목**에 얹힌다 (머리에 숫자 버튼을 따로 두지 않는다). */
+  assert.equal(doc.getElementById('people-title').textContent, '참여자 2');
 
-  doc.getElementById('people-count').dispatch('click');
+  doc.getElementById('room-title').dispatch('click');
   assert.equal(chat.peopleOpen(), true);
   const rows = doc.getElementById('people-list').children;
   assert.equal(rows.length, 2);
@@ -3381,17 +3382,41 @@ await test('참여자 서랍 — 요약 버튼과 **제목 클릭**이 같은 �
   assert.ok(rows[1].textContent.includes('까지 읽음'), rows[1].textContent);
   assert.ok(rows[0].textContent.includes('아직 읽은 표시가 없다'), rows[0].textContent);
 
-  /* 제목 클릭은 **지름길**이다 (발견성은 요약 버튼이 담당한다). */
+  /* 같은 제목을 다시 누르면 닫힌다 (토글). */
   doc.getElementById('room-title').dispatch('click');
   assert.equal(chat.peopleOpen(), false);
-  doc.getElementById('room-title').dispatch('click');
-  assert.equal(chat.peopleOpen(), true);
-  /* 키보드로 빠져나오는 길 · 닫기 버튼 */
+
+  /* ⭐ **키보드도 같은 길**이다 — 버튼을 없앴으니 제목이 유일한 길이고, Enter·Space
+     로 열려야 한다(그 둘이 없으면 이 기능이 키보드에서 사라진다). */
+  doc.getElementById('room-title').dispatch('keydown', { key: 'Enter' });
+  assert.equal(chat.peopleOpen(), true, 'Enter 로 열리지 않는다');
   doc.dispatch('keydown', { key: 'Escape' });
   assert.equal(chat.peopleOpen(), false);
-  doc.getElementById('people-count').dispatch('click');
+  doc.getElementById('room-title').dispatch('keydown', { key: ' ' });
+  assert.equal(chat.peopleOpen(), true, 'Space 로 열리지 않는다');
+  /* 닫기 버튼 */
   doc.getElementById('people-close').dispatch('click');
   assert.equal(chat.peopleOpen(), false);
+  /* 아무 키나 여는 것은 아니다. */
+  doc.getElementById('room-title').dispatch('keydown', { key: 'a' });
+  assert.equal(chat.peopleOpen(), false);
+});
+
+await test('⭐ 서랍을 여는 요소는 **하나뿐**이다 (템플릿·모듈 정적 검사)', () => {
+  /* 사용자가 본 결함: 같은 일을 하는 버튼이 둘이었다. 숫자로 못 박는다. */
+  const gone = 'people' + '-count';
+  assert.equal(indexHtml.indexOf(gone), -1, '요약 버튼이 아직 템플릿에 있다');
+  assert.equal(indexHtml.indexOf('people-btn'), -1, '요약 버튼 클래스가 남아 있다');
+  const css = fs.readFileSync(path.join(STATIC, 'style.css'), 'utf8');
+  assert.equal(css.indexOf('.people-btn'), -1, '죽은 CSS 가 남아 있다');
+  const peopleJs = fs.readFileSync(path.join(STATIC, 'js', 'people.js'), 'utf8');
+  assert.equal(peopleJs.indexOf(gone), -1, '죽은 배선이 남아 있다');
+  /* 신호를 내는 곳이 **한 곳**이다 (방 이름의 주인 = 방 목록 모듈). */
+  let emits = 0;
+  for (const file of OUR_JS) {
+    emits += fs.readFileSync(file, 'utf8').split("emit('people:toggle'").length - 1;
+  }
+  assert.equal(emits, 1, 'people:toggle 을 내는 곳이 ' + emits + '곳이다');
 });
 
 await test('⭐ 닫힌 서랍은 **그리지 않는다** (숫자만 갱신한다)', async () => {
@@ -3410,10 +3435,12 @@ await test('⭐ 닫힌 서랍은 **그리지 않는다** (숫자만 갱신한다
   });
 
   assert.equal(doc.counts.createElement, created, '닫힌 서랍을 그렸다');
-  assert.equal(doc.getElementById('people-count-n').textContent, '2', '숫자가 안 바뀌었다');
+  /* 숫자는 서랍 제목에 있고, **닫혀 있어도** 사실을 따라간다 (노드를 만들지 않는다). */
+  assert.equal(doc.getElementById('people-title').textContent, '참여자 2',
+    '숫자가 안 바뀌었다');
 
   /* 열면 그때 그린다 — 그리고 방금 온 값이 반영돼 있다. */
-  doc.getElementById('people-count').dispatch('click');
+  doc.getElementById('room-title').dispatch('click');
   const rows = doc.getElementById('people-list').children;
   assert.equal(rows.length, 2);
   assert.ok(rows[1].textContent.includes('방해 금지'), rows[1].textContent);
@@ -3424,7 +3451,7 @@ await test('status 가 없는 **옛 스냅샷**은 활동 중으로 그린다 (�
   const { doc, chat } = await boot({
     reads: readsOf([who('b@x.io', '', ['b.host'])], { me: 'me@x.io' })
   });
-  doc.getElementById('people-count').dispatch('click');
+  doc.getElementById('room-title').dispatch('click');
   const rows = doc.getElementById('people-list').children;
   assert.equal(rows.length, 1);
   assert.ok(rows[0].textContent.includes('활동 중'), rows[0].textContent);
