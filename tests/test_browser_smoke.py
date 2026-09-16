@@ -2141,7 +2141,8 @@ def test_320px_에서도_읽음_표시가_가로_스크롤을_만들지_않는�
 
 
 @needs_browser
-@pytest.mark.parametrize("width,pushes", [(900, True), (360, False)])
+#: 320px 는 이 앱이 스스로 정한 **바닥**이다 (카톡처럼 아주 작은 창).
+@pytest.mark.parametrize("width,pushes", [(900, True), (360, False), (320, False)])
 def test_참여자_서랍이_폭에_따라_밀거나_덮는다(width, pushes, served, tmp_path):
     """⭐ 서랍의 폭 규칙은 **사이드바가 쓰는 관례 그대로**다 — 그것을 실측한다.
 
