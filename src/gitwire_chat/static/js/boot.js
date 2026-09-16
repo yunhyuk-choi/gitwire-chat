@@ -38,6 +38,7 @@ import { createStream } from './stream.js';
 import { createReads } from './reads.js';
 import { createPresence } from './presence.js';
 import { createUserStatus } from './userstatus.js';
+import { createPeople } from './people.js';
 import { createTheme, fallbackToDefault, DEFAULT_LAYOUT } from './theme.js';
 import { createUpdate } from './update.js';
 
@@ -152,6 +153,8 @@ export function createApp(runtime) {
     env.userStatus = function () { return modules.userstatus; };
     modules.reads = setup('읽음', createReads);
     env.reads = function () { return modules.reads; };
+    /* 참여자 서랍·작성자 카드. 읽음 **뒤**에 세운다 (그 모델을 읽어 그린다). */
+    modules.people = setup('참여자', createPeople);
     modules.presence = setup('알림·가시성', createPresence);
     modules.update = setup('갱신 알림', createUpdate);
     modules.timeline = setup('타임라인', createTimeline, function (mod, err) {
@@ -210,6 +213,9 @@ export function createApp(runtime) {
     setStatus: function (id) { return modules.userstatus ? modules.userstatus.set(id) : undefined; },
     statusMenuOpen: function () { return modules.userstatus ? modules.userstatus.isOpen() : false; },
     toggleStatusMenu: function (on) { if (modules.userstatus) { modules.userstatus.open(on); } },
+    peopleOpen: function () { return modules.people ? modules.people.isOpen() : false; },
+    togglePeople: function (on) { if (modules.people) { modules.people.open(on); } },
+    userCard: function () { return modules.people ? modules.people.card() : null; },
     readsStats: function () { return modules.reads ? modules.reads.stats : null; },
     markRead: function (id) { return modules.reads ? modules.reads.seen(id) : false; },
     flushReads: function () { return modules.reads ? modules.reads.flushNow() : undefined; },

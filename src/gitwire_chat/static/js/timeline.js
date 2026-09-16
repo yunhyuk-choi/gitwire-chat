@@ -173,7 +173,17 @@ export function createTimeline(env) {
   var hooks = {
     lookup: function (id) { return known[id] || null; },
     onReply: function (msg) { bus.emit('reply:to', { message: msg }); },
-    onRetry: function (msg) { retry(msg); }
+    onRetry: function (msg) { retry(msg); },
+    /* 작성자 이름에 포인터가 왔다 — **그리는 일은 우리 것이 아니다.** 카드는
+       화면에 한 장뿐이고 그 주인은 `people.js` 다 (메시지 노드에 카드를 달면
+       그 방의 메시지 수만큼 헛노드가 생긴다). */
+    onAuthor: function (msg, how) {
+      var opts = how || {};
+      bus.emit('people:card', {
+        message: msg, at: opts.at, show: opts.show !== false,
+        toggle: opts.toggle === true
+      });
+    }
   };
 
   /* -------------------------------------------------------- 모델 */

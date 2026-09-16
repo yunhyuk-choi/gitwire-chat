@@ -1301,6 +1301,87 @@ a.button {
 .status-option:hover { background: var(--bg); }
 .status-option.on { background: var(--accent); color: var(--accent-ink); }
 
+/* 참여자 요약 버튼 — 서랍의 **발견성**을 담당한다 (제목 클릭은 지름길일 뿐이다). */
+.people-btn { display: flex; align-items: center; gap: 3px; font-size: 13px; }
+
+/* ⭐ 제목도 서랍을 연다. 누를 수 있다는 것이 **보여야** 한다 — 안 보이면 없는
+   기능과 같다. 색을 바꾸지 않고 밑줄만 준다 (제목은 강조가 아니다). */
+#room-title { cursor: pointer; }
+#room-title:hover { text-decoration: underline; }
+
+/* --- 참여자 서랍 ---------------------------------------------------- */
+
+.people {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+}
+.people-head {
+  display: flex;
+  align-items: center;
+  gap: var(--gap);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.people-title { flex: 1; margin: 0; font-size: 15px; }
+.people-list { flex: 1; margin: 0; padding: 6px; list-style: none; overflow-y: auto; min-height: 0; }
+.person {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: var(--radius);
+}
+.person:nth-child(odd) { background: var(--stripe); }
+.person-name { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.person-name.me { color: var(--mine-ink); }
+.person-status { flex: none; font-size: 12px; }
+.person-read { flex: 0 0 100%; font-size: 11px; color: var(--muted); }
+.people-hint { margin: 0; padding: 8px 12px; border-top: 1px solid var(--line); }
+
+/* --- 작성자 정보 카드 ----------------------------------------------- */
+
+/* ⚠️ `fixed` 다 — 대화 영역은 스크롤 상자라, 그 안에 두면 잘리거나 함께 스크롤된다.
+   자리는 JS 가 작성자 이름의 위치에서 계산해 넣는다. */
+.user-card {
+  position: fixed;
+  z-index: 8;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  max-width: 240px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  font-size: 12px;
+  /* 포인터를 받지 않는다 — 카드가 마우스를 가로채면 그 순간 `mouseleave` 가 나서
+     카드가 깜빡인다. */
+  pointer-events: none;
+}
+.user-card-name { font-weight: 600; overflow-wrap: anywhere; }
+.user-card-read { flex: 0 0 100%; color: var(--muted); font-size: 11px; }
+
+/* 이름이 눌릴 수 있다는 표시 (카드가 뜨는 자리다). 밑줄·색을 바꾸지 않는다 —
+   발신자 색은 이미 뜻이 있고, 줄 기반 배치에서는 그 색이 사람 구분에 쓰인다. */
+.msg .author { cursor: help; }
+
+/* --- 폭에 따른 배치: 사이드바의 관례를 **그대로** 쓴다 ---------------- */
+
+/* 좁은 창: 덮는다 (사이드바와 같은 방식 · 더 위에 온다). */
+@media (max-width: 719px) {
+  .people { position: absolute; inset: 0; z-index: 6; border-left: 0; }
+}
+
+/* 넓은 창: 3단 — 밀어낸다. */
+@media (min-width: 720px) {
+  .people { width: 240px; flex: 0 0 240px; }
+}
+
 /* 아주 좁을 때 — 머리가 넘치지 않게 내 상태는 **점만** 남긴다 (이름은 title·
    aria-label 에 그대로 있고, 눌러서 연 메뉴에는 세 이름이 다 보인다). */
 @media (max-width: 480px) {

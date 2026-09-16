@@ -175,6 +175,13 @@
         <div class="status-menu" id="my-status-menu" hidden></div>
       </div>
 
+      <!-- 참여자 요약 — 누르면 오른쪽 서랍이 열린다. -->
+      <button type="button" class="icon-btn people-btn" id="people-count"
+              title="참여자" aria-haspopup="true" aria-expanded="false">
+        <span aria-hidden="true">👤</span>
+        <span id="people-count-n">0</span>
+      </button>
+
       <button type="button" class="icon-btn" id="refresh" title="지금 당겨오기">↻</button>
       <button type="button" class="icon-btn" id="toggle-search" title="검색">⌕</button>
     </header>
@@ -245,6 +252,32 @@
     <p class="status" id="status"></p>
   </main>
 
+  <!-- ⭐ 참여자 서랍 — `main.chat` 의 **형제**다. `.app` 이 이미 flex 이므로
+       넓은 창에서는 3단이 되고(밀어내기), 좁은 창에서는 덮는다. 그 두 동작은
+       사이드바가 이미 쓰는 관례를 **그대로** 재사용한다 (style.css 의 폭 규칙).
+       ⚠️ 왼쪽에 두지 않는다 — 거긴 방 목록 사이드바 자리다. -->
+  <aside class="people" id="people" hidden aria-label="참여자">
+    <div class="people-head">
+      <h2 class="people-title" id="people-title">참여자</h2>
+      <button type="button" class="icon-btn" id="people-close" title="닫기">×</button>
+    </div>
+    <ul class="people-list" id="people-list"></ul>
+    <p class="empty" id="people-empty">참여자 정보가 아직 없다.</p>
+    <!-- 읽은 자리도 함께 보여 준다 — **같은 파일에서 오는 값**이라 배관이 늘지
+         않고, "자리 비움인데 방금 읽었다" 같은 사실이 상태만으로는 안 보인다. -->
+    <p class="hint people-hint">상태는 각자 선언한 값이다. 옆은 마지막으로 읽은 시각.</p>
+  </aside>
+
+  <!-- ⭐ 작성자 정보 카드 — 네 배치 **공통**이다. 메시지 노드의 `.author` 에
+       `message-node.js` 가 한 번만 배선하고, 여기 한 장을 옮겨 가며 띄운다.
+       카드를 메시지마다 만들면 그 방의 메시지 수만큼 헛노드가 생기고, 상태가
+       바뀔 때마다 N 장을 다시 칠해야 한다. -->
+  <div class="user-card" id="user-card" hidden role="tooltip">
+    <span class="status-dot" id="user-card-dot" aria-hidden="true">●</span>
+    <span class="user-card-name" id="user-card-name"></span>
+    <span class="user-card-status" id="user-card-status"></span>
+    <span class="user-card-read" id="user-card-read"></span>
+  </div>
 </div>
 
 <!-- 진입점 하나. ES 모듈이라 의존이 import 로 명시되고, 로딩 순서 문제가

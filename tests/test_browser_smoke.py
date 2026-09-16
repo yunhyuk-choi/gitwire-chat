@@ -708,6 +708,115 @@ setTimeout(look, 400);
 </script></body></html>"""
 
 
+#: ⭐ **참여자 서랍 · 내 상태**가 폭에 따라 어떻게 놓이는지 재는 페이지.
+#:
+#: 재는 것은 한 가지다 — **사이드바가 쓰는 관례를 그대로 따르나.**
+#:   넓은 폭(≥720): 3단 — 서랍이 대화를 **밀어낸다** (겹치지 않는다)
+#:   좁은 폭(<720): 서랍이 대화를 **덮는다** (겹친다)
+#: 그리고 두 폭 모두에서 **가로 스크롤이 0** 이어야 한다.
+#:
+#: 앱 페이지로는 잴 수 없다 — 연기 테스트의 앱에는 방이 0개라 서랍을 열 계기가
+#: 없다(그리고 방이 있으면 SSE 때문에 `--dump-dom` 이 끝나지 않는다). 그래서
+#: `people.js` 가 만드는 것과 **같은 구조**를 손으로 세우고 진짜 `style.css` 를
+#: 물린다 — 구조가 어긋나면 stub DOM 테스트가 먼저 깨진다.
+PROBE_PEOPLE_ROWS = """<!doctype html><html lang="ko"%(theme)s>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<link rel="stylesheet" href="/static/style.css"></head>
+<body data-view="chat">
+<div class="app">
+<aside class="sidebar" id="sb"><ul class="rooms"><li class="room"><button class="room-btn">
+<span class="room-name">방</span></button></li></ul></aside>
+<main class="chat" id="chat"><header class="chat-head" id="head">
+<div class="titles"><h2 id="room-title">우리 방</h2><p class="sub">주소</p></div>
+<div class="my-status"><button type="button" class="status-btn" id="mystatus"
+ data-status="away"><span class="status-dot" id="mydot">●</span>
+<span class="status-label" id="mylabel">자리 비움</span>
+<span class="caret">⌄</span></button>
+<div class="status-menu" id="menu"><button type="button" class="status-option on"
+ data-status="active"><span class="status-dot">●</span>
+<span class="status-option-label">활동 중</span></button></div></div>
+<button type="button" class="icon-btn people-btn" id="pbtn"><span>👤</span>
+<span>2</span></button>
+<button type="button" class="icon-btn" id="refresh">↻</button>
+<button type="button" class="icon-btn" id="search">⌕</button></header>
+<div class="timeline"><div class="messages">
+<article class="msg" id="m0"><div class="msg-head"><span class="author">앨리스</span>
+<time class="ts">14:03</time></div><div class="body">아주 긴 URL 도 줄을 깨지 않아야 한다
+https://example.invalid/아주/긴/경로/가/이어지는/주소</div></article>
+</div></div></main>
+<aside class="people" id="people">
+<div class="people-head"><h2 class="people-title">참여자</h2>
+<button type="button" class="icon-btn" id="pclose">×</button></div>
+<ul class="people-list" id="plist">
+<li class="person" id="p0" data-status="active"><span class="status-dot" id="d0">●</span>
+<span class="person-name me">나</span><span class="person-status">활동 중</span>
+<span class="person-read">14:03 까지 읽음</span></li>
+<li class="person" id="p1" data-status="dnd"><span class="status-dot" id="d1">●</span>
+<span class="person-name">아주아주긴이름의동료@example.invalid</span>
+<span class="person-status">방해 금지</span>
+<span class="person-read">아직 읽은 표시가 없다</span></li>
+</ul>
+<p class="hint people-hint">상태는 각자 선언한 값이다.</p>
+</aside>
+<div class="user-card" id="card" data-status="away" style="left:10px;top:60px">
+<span class="status-dot" id="cdot">●</span><span class="user-card-name">앨리스</span>
+<span class="user-card-status">자리 비움</span>
+<span class="user-card-read">14:03 까지 읽음</span></div>
+</div></body></html>"""
+
+#: 위 페이지를 정해진 폭의 iframe 에 넣고 계산된 값을 회수한다 (다른 프로브와 같은
+#: 이유 — 이 환경의 헤드리스 Edge 는 뷰포트를 492px 아래로 못 내린다).
+PROBE_PEOPLE_FRAME = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+</head><body style="margin:0">
+<iframe id="f" src="/__test__/probepeople/%(theme)s/0"
+        style="width:%(width)dpx;height:640px;border:0"></iframe>
+<pre id="out"></pre>
+<script>
+var frame = document.getElementById('f');
+frame.addEventListener('load', function () {
+  var win = frame.contentWindow;
+  var doc = frame.contentDocument;
+  function cs(id) { return win.getComputedStyle(doc.getElementById(id)); }
+  function box(id) { return doc.getElementById(id).getBoundingClientRect(); }
+  var chat = box('chat');
+  var people = box('people');
+  document.getElementById('out').textContent = JSON.stringify({
+    viewport: win.innerWidth,
+    /* 놓이는 방식 — 밀어내기(static)냐 덮기(absolute)냐 */
+    drawer_position: cs('people').position,
+    drawer_width: Math.round(people.width),
+    drawer_left: Math.round(people.left),
+    drawer_right: Math.round(people.right),
+    chat_right: Math.round(chat.right),
+    chat_width: Math.round(chat.width),
+    /* 겹치나 — 넓으면 안 겹치고(3단), 좁으면 덮는다 */
+    overlaps: people.left < chat.right - 1,
+    /* 서랍이 화면 안에 있나 (오른쪽으로 새지 않는다) */
+    drawer_inside: people.right <= win.innerWidth + 1,
+    /* ⭐ 가로 오버플로 — 두 폭 모두 0 이어야 한다 */
+    overflow_px: Math.max(0, doc.documentElement.scrollWidth - win.innerWidth),
+    /* 머리가 넘치지 않나 · 아주 좁을 때 상태 이름은 점만 남기고 접힌다 */
+    head_overflow: doc.getElementById('head').scrollWidth >
+      doc.getElementById('head').clientWidth + 1,
+    status_label_display: cs('mylabel').display,
+    status_btn_visible: box('mystatus').width > 0,
+    /* 점 색 — 상태마다 다른가 (팔레트 토큰이 실제로 흐르는가) */
+    dot_my: cs('mydot').color,
+    dot_active: cs('d0').color,
+    dot_dnd: cs('d1').color,
+    dot_card: cs('cdot').color,
+    /* 정보 카드는 스크롤 상자 밖 좌표계(fixed)여야 한다 */
+    card_position: cs('card').position,
+    card_visible: box('card').width > 0 && box('card').height > 0,
+    /* 제목이 누를 수 있게 보이나 */
+    title_cursor: cs('room-title').cursor,
+    /* 서랍 안에서 긴 이름이 줄을 깨지 않나 */
+    row_inside: box('p1').right <= people.right + 1
+  });
+});
+</script></body></html>"""
+
+
 def attach_test_routes(app) -> None:
     """씨앗·측정 페이지를 붙인다. **테스트 안에서만** 존재한다."""
     import json as _json
@@ -745,6 +854,15 @@ def attach_test_routes(app) -> None:
         attr = "" if name == "default" else f' data-chat-theme="{name}"'
         return Response(PROBE_PAGE % {"attr": attr}, mimetype="text/html")
 
+    def probepeople(name: str, width: int):
+        theme = "" if name == "default" else f' data-chat-theme="{name}"'
+        if width <= 0:
+            return Response(
+                PROBE_PEOPLE_ROWS % {"theme": theme}, mimetype="text/html"
+            )
+        body = PROBE_PEOPLE_FRAME % {"theme": name, "width": width}
+        return Response(body, mimetype="text/html")
+
     def probereads(layout: str, name: str, width: int):
         if width <= 0:
             theme = "" if name == "default" else f' data-chat-theme="{name}"'
@@ -774,6 +892,9 @@ def attach_test_routes(app) -> None:
     app.add_url_rule("/__test__/seed/<name>", "test_seed", seed)
     app.add_url_rule("/__test__/seed/<name>/<layout>", "test_seed2", seed)
     app.add_url_rule("/__test__/probe/<name>", "test_probe", probe)
+    app.add_url_rule(
+        "/__test__/probepeople/<name>/<int:width>", "test_probepeople", probepeople
+    )
     app.add_url_rule("/__test__/probelog/<name>/<int:width>", "test_probelog", probelog)
     app.add_url_rule("/__test__/probeide/<name>/<int:width>", "test_probeide", probeide)
     app.add_url_rule("/__test__/probetty/<name>/<int:width>", "test_probetty", probetty)
@@ -2017,3 +2138,90 @@ def test_320px_에서도_읽음_표시가_가로_스크롤을_만들지_않는�
     assert got["body_right"] <= got["reads_left"] + 1, "320px 에서 본문과 겹친다"
     assert got["badge_visible"], "320px 에서 방 목록 뱃지가 사라졌다"
     assert got["mark_height"] > 0, "320px 에서 구분선이 사라졌다"
+
+
+@needs_browser
+@pytest.mark.parametrize("width,pushes", [(900, True), (360, False)])
+def test_참여자_서랍이_폭에_따라_밀거나_덮는다(width, pushes, served, tmp_path):
+    """⭐ 서랍의 폭 규칙은 **사이드바가 쓰는 관례 그대로**다 — 그것을 실측한다.
+
+    넓은 폭(≥720): 3단으로 **밀어낸다** (대화와 겹치지 않는다)
+    좁은 폭(<720): 대화를 **덮는다**
+    두 폭 모두 **가로 오버플로 0px** 이고, 상태 점 색은 팔레트에서 나온다.
+    """
+    import html as html_mod
+    import json
+    import re as re_mod
+
+    dom, console = open_headless(
+        f"{served.url}__test__/probepeople/ide/{width}", tmp_path / "profile"
+    )
+    assert not uncaught_lines(console), console[-1500:]
+    found = re_mod.search(r'<pre id="out">(.*?)</pre>', dom, re_mod.S)
+    assert found and found.group(1).strip(), dom[-1500:]
+    got = json.loads(html_mod.unescape(found.group(1)))
+    print(f"  [참여자 · {width}px] {json.dumps(got, ensure_ascii=False)}")
+
+    tokens = palette("ide")
+    assert got["viewport"] == width, f"뷰포트가 {width} 가 아니다 ({got['viewport']})"
+
+    # ⭐ 두 폭 **모두**에서 가로 스크롤이 0 이다.
+    assert got["overflow_px"] == 0, f"가로 오버플로 {got['overflow_px']}px"
+    assert got["drawer_inside"], "서랍이 화면 오른쪽으로 샜다"
+    assert got["row_inside"], "긴 이름이 서랍을 뚫고 나갔다"
+    assert got["head_overflow"] is False, "머리가 넘쳤다"
+
+    if pushes:
+        # 넓은 창 — 3단. 겹치지 않고, 대화가 그만큼 좁아진다.
+        assert got["drawer_position"] == "static", got["drawer_position"]
+        assert got["drawer_width"] == 240, got["drawer_width"]
+        assert got["overlaps"] is False, "넓은데 대화를 덮었다"
+        assert got["chat_right"] <= got["drawer_left"] + 1, got
+        assert got["status_label_display"] != "none", "넓은데 상태 이름이 숨었다"
+    else:
+        # 좁은 창 — 덮는다 (사이드바와 같은 방식).
+        assert got["drawer_position"] == "absolute", got["drawer_position"]
+        assert got["overlaps"] is True, "좁은데 밀어냈다 (대화가 찌그러진다)"
+        assert got["drawer_width"] == width, got["drawer_width"]
+        # 아주 좁으면 상태는 **점만** 남는다 (이름은 title·메뉴에 그대로 있다).
+        assert got["status_label_display"] == "none", got["status_label_display"]
+    assert got["status_btn_visible"], "내 상태 버튼이 사라졌다"
+
+    # 점 색은 팔레트 토큰에서 나온다 (JS 가 색을 모른다).
+    assert got["dot_active"] == rgb(tokens["--status-active"]), got["dot_active"]
+    assert got["dot_dnd"] == rgb(tokens["--status-dnd"]), got["dot_dnd"]
+    assert got["dot_my"] == rgb(tokens["--status-away"]), got["dot_my"]
+    assert got["dot_card"] == rgb(tokens["--status-away"]), got["dot_card"]
+    assert len({got["dot_active"], got["dot_dnd"], got["dot_my"]}) == 3
+
+    # 정보 카드는 스크롤 상자 밖 좌표계다 (대화가 스크롤돼도 따라가지 않는다).
+    assert got["card_position"] == "fixed", got["card_position"]
+    assert got["card_visible"], "카드가 화면에 나오지 않는다"
+    # 제목이 **누를 수 있게** 보인다 (서랍을 여는 지름길이다).
+    assert got["title_cursor"] == "pointer", got["title_cursor"]
+
+
+@needs_browser
+def test_실제_앱에서_내_상태_메뉴가_JS_로_세워진다(served, tmp_path):
+    """⭐ stub DOM 이 못 잡는 구간 — **진짜 브라우저에서 그 모듈이 돌았나.**
+
+    메뉴 항목은 템플릿에 없다(이름의 단일 원천이 모듈의 표다). 그래서 덤프에
+    세 이름이 있다는 것은 `userstatus.js` 가 실제로 실려서 mount 까지 갔다는 뜻이다.
+    """
+    dom, console = open_headless(served.url, tmp_path / "profile")
+    assert not uncaught_lines(console), console[-1500:]
+
+    # 머리의 내 상태 — 기본값이 찍혀 있다.
+    assert 'id="my-status"' in dom
+    assert 'data-status="active"' in dom
+    # 메뉴 세 항목은 **JS 가 만든다** (템플릿에는 빈 상자뿐이다).
+    for label in ("활동 중", "자리 비움", "방해 금지"):
+        assert label in dom, f"메뉴에 {label} 이 없다 (모듈이 안 돌았다)"
+    assert dom.count("status-option") >= 3, dom.count("status-option")
+    # 서랍·카드는 있지만 **닫혀 있다** (처음부터 펼쳐져 있으면 안 된다).
+    assert re.search(r'<aside class="people" id="people"[^>]*hidden', dom), (
+        "서랍이 처음부터 열려 있다"
+    )
+    assert re.search(r'id="user-card"[^>]*hidden', dom), "카드가 처음부터 떠 있다"
+    # 상태 선언은 방이 있어야 나간다 — 방 0개인 이 앱에서는 요청이 없다.
+    assert not [p for p in served.paths if p.endswith("/reads")], served.paths

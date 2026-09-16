@@ -3359,6 +3359,142 @@ await test('저장소를 못 읽어도 화면이 뜬다 (기본값 · 활동 중
   assert.equal(broken.chat.userStatus(), statusMod.STATUS_AWAY);
 });
 
+await test('참여자 서랍 — 요약 버튼과 **제목 클릭**이 같은 트리거다', async () => {
+  const { doc, chat } = await boot({
+    reads: readsOf([
+      who('me@x.io', '', ['me.host'], 'active'),
+      who('b@x.io', msg(2).id, ['b.host'], 'away')
+    ], { me: 'me@x.io' })
+  });
+
+  assert.equal(chat.peopleOpen(), false, '서랍이 처음부터 열려 있다');
+  assert.equal(doc.getElementById('people-count-n').textContent, '2');
+
+  doc.getElementById('people-count').dispatch('click');
+  assert.equal(chat.peopleOpen(), true);
+  const rows = doc.getElementById('people-list').children;
+  assert.equal(rows.length, 2);
+  assert.ok(rows[0].textContent.includes('me@x.io'));
+  assert.ok(rows[0].textContent.includes('활동 중'), rows[0].textContent);
+  assert.ok(rows[1].textContent.includes('자리 비움'), rows[1].textContent);
+  /* ⭐ 읽은 자리도 같은 파일에서 온다 — 커서가 있으면 시각까지 보인다. */
+  assert.ok(rows[1].textContent.includes('까지 읽음'), rows[1].textContent);
+  assert.ok(rows[0].textContent.includes('아직 읽은 표시가 없다'), rows[0].textContent);
+
+  /* 제목 클릭은 **지름길**이다 (발견성은 요약 버튼이 담당한다). */
+  doc.getElementById('room-title').dispatch('click');
+  assert.equal(chat.peopleOpen(), false);
+  doc.getElementById('room-title').dispatch('click');
+  assert.equal(chat.peopleOpen(), true);
+  /* 키보드로 빠져나오는 길 · 닫기 버튼 */
+  doc.dispatch('keydown', { key: 'Escape' });
+  assert.equal(chat.peopleOpen(), false);
+  doc.getElementById('people-count').dispatch('click');
+  doc.getElementById('people-close').dispatch('click');
+  assert.equal(chat.peopleOpen(), false);
+});
+
+await test('⭐ 닫힌 서랍은 **그리지 않는다** (숫자만 갱신한다)', async () => {
+  const { doc, chat } = await boot({
+    reads: readsOf([who('me@x.io', '', ['me.host'])], { me: 'me@x.io' })
+  });
+  const created = doc.counts.createElement;
+
+  /* 남의 커서·상태가 움직였다 (SSE). 서랍은 닫혀 있다. */
+  chat.bus.emit('reads:state', {
+    roomId: 'r1',
+    state: readsOf([
+      who('me@x.io', '', ['me.host']),
+      who('b@x.io', msg(3).id, ['b.host'], 'dnd')
+    ], { me: 'me@x.io' })
+  });
+
+  assert.equal(doc.counts.createElement, created, '닫힌 서랍을 그렸다');
+  assert.equal(doc.getElementById('people-count-n').textContent, '2', '숫자가 안 바뀌었다');
+
+  /* 열면 그때 그린다 — 그리고 방금 온 값이 반영돼 있다. */
+  doc.getElementById('people-count').dispatch('click');
+  const rows = doc.getElementById('people-list').children;
+  assert.equal(rows.length, 2);
+  assert.ok(rows[1].textContent.includes('방해 금지'), rows[1].textContent);
+});
+
+await test('status 가 없는 **옛 스냅샷**은 활동 중으로 그린다 (호환)', async () => {
+  /* `who()` 는 상태를 안 주면 그 키를 아예 싣지 않는다 = 옛 서버의 응답 모양. */
+  const { doc, chat } = await boot({
+    reads: readsOf([who('b@x.io', '', ['b.host'])], { me: 'me@x.io' })
+  });
+  doc.getElementById('people-count').dispatch('click');
+  const rows = doc.getElementById('people-list').children;
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].textContent.includes('활동 중'), rows[0].textContent);
+  assert.ok(chat.peopleOpen());
+});
+
+await test('⭐ 작성자 정보 카드가 **네 배치 전부**에서 뜬다', async () => {
+  for (const layout of ['bubbles', 'log', 'ide', 'tty']) {
+    const { chat } = await boot({
+      stored: { 'gitwire-chat.layout': layout },
+      reads: readsOf([
+        who('me@x.io', '', ['me.host'], 'active'),
+        who('a@x.io', msg(1).id, ['a.host'], 'away')
+      ], { me: 'me@x.io' })
+    });
+    const node = chat.nodes().get(msg(2).id);
+    assert.ok(node.authorSlot, layout + ' 배치에서 작성자 조각을 못 찾았다');
+
+    node.authorSlot.dispatch('mouseenter');
+    const card = chat.userCard();
+    assert.ok(card, layout + ' 배치에서 카드가 뜨지 않는다');
+    assert.equal(card.name, '앨리스', layout);
+    assert.equal(card.status, '자리 비움', layout);
+    assert.ok(card.read.includes('까지 읽음'), layout + ': ' + card.read);
+
+    node.authorSlot.dispatch('mouseleave');
+    assert.equal(chat.userCard(), null, layout + ' 배치에서 카드가 안 닫힌다');
+
+    /* 호버가 없는 기기(터치) — 누르면 뜨고, 다시 누르면 닫힌다. */
+    node.authorSlot.dispatch('click');
+    assert.ok(chat.userCard(), layout + ' 배치에서 눌러도 안 뜬다');
+    node.authorSlot.dispatch('click');
+    assert.equal(chat.userCard(), null, layout + ' 배치에서 다시 눌러도 안 닫힌다');
+  }
+});
+
+await test('⭐ 카드 배선에 **배치별 코드가 0줄**이다 (정적 검사)', () => {
+  const src = fs.readFileSync(path.join(STATIC, 'js', 'message-node.js'), 'utf8');
+  const chunks = src.split(/\n(?=(?:export )?function )/);
+  const byName = {};
+  for (const chunk of chunks) {
+    const m = /^(?:export )?function (\w+)/.exec(chunk);
+    if (m) { byName[m[1]] = chunk; }
+  }
+  /* 네 구조 함수 안에는 카드 배선이 **한 글자도** 없다. */
+  for (const name of ['buildBubble', 'buildLogRow', 'buildIdeRow', 'buildTtyRow']) {
+    const body = byName[name];
+    assert.ok(body, '구조 함수를 못 찾았다: ' + name);
+    for (const needle of ['authorCard', 'onAuthor', 'authorSlot', 'user-card']) {
+      assert.ok(body.indexOf(needle) < 0, name + ' 안에 카드 코드가 있다: ' + needle);
+    }
+  }
+  /* 배선은 **공통 껍데기 한 곳**이다. */
+  assert.ok(byName.buildMessage.indexOf('authorCard(wrap, msg, hooks)') >= 0,
+    'buildMessage 가 카드를 배선하지 않는다');
+  const calls = src.split('authorCard(').length - 1;
+  assert.equal(calls, 2, '카드 배선 호출이 하나가 아니다 (정의 1 + 호출 1)');
+});
+
+await test('참가자 파일이 없는 사람은 **모른다고** 말한다 (지어내지 않는다)', async () => {
+  const { chat } = await boot({
+    reads: readsOf([who('me@x.io', '', ['me.host'], 'active')], { me: 'me@x.io' })
+  });
+  const node = chat.nodes().get(msg(2).id);       /* 작성자 a.host — 파일이 없다 */
+  node.authorSlot.dispatch('mouseenter');
+  const card = chat.userCard();
+  assert.equal(card.status, '상태를 모른다');
+  assert.equal(card.read, '');
+});
+
 /* -------------------------------------------------------------- 보고 */
 
 let failed = 0;

@@ -285,8 +285,12 @@ export const ELEMENT_IDS = [
   'layout-select', 'layout-note',
   'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd',
   'update-compare', 'run-update', 'confirm-update', 'cancel-update',
-  /* 가용 상태 */
-  'my-status', 'my-status-dot', 'my-status-label', 'my-status-menu'
+  /* 가용 상태 · 참여자 서랍 · 작성자 정보 카드 */
+  'my-status', 'my-status-dot', 'my-status-label', 'my-status-menu',
+  'people-count', 'people-count-n', 'people', 'people-list', 'people-empty',
+  'people-close',
+  'user-card', 'user-card-dot', 'user-card-name', 'user-card-status',
+  'user-card-read'
 ];
 
 /* IntersectionObserver 대역.
