@@ -144,8 +144,7 @@ export function createReads(env) {
 
   var roomId = null;
   /* 서버가 준 스냅샷. **사본을 두 벌 만들지 않는다** — 화면은 이걸 읽는다. */
-  var model = { me: '', person: '', cursor: '', status: '',
-    firstUnread: null, participants: [] };
+  var model = { me: '', person: '', cursor: '', firstUnread: null, participants: [] };
   /* 아직 서버에 알리지 않은, 화면에 들어온 최대 메시지 ID. */
   var pending = '';
   var timer = null;
@@ -180,9 +179,6 @@ export function createReads(env) {
       me: data.me || '',
       person: data.person || '',
       cursor: sane(data.cursor),
-      /* 내가 **발행한** 가용 상태. 드롭다운이 고르고 있는 값과 다를 수 있고
-         (아직 안 나갔다·다른 기기가 바꿨다), 그 차이가 보여야 한다. */
-      status: data.status || '',
       firstUnread: data.first_unread || null,
       participants: clean
     };
@@ -285,8 +281,7 @@ export function createReads(env) {
       roomId = e.id;
       pending = '';
       if (timer !== null) { win.clearTimeout(timer); timer = null; }
-      model = { me: '', person: '', cursor: '', status: '',
-        firstUnread: null, participants: [] };
+      model = { me: '', person: '', cursor: '', firstUnread: null, participants: [] };
       return load(e.id);
     });
     /* 타임라인이 창을 그릴 때마다 알려 준다 (창 안에 무엇이 있는지 아는 곳). */
