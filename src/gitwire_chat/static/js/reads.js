@@ -103,6 +103,39 @@ export function countUnread(participants, msg) {
   return n;
 }
 
+/* ⭐ **이 메시지를 쓴 사람의 참가자 파일**을 찾는다 — 짝짓는 규칙은 위 카운트
+ * 공식의 1번과 **같은 것**이다 (봉투에는 사람 키가 아니라 설치본 식별자만 있다).
+ * 규칙이 두 벌이 되면 "카운트에서는 작성자인데 상태 카드에서는 남"인 상태가
+ * 생긴다 — 그래서 한 파일 안에 나란히 둔다.
+ *
+ * 쓰는 곳은 작성자 정보 카드(`people.js`)다. 못 찾으면 `null` — 아직 참가자 파일이
+ * 없는 사람(설치했지만 그 방을 안 연)이거나, 아직 봉투가 없는 낙관적 항목이다.
+ */
+export function participantOf(participants, sender) {
+  if (!participants || !sender) { return null; }
+  for (var i = 0; i < participants.length; i++) {
+    var p = participants[i];
+    if (!p) { continue; }
+    var senders = p.senders || [];
+    if (senders.indexOf(sender) >= 0) { return p; }
+  }
+  return null;
+}
+
+/* 커서(= 봉투 ID)에서 **시각**을 꺼낸다. 없거나 형식이 아니면 빈 문자열.
+ *
+ * ID 는 `records/<날짜8>/<타임스탬프17>-…` 이고 그 앞머리가 고정폭 시각이다.
+ * 파생 규칙을 여기 두는 이유: ID 형식의 주인이 이 파일이기 때문이다(위 정규식).
+ * 화면 쪽에 또 하나 두면 형식이 바뀔 때 두 곳이 어긋난다.
+ */
+export function cursorTime(id) {
+  if (!isMessageId(id)) { return ''; }
+  var stamp = id.split('/')[2].split('-')[0];       /* 20260909T001442118Z */
+  return stamp.slice(0, 4) + '-' + stamp.slice(4, 6) + '-' + stamp.slice(6, 8) +
+    'T' + stamp.slice(9, 11) + ':' + stamp.slice(11, 13) + ':' +
+    stamp.slice(13, 15) + '.' + stamp.slice(15, 18) + 'Z';
+}
+
 export function createReads(env) {
   var dom = env.dom;
   var bus = env.bus;
@@ -111,7 +144,8 @@ export function createReads(env) {
 
   var roomId = null;
   /* 서버가 준 스냅샷. **사본을 두 벌 만들지 않는다** — 화면은 이걸 읽는다. */
-  var model = { me: '', person: '', cursor: '', firstUnread: null, participants: [] };
+  var model = { me: '', person: '', cursor: '', status: '',
+    firstUnread: null, participants: [] };
   /* 아직 서버에 알리지 않은, 화면에 들어온 최대 메시지 ID. */
   var pending = '';
   var timer = null;
@@ -146,6 +180,9 @@ export function createReads(env) {
       me: data.me || '',
       person: data.person || '',
       cursor: sane(data.cursor),
+      /* 내가 **발행한** 가용 상태. 드롭다운이 고르고 있는 값과 다를 수 있고
+         (아직 안 나갔다·다른 기기가 바꿨다), 그 차이가 보여야 한다. */
+      status: data.status || '',
       firstUnread: data.first_unread || null,
       participants: clean
     };
@@ -190,8 +227,17 @@ export function createReads(env) {
     stats.marks += 1;
     bus.emit('reads:changed', { roomId: room });
     stats.posts += 1;
+    /* ⭐ 커서가 전진한다 = **지금 읽고 있다** → 가용 상태는 `활동 중` 이다
+       (`방해 금지`도 이 규칙으로 풀린다 — 읽으러 들어왔다 = 받겠다는 뜻).
+       버스는 **동기로** 부르므로 바로 아래에서 읽는 값에 이미 반영돼 있다. */
+    bus.emit('status:active', { roomId: room });
+    var body = { cursor: id };
+    /* 상태를 **이 요청에 얹는다** — 상태 때문에 왕복이 하나 더 생기지 않는다.
+       그 모듈이 서지 못했으면 아무것도 싣지 않는다(서버가 커서만 처리한다). */
+    var mine = env.userStatus ? env.userStatus() : null;
+    if (mine && mine.current) { body.status = mine.current(); }
     return api('/api/rooms/' + encodeURIComponent(room) + '/reads', {
-      method: 'POST', body: { cursor: id }
+      method: 'POST', body: body
     }).then(function (data) {
       if (roomId !== room) { return; }
       apply(data);                 /* 서버 값이 정본이다 (내 추측을 덮는다) */
@@ -239,7 +285,8 @@ export function createReads(env) {
       roomId = e.id;
       pending = '';
       if (timer !== null) { win.clearTimeout(timer); timer = null; }
-      model = { me: '', person: '', cursor: '', firstUnread: null, participants: [] };
+      model = { me: '', person: '', cursor: '', status: '',
+        firstUnread: null, participants: [] };
       return load(e.id);
     });
     /* 타임라인이 창을 그릴 때마다 알려 준다 (창 안에 무엇이 있는지 아는 곳). */

@@ -70,6 +70,12 @@
   --sender-4: #8d620e;
   --sender-5: #30760b;
   --sender-6: #0b7651;
+  /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+     (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+     색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+  --status-active: #1c7c3e;
+  --status-away: #8a5a00;
+  --status-dnd: #c0392b;
   /* 색이 아닌 것 (팔레트를 갈아도 같다) */
   --radius: 12px;
   --gap: 10px;
@@ -110,6 +116,12 @@
     --sender-4: #ffbf4d;
     --sender-5: #8dff4d;
     --sender-6: #4dffbf;
+    /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+       (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+       색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+    --status-active: #5fd38a;
+    --status-away: #e0b06a;
+    --status-dnd: #e08076;
   }
 }
 
@@ -144,6 +156,12 @@
   --sender-4: #c4a37f;
   --sender-5: #a0c47f;
   --sender-6: #7fc4a3;
+  /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+     (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+     색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+  --status-active: #6fbf8f;
+  --status-away: #e0b06a;
+  --status-dnd: #dd7065;
   color-scheme: dark;
 }
 
@@ -178,6 +196,12 @@
   --sender-4: #dbaf82;
   --sender-5: #aedb82;
   --sender-6: #82dbaf;
+  /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+     (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+     색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+  --status-active: #86c79b;
+  --status-away: #e0b06a;
+  --status-dnd: #e1847a;
   color-scheme: dark;
 }
 
@@ -212,6 +236,12 @@
   --sender-4: #9f7ab1;
   --sender-5: #b0778a;
   --sender-6: #a8936a;
+  /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+     (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+     색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+  --status-active: #7fa86a;
+  --status-away: #c08a3e;
+  --status-dnd: #da6559;
   color-scheme: dark;
 }
 
@@ -246,6 +276,12 @@
   --sender-4: #d9ad7b;
   --sender-5: #a7d97b;
   --sender-6: #7bd9ad;
+  /* 가용 상태 점. 점은 글자가 아니라 UI 요소라 기준이 3.0 이지만
+     (WCAG 1.4.11), 이 값들은 바닥 네 종류 모두에서 4.0 을 넘는다 —
+     색만으로 뜻을 전하지 않도록 **옆에 이름이 늘 붙는다.** */
+  --status-active: #8fcba8;
+  --status-away: #e0b06a;
+  --status-dnd: #dd7469;
   color-scheme: dark;
 }
 
@@ -1186,4 +1222,88 @@ a.button {
   background: transparent;
   color: var(--accent);
   font-weight: 600;
+}
+
+/* ═══════════════════════════════════════════════════════ 가용 상태 · 참여자
+ *
+ * 세 조각이 **같은 사실**을 다른 크기로 보여 준다:
+ *   · 머리의 내 상태 드롭다운   — 내 것을 바꾸는 자리 (항상 보인다)
+ *   · 오른쪽 참여자 서랍        — 전체를 훑는 자리 (열었을 때만)
+ *   · 작성자 정보 카드          — 이 말을 쓴 사람 하나 (호버·초점일 때만)
+ *
+ * ⭐ 점은 **훑기용 단서**이고 뜻은 옆의 이름이 전한다 — 색만으로 상태를 말하지
+ * 않는다. 색은 전부 팔레트 토큰이다 (이 구역에 색 리터럴은 없다).
+ *
+ * ⚠️ 메시지 줄에는 점을 **찍지 않는다.** `log`·`tty` 는 줄마다 작성자가 나오므로
+ * 같은 사실이 화면에 N 번 그려지고, 상태가 바뀔 때마다 N 개를 다시 칠해야 한다
+ * (`ide` 도 묶음마다 한 번이라 정도만 다르다). 그 비용을 지지 않는 대신 호버 카드와
+ * 서랍이 그 자리를 맡는다.
+ */
+
+/* 점 하나 — 세 곳이 같은 조각을 쓴다 (모양이 어긋날 자리가 없다). */
+.status-dot {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+}
+[data-status="active"] > .status-dot { color: var(--status-active); }
+[data-status="away"] > .status-dot { color: var(--status-away); }
+[data-status="dnd"] > .status-dot { color: var(--status-dnd); }
+
+/* --- 머리의 내 상태 ------------------------------------------------- */
+
+.my-status { position: relative; flex: none; }
+
+.status-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 11ch;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.status-btn .caret { color: var(--muted); font-size: 10px; }
+.status-label { overflow: hidden; text-overflow: ellipsis; }
+
+/* 열렸을 때만 존재한다 (`hidden`). 머리 아래에 떠서 **줄을 밀지 않는다** —
+   밀면 열고 닫을 때마다 대화 영역의 높이가 바뀐다. */
+.status-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.status-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.status-option:hover { background: var(--bg); }
+.status-option.on { background: var(--accent); color: var(--accent-ink); }
+
+/* 아주 좁을 때 — 머리가 넘치지 않게 내 상태는 **점만** 남긴다 (이름은 title·
+   aria-label 에 그대로 있고, 눌러서 연 메뉴에는 세 이름이 다 보인다). */
+@media (max-width: 480px) {
+  .status-btn { max-width: none; padding: 4px 6px; }
+  .status-label { display: none; }
 }

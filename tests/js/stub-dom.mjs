@@ -284,7 +284,9 @@ export const ELEMENT_IDS = [
   'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',
   'layout-select', 'layout-note',
   'update-bar', 'check-update', 'update-note', 'update-cmd', 'copy-update-cmd',
-  'update-compare', 'run-update', 'confirm-update', 'cancel-update'
+  'update-compare', 'run-update', 'confirm-update', 'cancel-update',
+  /* 가용 상태 */
+  'my-status', 'my-status-dot', 'my-status-label', 'my-status-menu'
 ];
 
 /* IntersectionObserver 대역.

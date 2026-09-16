@@ -154,9 +154,27 @@
     <header class="chat-head">
       <button type="button" class="icon-btn back" id="back" title="방 목록">‹</button>
       <div class="titles">
+        <!-- ⭐ 제목을 누르면 참여자 서랍이 열린다 (지름길). **발견성은 옆의 참여자
+             버튼이 담당한다** — 제목만으로는 누를 수 있다는 것을 알 수 없어서다.
+             그래도 누를 수 있다는 것은 보여야 하므로 커서·호버 표시를 준다. -->
         <h2 id="room-title">방을 고르자</h2>
         <p class="sub" id="room-sub"></p>
       </div>
+
+      <!-- ⭐ 내 **가용 상태**. "지금 보고 있나"(관찰)가 아니라 "지금 메시지를 읽을
+           수 있나"를 내가 선언하는 값이다 (static/js/userstatus.js).
+           메뉴 항목은 JS 가 만든다 — 이름·설명의 단일 원천이 그 모듈의 `STATUSES`
+           표이고, 여기 손으로 적으면 두 곳이 어긋난다. -->
+      <div class="my-status">
+        <button type="button" class="status-btn" id="my-status" data-status="active"
+                title="내 상태" aria-haspopup="true" aria-expanded="false">
+          <span class="status-dot" id="my-status-dot" aria-hidden="true">●</span>
+          <span class="status-label" id="my-status-label">활동 중</span>
+          <span class="caret" aria-hidden="true">⌄</span>
+        </button>
+        <div class="status-menu" id="my-status-menu" hidden></div>
+      </div>
+
       <button type="button" class="icon-btn" id="refresh" title="지금 당겨오기">↻</button>
       <button type="button" class="icon-btn" id="toggle-search" title="검색">⌕</button>
     </header>
@@ -226,6 +244,7 @@
 
     <p class="status" id="status"></p>
   </main>
+
 </div>
 
 <!-- 진입점 하나. ES 모듈이라 의존이 import 로 명시되고, 로딩 순서 문제가
