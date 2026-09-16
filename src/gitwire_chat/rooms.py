@@ -696,8 +696,12 @@ class RoomManager:
         # 으로 밀어낸다 — 읽음 발행이 메시지보다 앞서 끼어들 여지가 없다.
         try:
             tracker = self.reads(room_id)
-            if tracker.mark(record.id):
-                tracker.publish()
+            tracker.mark(record.id)
+            # ⭐ **전송 = 활동 중.** 말을 보낸 사람이 "메시지를 읽을 수 없는 상태"
+            # 일 수는 없다. 그래서 커서가 움직였는지와 무관하게 발행을 시도한다 —
+            # 바뀔 것이 없으면 `publish` 의 가드가 아무것도 쓰지 않는다(그 가드가
+            # 있으므로 여기서 조건을 한 번 더 세지 않는다).
+            tracker.publish(status=_reads.STATUS_ACTIVE)
         except Exception:  # noqa: BLE001 — 읽음 표시가 전송을 막지 않는다
             log.debug("방 %s 전송 후 읽음 커서 전진 실패", room_id, exc_info=True)
         # 파일이 생긴 **뒤에** 센다. 순서가 반대면 append 가 실패한 건까지 세어
@@ -764,21 +768,37 @@ class RoomManager:
             self._nudge_outbox(room_id)
         return tracker.view()
 
-    def mark_read(self, room_id: str, message_id: str) -> _reads.ReadView:
-        """"여기까지 읽었다" — 로컬 커서를 전진시키고 발행을 아웃박스에 맡긴다.
+    def mark_read(
+        self, room_id: str, message_id: str, *, status: str | None = None
+    ) -> _reads.ReadView:
+        """"여기까지 읽었다" (+ 가용 상태) — 발행은 아웃박스에 맡긴다.
 
         ⭐ **내 쪽은 낙관적이다**: 로컬 커서는 즉시 움직이고(그래서 뱃지가 바로
-        줄어든다), 남에게 알리는 push 는 뒤에서 나간다. 커서가 안 움직였으면
-        발행도 하지 않는다 — 같은 값을 되풀이해 push 하지 않는다.
+        줄어든다), 남에게 알리는 push 는 뒤에서 나간다. 커서도 상태도 안 바뀌었으면
+        발행도 하지 않는다 — 같은 값을 되풀이해 push 하지 않는다(`publish` 가드).
+
+        ⭐ **커서와 상태는 다른 축이다.** 커서가 안 움직여도 상태만 바뀔 수 있고
+        (창을 닫았다 · 직접 골랐다), 그 반대도 된다. 그래서 둘 중 하나라도 왔으면
+        발행을 시도한다.
+
+        ⭐ `status` 가 없는데 **커서가 전진했다면 `활동 중`** 이다 — 새 메시지를
+        읽었다는 것이 곧 "지금 받을 수 있다"는 선언이다 (그래서 `방해 금지`도 이
+        규칙으로 풀린다: 읽으러 들어왔다 = 받겠다는 뜻. Teams 관례와 **의도적으로**
+        다르다). 화면이 같은 규칙을 이미 적용해 값을 실어 보내므로 이것은 그
+        규칙의 서버 쪽 바닥이다 (화면이 아닌 호출자·옛 클라이언트도 덮는다).
 
         ⭐ 실제 봉투 ID 가 아니면 `reads.InvalidCursor` 가 올라간다 (여기서 삼키지
         않는다 — HTTP 400 이 되어 화면에 드러난다).
         """
         tracker = self.reads(room_id)
         moved = tracker.mark(message_id)
-        if moved:
-            if tracker.publish():
-                self._nudge_outbox(room_id)
+        want = status
+        if want is None and moved:
+            want = _reads.STATUS_ACTIVE
+        published = tracker.publish(status=want)
+        if published:
+            self._nudge_outbox(room_id)
+        if moved or published:
             # 뱃지(방 목록)와 방 안 카운트가 같은 사실의 두 표현이라 함께 알린다.
             self._publish_reads(room_id, tracker.view())
             self._publish_rooms()

@@ -89,6 +89,11 @@ export function buildMessage(dom, msg, hooks, layout) {
   /* 읽음 자리·구분선은 **구조와 무관하다** — 어느 배치든 같은 두 조각을 단다.
      그래서 배치를 하나 더 붙일 때 읽음 표시를 다시 배선하지 않는다. */
   readSlots(dom, wrap);
+  /* ⭐ 작성자 정보 카드(가용 상태)도 **구조와 무관하다.** 네 배치가 전부
+     `<span class="author">` 를 쓰므로 여기서 **한 번** 배선하면 넷에 동시에
+     붙는다 — 배치별 코드가 0 줄이다. 카드 자체는 화면에 한 장뿐이고
+     (`people.js`), 여기서는 "이 이름에 포인터가 왔다"만 알린다. */
+  authorCard(wrap, msg, hooks);
   /* 전송 상태는 구조와 무관하다 — 어느 구조든 같은 함수가 덧입힌다. */
   paintState(dom, wrap, msg, hooks);
   /* ⚠️ 읽음 카운트는 여기서 그리지 않는다. 한때 `paintReads(wrap, msg.reads)` 가
@@ -98,6 +103,57 @@ export function buildMessage(dom, msg, hooks, layout) {
      오진의 출처가 됐다. 카운트를 덧입히는 곳은 창을 아는 `timeline.js` 한 곳이다. */
   paintNewFrom(dom, wrap, msg.newFrom === true);
   return wrap;
+}
+
+/* 노드 안의 **작성자 이름 조각**을 찾는다 (구조를 모르는 채로).
+ *
+ * 배치마다 그 조각이 앉는 자리가 다르다 — 말풍선·`ide` 는 머리 안, `log`·`tty` 는
+ * 노드 바로 아래다. 여기서 배치 이름으로 갈래를 타면 그 순간 "배치별 코드"가
+ * 생기고, 배치를 하나 더 붙일 때 이 파일 **두 곳**을 고쳐야 한다. 그래서 이름표
+ * 하나(`.author`)로 찾는다 — 그 클래스는 네 구조의 **계약**이고, 어긋나면
+ * stub DOM 테스트가 먼저 깨진다.
+ *
+ * ⚠️ `querySelector` 를 쓰지 않는다 — 이 앱의 노드는 테스트에서 stub DOM 위에서도
+ * 만들어지고, 거기엔 선택자 엔진이 없다(의도적으로 — DOM 조작을 세는 것이 그
+ * 하네스의 목적이다). 얕은 트리라 훑는 비용도 사실상 없다. */
+function findAuthor(node) {
+  var stack = [node];
+  while (stack.length) {
+    var current = stack.pop();
+    var kids = current.children || [];
+    for (var i = 0; i < kids.length; i++) {
+      var kid = kids[i];
+      if (String(kid.className || '').split(' ').indexOf('author') >= 0) {
+        return kid;
+      }
+      stack.push(kid);
+    }
+  }
+  return null;
+}
+
+/* 작성자 이름에 정보 카드를 배선한다. 노드를 **하나도 더 만들지 않는다** —
+   포인터가 왔다는 사실만 알리고, 그리는 일은 카드 한 장의 주인이 한다.
+
+   포인터(호버)와 누르기 둘 다 받는다: 호버가 없는 기기(터치)에서는 누르는 것이
+   유일한 길이고, 그때는 **토글**이라 다시 누르면 닫힌다. */
+function authorCard(wrap, msg, hooks) {
+  if (!hooks || !hooks.onAuthor) { return false; }
+  var slot = findAuthor(wrap);
+  if (!slot) { return false; }
+  /* 참조를 들고 있는 이유는 `stateSlot`·`readsSlot` 과 같다 — 나중에 이 자리만
+     다시 쓰기 위해서다 (그리고 테스트가 잡을 손잡이가 된다). */
+  wrap.authorSlot = slot;
+  slot.addEventListener('mouseenter', function () {
+    hooks.onAuthor(msg, { at: slot, show: true });
+  });
+  slot.addEventListener('mouseleave', function () {
+    hooks.onAuthor(msg, { at: slot, show: false });
+  });
+  slot.addEventListener('click', function () {
+    hooks.onAuthor(msg, { at: slot, show: true, toggle: true });
+  });
+  return true;
 }
 
 /* 읽음 카운트 자리를 노드에 만든다 (평소엔 숨음). 참조를 들고 있는 이유는

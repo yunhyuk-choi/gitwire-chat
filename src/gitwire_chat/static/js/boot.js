@@ -37,6 +37,8 @@ import { createSearch } from './search.js';
 import { createStream } from './stream.js';
 import { createReads } from './reads.js';
 import { createPresence } from './presence.js';
+import { createUserStatus } from './userstatus.js';
+import { createPeople } from './people.js';
 import { createTheme, fallbackToDefault, DEFAULT_LAYOUT } from './theme.js';
 import { createUpdate } from './update.js';
 
@@ -144,8 +146,15 @@ export function createApp(runtime) {
     modules.stream = setup('받기', createStream);
     /* 읽음 모델. **타임라인보다 먼저** 세운다 — 타임라인이 카운트를 물어보기
        때문이다. 이 단위가 넘어져도 대화는 그대로 뜬다 (카운트만 0 이 된다). */
+    /* 내 **가용 상태**. 읽음보다 먼저 세운다 — 읽음이 커서를 알릴 때 이 값을
+       같은 요청에 실어 보내기 때문이다. 이 단위가 넘어져도 읽음은 그대로 돈다
+       (상태만 안 실린다 — 서버가 커서만 처리한다). */
+    modules.userstatus = setup('내 상태', createUserStatus);
+    env.userStatus = function () { return modules.userstatus; };
     modules.reads = setup('읽음', createReads);
     env.reads = function () { return modules.reads; };
+    /* 참여자 서랍·작성자 카드. 읽음 **뒤**에 세운다 (그 모델을 읽어 그린다). */
+    modules.people = setup('참여자', createPeople);
     modules.presence = setup('알림·가시성', createPresence);
     modules.update = setup('갱신 알림', createUpdate);
     modules.timeline = setup('타임라인', createTimeline, function (mod, err) {
@@ -199,6 +208,14 @@ export function createApp(runtime) {
     send: function () { return modules.composer ? modules.composer.send() : undefined; },
     outbox: function () { return modules.outbox ? modules.outbox.state() : null; },
     reads: function () { return modules.reads ? modules.reads.model() : null; },
+    /* --- 가용 상태·참여자 (테스트·디버깅이 붙는 창) --- */
+    userStatus: function () { return modules.userstatus ? modules.userstatus.current() : null; },
+    setStatus: function (id) { return modules.userstatus ? modules.userstatus.set(id) : undefined; },
+    statusMenuOpen: function () { return modules.userstatus ? modules.userstatus.isOpen() : false; },
+    toggleStatusMenu: function (on) { if (modules.userstatus) { modules.userstatus.open(on); } },
+    peopleOpen: function () { return modules.people ? modules.people.isOpen() : false; },
+    togglePeople: function (on) { if (modules.people) { modules.people.open(on); } },
+    userCard: function () { return modules.people ? modules.people.card() : null; },
     readsStats: function () { return modules.reads ? modules.reads.stats : null; },
     markRead: function (id) { return modules.reads ? modules.reads.seen(id) : false; },
     flushReads: function () { return modules.reads ? modules.reads.flushNow() : undefined; },

@@ -272,6 +272,13 @@ for _slot in range(1, 7):
     for _surface in ("--bg", "--panel", "--stripe", "--mine"):
         TEXT_PAIRS.append((f"--sender-{_slot}", _surface, 4.5, f"발신자 {_slot}"))
 
+#: 가용 상태 점 3종. **글자가 아니라 UI 요소**라 기준은 3.0 이다 (WCAG 1.4.11) —
+#: 뜻은 늘 옆의 이름이 전하고 점은 훑기용 단서다. 점이 앉는 바닥은 머리·서랍·
+#: 정보 카드(`--panel`)와 대화 바닥(`--bg`) 둘이다.
+for _role in ("active", "away", "dnd"):
+    for _surface in ("--bg", "--panel"):
+        TEXT_PAIRS.append((f"--status-{_role}", _surface, 3.0, f"상태 점 {_role}"))
+
 #: 떠 있는 발신자 머리(`ide` 의 묶기)는 `--bg` 바닥 위에 앉는다 — 이름이 그 위에서
 #: 읽혀야 "누가 말했는지 화면에 있다"가 성립한다. 발신자 색 6종은 위에서 이미
 #: `--bg` 를 보고, 남은 두 이름색을 여기서 본다.

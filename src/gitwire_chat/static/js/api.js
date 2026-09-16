@@ -26,6 +26,12 @@ export function createApi(fetchImpl) {
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(opts.body);
     }
+    /* ⭐ `keepalive` 는 **창이 닫히는 중에도 요청을 살려 두라**는 표준 플래그다.
+       쓰는 곳은 언로드 경로 하나뿐이고(가용 상태의 `자리 비움`), 그 자리에서는
+       이것이 없으면 브라우저가 요청을 취소해 마지막 선언이 영영 나가지 않는다.
+       모든 요청에 일괄로 붙이지 않는다 — 브라우저가 이 플래그에 별도의 (작은)
+       본문 상한을 두기 때문이고, 필요한 곳이 한 곳이면 호출 지점에 이유가 남는다. */
+    if (opts.keepalive) { init.keepalive = true; }
     return fetchImpl(path, init).then(function (res) {
       return res.json().then(function (data) {
         if (!res.ok) {

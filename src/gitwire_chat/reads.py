@@ -27,6 +27,23 @@
 2주치다. keyset 페이징으로 없앤 전량 스캔이 그대로 되살아난다. 그래서 기반의
 **참가자 상태 예약 경로**(`gitwire.state`)에 쓴다: 파일 하나 = 사람 하나, 덮어쓴다.
 
+⭐ 같은 파일에 **가용 상태**를 얹는다 (새 파일을 만들지 않는다)
+--------------------------------------------------------------
+`활동 중`·`자리 비움`·`방해 금지` — 전부 "지금 메시지를 읽을 수 있나"라는 **능력**
+축이고, 사람이 선언하는 값이다 (관찰이 아니다). 그래서:
+
+* **하트비트가 없다.** 값이 바뀌는 계기는 이벤트뿐이다 — 메시지 전송 · 커서 전진
+  (= 새 메시지를 읽음) · 창 닫기 · 본인 선택. 주기적으로 쓰면 그 자체가 커밋이고,
+  아무 일도 없는 방이 하루 종일 자라난다.
+* **커서와 같은 파일**에 산다. 쓰기자가 같고(본인), 읽는 쪽이 이미 그 파일 집합을
+  나열하고 있다 — 파일을 하나 더 만들면 나열이 한 번 더 늘 뿐이다.
+* **바뀔 게 없으면 여전히 안 쓴다** (`publish` 의 가드). 상태가 바뀐 것도 "바뀜"에
+  포함시키되, 커서·상태가 둘 다 그대로면 파일을 만지지 않는다.
+
+옛 버전과 **양방향으로** 호환된다: 옛 클라이언트는 모르는 키를 무시하므로
+(`parse_state`) 새 파일에서 커서를 그대로 읽고, 새 클라이언트는 `status` 가 없는
+파일을 기본값(`활동 중`)으로 읽는다.
+
 식별자 = `git user.email` (**사람** 단위)
 ----------------------------------------
 설치본 식별자(`installation_id`)를 쓰면 한 사람이 노트북·데스크탑을 쓸 때
@@ -88,6 +105,29 @@ log = logging.getLogger(__name__)
 CURSOR_KIND = "read-cursor"
 CURSOR_SCHEMA = 1
 
+#: ⭐ **사용자 가용 상태** — 같은 파일에 얹은 두 번째 사실.
+#:
+#: "지금 보고 있나"(인스타식 관찰)가 아니라 **"지금 메시지를 읽을 수 있는 상태인가"**
+#: 를 사람이 선언하는 값이다. 그래서 하트비트도 자동 만료도 없다 — 값이 바뀌는
+#: 계기는 *이벤트*뿐이다 (전송·커서 전진·창 닫기·본인 선택).
+#:
+#: ⭐ **새 파일을 만들지 않는다.** 커서와 같은 `participants/<키>.json` 의 `value`
+#: 에 키 하나로 얹는다. 그 파일은 **경로당 단일 쓰기자**(본인)라 충돌이 구조적으로
+#: 생기지 않는데, 파일을 하나 더 만들면 그 성질을 한 번 더 증명해야 하고 읽는 쪽도
+#: 나열을 한 번 더 해야 한다.
+#:
+#: ⚠️ 저장값은 **ASCII 열쇠**다 (화면 문구가 아니다). 화면에 보이는 한국어 이름은
+#: 브라우저가 갖는다 (`static/js/userstatus.js` 의 `STATUSES`) — 문구를 파일에
+#: 적으면 그것이 곧 스키마가 되어, 문구를 다듬는 일이 원격 데이터 이전이 된다.
+STATUS_ACTIVE = "active"
+STATUS_AWAY = "away"
+STATUS_DND = "dnd"
+STATUSES = (STATUS_ACTIVE, STATUS_AWAY, STATUS_DND)
+
+#: 기본값·초기값. `status` 키가 **없는 옛 파일**도 여기로 읽힌다 (양방향 호환의
+#: 한쪽 — 반대쪽은 `parse_state` 가 모르는 키를 무시하는 성질이 이미 갖고 있다).
+DEFAULT_STATUS = STATUS_ACTIVE
+
 #: **내** 읽은 위치용 로컬 커서의 소비자 이름. 폴러가 쓰는 `chat` 과 다른 이름을
 #: 쓴다 — 기반이 소비자별로 커서를 나눠 주므로(`gitwire.CursorStore`) 새 저장
 #: 규약을 만들 필요가 없다. 이 커서는 **발행되지 않는다.**
@@ -143,6 +183,22 @@ def sane_cursor(cursor: Any, *, where: str = "") -> str:
     return ""
 
 
+def sane_status(value: Any) -> str:
+    """읽어 들인 상태를 **아는 값으로만** 좁힌다. 아니면 기본값(`활동 중`).
+
+    ⚠️ 커서(`sane_cursor`)와 달리 **경고하지 않는다.** 모르는 값의 가장 그럴듯한
+    출처는 *나보다 새 버전이 쓴 네 번째 상태*이고, 그건 결함이 아니라 버전 차이다.
+    상태를 모르면 "받을 수 있다"로 보는 쪽이 안전하다 — 반대(조용히 자리 비움)는
+    상대가 "저 사람은 못 받는다"고 오해하게 만든다.
+    """
+    text = str(value or "").strip()
+    if text in STATUSES:
+        return text
+    if text:
+        log.debug("모르는 가용 상태다 — 기본값으로 본다: %r", text)
+    return DEFAULT_STATUS
+
+
 def person_id(home=None, *, runner=None) -> str:
     """이 **사람**의 식별자. `git config user.email` 이 정본이다.
 
@@ -190,6 +246,14 @@ class ReadCursor:
     **자기 것만 쓰므로** 이 목록도 단일 쓰기자 규율 안에 있다.
     """
 
+    status: str = DEFAULT_STATUS
+    """이 사람이 **선언한** 가용 상태 (`STATUSES`). 없던 파일이면 기본값이다.
+
+    커서와 같은 파일에 있지만 **다른 축**이다 — 커서는 "어디까지 읽었나"(사실),
+    이것은 "지금 읽을 수 있나"(선언)다. 한 파일에 둔 이유는 쓰기자가 같고
+    (본인), 읽는 쪽이 이미 그 파일을 나열하고 있기 때문이다.
+    """
+
     updated_at: str = ""
 
     def to_json(self) -> dict:
@@ -198,17 +262,26 @@ class ReadCursor:
             "key": self.key,
             "cursor": self.cursor,
             "senders": list(self.senders),
+            "status": self.status,
             "updated_at": self.updated_at,
         }
 
 
-def build_value(cursor: str, senders: Iterable[str]) -> dict:
-    """발행할 `value` 를 만든다 (스키마 버전을 항상 싣는다)."""
+def build_value(
+    cursor: str, senders: Iterable[str], status: str = DEFAULT_STATUS
+) -> dict:
+    """발행할 `value` 를 만든다 (스키마 버전을 항상 싣는다).
+
+    ⭐ `status` 는 **키 하나로 얹힌다** — 스키마 버전을 올리지 않는다. 옛 파서는
+    모르는 키를 그냥 무시하므로(`parse_state`) 버전을 올리면 옛 클라이언트가
+    "내가 모르는 버전"이라며 커서까지 버릴 위험만 생긴다.
+    """
     return {
         "kind": CURSOR_KIND,
         "v": CURSOR_SCHEMA,
         "cursor": cursor or "",
         "senders": sorted({s for s in senders if s}),
+        "status": sane_status(status),
     }
 
 
@@ -245,6 +318,10 @@ def parse_state(state: Any) -> ReadCursor | None:
         key=str(getattr(state, "key", "")),
         cursor=str(cursor or ""),
         senders=tuple(sorted({str(s) for s in senders if s})),
+        # ⭐ 호환의 한쪽 방향: `status` 가 **없는 옛 파일**은 기본값(`활동 중`)으로
+        # 읽힌다. 상태를 모르는 사람을 "자리 비움"으로 칠하면, 아직 갱신하지 않은
+        # 동료가 전부 조용히 자리를 비운 것처럼 보인다.
+        status=sane_status(value.get("status")),
         updated_at=when.isoformat().replace("+00:00", "Z") if when else "",
     )
 
@@ -262,6 +339,10 @@ class ReadView:
     cursor: str = ""
     """내 로컬 커서 (= 내가 읽은 위치). 발행값이 아니라 **로컬**이 정본이다."""
 
+    status: str = DEFAULT_STATUS
+    """내가 **발행한** 가용 상태. 화면의 드롭다운이 무엇을 고르고 있든, 원격에
+    실제로 올라간 값은 이것이다 (그 둘이 어긋나면 사람이 볼 수 있어야 한다)."""
+
     unread: int = 0
     first_unread: str | None = None
     participants: list[ReadCursor] = field(default_factory=list)
@@ -271,18 +352,24 @@ class ReadView:
             "me": self.me,
             "person": self.person,
             "cursor": self.cursor,
+            "status": self.status,
             "unread": self.unread,
             "first_unread": self.first_unread,
             "participants": [p.to_json() for p in self.participants],
         }
 
     def fingerprint(self) -> tuple:
-        """"바뀌었나"의 판정 키. 같은 값을 되풀이해 밀지 않기 위한 것."""
+        """"바뀌었나"의 판정 키. 같은 값을 되풀이해 밀지 않기 위한 것.
+
+        ⚠️ **상태도 여기 들어간다.** 안 넣으면 남이 상태만 바꿨을 때 지문이 같아
+        SSE 가 나가지 않고, 참여자 목록이 조용히 낡는다 (커서만 세던 시절의 잔재가
+        그대로 새 기능의 침묵이 된다).
+        """
         return (
             self.cursor,
             self.unread,
             self.first_unread,
-            tuple(sorted((p.key, p.cursor) for p in self.participants)),
+            tuple(sorted((p.key, p.cursor, p.status) for p in self.participants)),
         )
 
 
@@ -405,7 +492,7 @@ class ReadTracker:
             self.publish(force=True)
             return True
 
-    def publish(self, *, force: bool = False) -> bool:
+    def publish(self, *, force: bool = False, status: str | None = None) -> bool:
         """내 커서를 발행한다 (best-effort). 실제로 썼으면 True.
 
         ⭐ **밀어내기는 아웃박스가 한다** — 여기서는 파일만 쓴다(기반이 디스크에
@@ -415,6 +502,12 @@ class ReadTracker:
 
         쓰기 전에 저장된 값을 읽어 `max` 를 취한다 — 같은 사람의 다른 기기가 더
         앞서 있으면 그 값을 되돌리지 않기 위해서다 (같은 경로를 공유한다).
+
+        ⭐ `status` 를 주면 그 값으로 **바꾼다**, 안 주면 저장된 값을 **그대로
+        유지한다.** 상태는 커서와 달리 단조 증가가 아니라 왕복하는 값이라(자리를
+        비웠다 돌아온다) `max` 같은 합치기 규칙이 없다 — 마지막으로 선언한 것이
+        곧 현재다. 같은 사람의 두 기기가 다투면 나중 선언이 이긴다 (둘 다 그 사람
+        본인이라 그게 맞다).
         """
         with self._lock:
             mine = self.local()
@@ -431,13 +524,21 @@ class ReadTracker:
             # (= 원격의 오염이 다음 발행에 저절로 정정된다).
             candidates = [c for c in (mine, stored.cursor if stored else "") if c]
             cursor = max(candidates) if candidates else ""
+            # 상태는 **주면 바꾸고 안 주면 그대로**다. 저장된 값이 없으면 기본값.
+            want = sane_status(status) if status is not None else (
+                stored.status if stored else DEFAULT_STATUS
+            )
             if stored is not None and not force:
-                if stored.cursor == cursor and sender in senders:
+                # ⚠️ 이 가드가 레포가 커지지 않는 이유다. **상태가 바뀐 것도
+                # "바뀜"에 포함**시키되(안 그러면 상태 변경이 영원히 안 나간다),
+                # 커서·상태가 둘 다 그대로면 여전히 아무것도 쓰지 않는다.
+                if (stored.cursor == cursor and sender in senders
+                        and stored.status == want):
                     return False          # 바뀔 것이 없다 — push 를 만들지 않는다
             senders.add(sender)
             try:
                 self.channel.write_state(
-                    self.key, build_value(cursor, senders), identity=self.person
+                    self.key, build_value(cursor, senders, want), identity=self.person
                 )
             except Exception as exc:  # noqa: BLE001 — 조용히 넘기지 않는다
                 log.warning("읽음 커서를 발행하지 못했다 (다음에 다시 시도한다): %s", exc)
@@ -479,13 +580,16 @@ class ReadTracker:
         방 **안**을 그리는 데 필요한 전부다 (뱃지만 필요하면 `unread`).
         """
         count, first = self.unread(fresh=fresh)
+        people = self.participants(fresh=fresh)
+        # 내 상태는 **내 파일**에 있다. 이미 나열한 것에서 꺼낸다 — 따로 한 번 더
+        # 읽으면 같은 사실을 두 경로로 얻게 되고, 그 둘이 어긋날 자리가 생긴다.
+        mine = people.get(self.key)
         return ReadView(
             me=self.key,
             person=self.person,
             cursor=self.local(),
+            status=mine.status if mine else DEFAULT_STATUS,
             unread=count,
             first_unread=first,
-            participants=sorted(
-                self.participants(fresh=fresh).values(), key=lambda p: p.key
-            ),
+            participants=sorted(people.values(), key=lambda p: p.key),
         )
