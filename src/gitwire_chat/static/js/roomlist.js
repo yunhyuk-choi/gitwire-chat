@@ -153,10 +153,18 @@ export function createRoomList(env) {
       dom.doc.body.setAttribute('data-view', 'rooms');
     });
     dom.on(el.retry, 'click', function () { retryRoom(roomId); });
-    /* ⭐ 제목을 누르면 참여자 서랍이 열린다 — **지름길**이다(발견성은 머리의
-       참여자 버튼이 담당한다). 서랍이 무엇인지 여기서 알 필요가 없으므로
-       신호만 흘린다: 그 모듈이 서지 못했으면 아무 일도 일어나지 않는다. */
-    dom.on(el.roomTitle, 'click', function () { bus.emit('people:toggle', {}); });
+    /* ⭐ 방 이름을 누르면 참여자 서랍이 열린다 — **유일한 진입점**이다. 서랍이
+       무엇인지 여기서 알 필요가 없으므로 신호만 흘린다: 그 모듈이 서지 못했으면
+       아무 일도 일어나지 않는다.
+       ⚠️ 키보드도 같은 길을 쓴다 (Enter·Space). 제목은 버튼이 아니라 초점을
+       받게 `tabindex` 를 준 요소라, 기본 활성화 동작이 없어 우리가 만들어 준다. */
+    function togglePeople() { bus.emit('people:toggle', {}); }
+    dom.on(el.roomTitle, 'click', togglePeople);
+    dom.on(el.roomTitle, 'keydown', function (e) {
+      if (!e || (e.key !== 'Enter' && e.key !== ' ')) { return; }
+      if (e.preventDefault) { e.preventDefault(); }   /* Space 로 스크롤되지 않게 */
+      togglePeople();
+    });
 
     bus.on('rooms:list', function (e) { render(e.rooms); });
     /* 타임라인이 409(받는 중·실패)를 만나면 그 자리를 여기서 그린다 —

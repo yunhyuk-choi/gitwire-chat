@@ -1,6 +1,7 @@
 /*
  * 사람을 보여 주는 두 자리 — 오른쪽 **참여자 서랍**(`#people…`)과 **작성자 정보
- * 카드**(`#user-card…`), 그리고 머리의 요약 버튼(`#people-count`)을 소유한다.
+ * 카드**(`#user-card…`)를 소유한다. 여는 길은 **방 이름 클릭 하나**이고, 그
+ * 노드는 방 목록 모듈 것이라 신호(`people:toggle`)로만 만난다.
  *
  * ⭐ 둘을 한 모듈에 둔 이유: **같은 값의 두 크기**다. 서랍은 전체를 훑고, 카드는
  * 그 중 한 명을 말한다. 같은 모델(`reads.js` 의 커서 지도)에서 같은 규칙으로
@@ -33,8 +34,7 @@ export function createPeople(env) {
     list: dom.$('people-list'),
     empty: dom.$('people-empty'),
     close: dom.$('people-close'),
-    count: dom.$('people-count'),
-    countN: dom.$('people-count-n'),
+    title: dom.$('people-title'),
     card: dom.$('user-card'),
     cardName: dom.$('user-card-name'),
     cardStatus: dom.$('user-card-status'),
@@ -70,13 +70,17 @@ export function createPeople(env) {
   function paint() {
     var data = model();
     var people = data.participants || [];
-    if (el.countN) { dom.setText(el.countN, String(people.length)); }
+    /* 사람 수는 **서랍 제목**에 얹는다. 머리에 숫자 버튼을 따로 두면 서랍을 여는
+       길이 둘이 되고(같은 일을 하는 두 진입점), 그건 사용자가 매번 "뭐가 다르지"를
+       판단해야 하는 비용이다. 숫자는 서랍을 연 사람에게만 필요하다. */
+    if (el.title) {
+      dom.setText(el.title, people.length ? '참여자 ' + people.length : '참여자');
+    }
     if (!el.list) { return; }
     /* ⭐ **닫혀 있으면 그리지 않는다.** 이 함수는 남의 커서가 움직일 때마다
        불리는데(내 스크롤 한 번에도 불린다), 화면에 없는 목록을 그때마다 다시
        만들면 사람 수만큼의 노드를 계속 버리고 만든다. 열 때 한 번 그리면 된다 —
-       가상 스크롤이 창 밖 메시지를 DOM 에 두지 않는 것과 같은 판단이다.
-       ⚠️ 숫자(요약 버튼)는 위에서 **늘** 갱신한다 — 그건 항상 보인다. */
+       가상 스크롤이 창 밖 메시지를 DOM 에 두지 않는 것과 같은 판단이다. */
     if (el.drawer && el.drawer.hidden) { return; }
     /* 참여자 목록은 대화가 아니다 — 짧고, 바뀔 때만 통째로 다시 그린다
        (방 목록과 같은 규율. append-only 규율은 **메시지**에 대한 것이다). */
@@ -105,7 +109,8 @@ export function createPeople(env) {
   function openDrawer(on) {
     if (!el.drawer) { return; }
     if (on) { dom.show(el.drawer); paint(); } else { dom.hide(el.drawer); }
-    if (el.count) { el.count.setAttribute('aria-expanded', on ? 'true' : 'false'); }
+    /* 열면 초점을 서랍 안으로 옮긴다 — 키보드로 들어왔으면 그 다음 키가 서랍에
+       닿아야 한다(그리고 Esc·닫기 버튼이 나오는 길이다). */
     if (on && el.close && el.close.focus) { el.close.focus(); }
   }
 
@@ -172,9 +177,9 @@ export function createPeople(env) {
     hideCard();
     paint();
 
-    dom.on(el.count, 'click', toggleDrawer);
     dom.on(el.close, 'click', function () { openDrawer(false); });
-    /* 제목 클릭의 지름길은 **방 목록 모듈**이 알려 준다 (그 노드의 주인이다). */
+    /* ⭐ **유일한 진입점** — 방 이름을 눌렀다는 신호다. 그 노드의 주인이 방 목록
+       모듈이라 여기서 직접 만지지 않는다 (남의 노드를 만지지 않는다). */
     bus.on('people:toggle', toggleDrawer);
 
     /* 모델이 바뀌면 다시 그린다 — 내 POST 응답·폴링·SSE 가 전부 이 하나로 온다. */
