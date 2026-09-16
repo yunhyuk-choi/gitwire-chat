@@ -18,6 +18,10 @@
   ID(`~pending/…`)를 밀어 넣으면 **거부**하고(400), 이미 오염된 값을 **읽을 때는**
   커서 없음으로 취급해 카운트를 되살린다. 실측된 전면 고장의 재발 방지선이다
   (`reads` 모듈 도크 「커서 형식」).
+* **R-9** ⭐ **가용 상태**는 같은 파일에 키 하나로 얹히고, **바뀔 게 없으면
+  아무것도 쓰지 않는다** (하트비트가 없다는 것의 기계적 증거 = `write_state` 호출
+  수). 커서 전진·전송은 `활동 중` 을 선언하고, `status` 가 없는 옛 파일은
+  `활동 중` 으로 읽힌다 (호환 양방향).
 """
 
 from __future__ import annotations
@@ -77,10 +81,13 @@ def test_이메일이_없으면_설치본으로_떨어지고_로그를_남긴다
 
 
 def test_발행되는_값에_카운트가_없다():
-    """⭐ 카운트를 메시지마다 저장하지 않는다 — 커서 하나뿐이다."""
+    """⭐ 카운트를 메시지마다 저장하지 않는다 — 커서 하나 + 상태 하나뿐이다."""
     value = reads_mod.build_value("records/20260908/x.json", ["a.host", "b.host"])
-    assert set(value) == {"kind", "v", "cursor", "senders"}
+    assert set(value) == {"kind", "v", "cursor", "senders", "status"}
     assert value["cursor"] == "records/20260908/x.json"
+    # 상태는 **키 하나**로 얹혔고 스키마 버전은 그대로다 (옛 파서가 무시하면 된다).
+    assert value["v"] == reads_mod.CURSOR_SCHEMA == 1
+    assert value["status"] == reads_mod.STATUS_ACTIVE
 
 
 def test_모르는_종류의_상태는_건너뛴다():
@@ -520,7 +527,7 @@ def test_API_읽음_스냅샷과_전진(manager, fake_opener):
     assert "counts" not in body
     for participant in body["participants"]:
         assert set(participant) == {
-            "person", "key", "cursor", "senders", "updated_at"
+            "person", "key", "cursor", "senders", "status", "updated_at"
         }
 
     res = client.post(f"/api/rooms/{room.id}/reads", json={"cursor": recs[1].id})
@@ -627,3 +634,150 @@ def test_실제_채널에서_커서_파일이_원격까지_간다(real_manager):
     ).stdout
     want = gitwire.state_path(mgr.person)
     assert want in listing.splitlines(), (want, listing)
+
+
+# ============================================================== R-9. 가용 상태
+#
+# ⭐ **"쓰지 않는다"가 이 기능의 핵심 성질**이다. 상태를 붙이면서 레포가 자라기
+# 시작하면(하트비트·주기 발행) 그건 같은 기능이 아니라 다른 기능이다. 그래서
+# 여기서 세는 것은 화면 문구가 아니라 **`write_state` 호출 수**다.
+
+
+def _my_state(channel, manager):
+    return channel.states[gitwire.state_key(manager.person)].value
+
+
+def test_상태가_그대로면_push_를_만들지_않는다(manager, fake_opener):
+    """⭐ 커서·상태 **둘 다 그대로**면 파일을 만지지 않는다 (= 커밋이 없다)."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)                     # 내 파일이 생긴다 (쓰기 1회)
+    rec = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "하나"})
+
+    manager.mark_read(room.id, rec.id)            # 커서 전진 → 쓴다
+    writes = channel.state_writes
+    assert writes >= 1
+
+    # 같은 커서 + 같은 상태를 열 번 다시 알린다.
+    for _ in range(10):
+        manager.mark_read(room.id, rec.id, status=reads_mod.STATUS_ACTIVE)
+    assert channel.state_writes == writes, "바뀔 게 없는데 파일을 다시 썼다"
+
+    # 커서 없이 같은 상태만 알리는 것도 마찬가지다 (방을 다시 열 때의 경로).
+    for _ in range(10):
+        manager.mark_read(room.id, "", status=reads_mod.STATUS_ACTIVE)
+    assert channel.state_writes == writes, "상태만 되풀이해 알렸는데 파일을 썼다"
+
+
+def test_상태가_바뀌면_push_가_나간다(manager, fake_opener):
+    """반대 방향 — 상태는 커서가 안 움직여도 **바뀜**이다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    writes = channel.state_writes
+    cursor = _my_state(channel, manager)["cursor"]
+
+    view = manager.mark_read(room.id, "", status=reads_mod.STATUS_DND)
+    assert channel.state_writes == writes + 1
+    assert view.status == reads_mod.STATUS_DND
+    assert _my_state(channel, manager)["status"] == reads_mod.STATUS_DND
+    # ⚠️ 커서는 건드리지 않았다 — 두 축이 섞이면 읽음 표시가 상태 변경마다 흔들린다.
+    assert _my_state(channel, manager)["cursor"] == cursor
+
+    # 같은 값을 또 고르면 아무 일도 없다.
+    manager.mark_read(room.id, "", status=reads_mod.STATUS_DND)
+    assert channel.state_writes == writes + 1
+
+    # 다른 값이면 또 나간다.
+    manager.mark_read(room.id, "", status=reads_mod.STATUS_AWAY)
+    assert channel.state_writes == writes + 2
+    assert _my_state(channel, manager)["status"] == reads_mod.STATUS_AWAY
+
+
+def test_커서가_전진하면_방해_금지가_풀린다(manager, fake_opener):
+    """⭐ 의도적으로 Teams 와 다르다 — *읽으러 들어왔다 = 받겠다는 뜻*이다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    manager.mark_read(room.id, "", status=reads_mod.STATUS_DND)
+    rec = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "하나"})
+
+    # 상태를 **주지 않았는데** 커서가 전진했다 → 활동 중.
+    view = manager.mark_read(room.id, rec.id)
+    assert view.status == reads_mod.STATUS_ACTIVE
+    assert view.cursor == rec.id
+
+
+def test_전송은_활동_중을_선언한다(manager, fake_opener):
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    manager.mark_read(room.id, "", status=reads_mod.STATUS_AWAY)
+
+    manager.send(room.id, "다녀왔다")
+    assert _my_state(channel, manager)["status"] == reads_mod.STATUS_ACTIVE
+
+
+def test_상태가_없는_옛_파일은_활동_중으로_읽힌다(manager, fake_opener):
+    """호환 ① — 갱신하지 않은 동료가 조용히 자리를 비운 사람이 되면 안 된다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    # 옛 버전이 쓴 값 그대로 (status 키가 아예 없다).
+    channel.inject_state("bob@example.com", {
+        "kind": reads_mod.CURSOR_KIND, "v": 1, "cursor": "", "senders": ["bob.host"],
+    })
+    view = manager.read_view(room.id)
+    bob = [p for p in view.participants if p.key == "bob@example.com"][0]
+    assert bob.status == reads_mod.STATUS_ACTIVE
+
+
+def test_새_파일에서_옛_파서가_커서를_그대로_읽는다():
+    """호환 ② — `parse_state` 는 **모르는 키를 무시한다.** 그 성질을 못 박는다."""
+    class State:
+        key = "zz@x.io"
+        identity = "zz@x.io"
+        updated_at = None
+        # 우리보다 **더 새로운** 버전이 쓴 파일: 모르는 키 + 모르는 상태값.
+        value = {
+            "kind": reads_mod.CURSOR_KIND, "v": 1,
+            "cursor": "records/20260909/20260909T001442118Z-a-53032f.json",
+            "senders": ["zz.host"],
+            "status": "하이퍼포커스",
+            "mood": "🙂",
+        }
+
+    got = reads_mod.parse_state(State())
+    assert got is not None
+    assert got.cursor == State.value["cursor"]         # 커서는 멀쩡히 나온다
+    assert got.senders == ("zz.host",)
+    assert got.status == reads_mod.STATUS_ACTIVE       # 모르는 상태 → 기본값
+
+
+def test_지문에_상태가_들어간다(manager, fake_opener):
+    """상태만 바뀌었을 때 SSE 가 조용하면 참여자 목록이 낡는다."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    before = manager.read_view(room.id).fingerprint()
+    channel.inject_state("bob@example.com", reads_mod.build_value(
+        "", ["bob.host"], reads_mod.STATUS_AWAY))
+    assert manager.read_view(room.id).fingerprint() != before
+
+
+def test_API_로_상태를_고르면_응답에_실려_온다(manager, fake_opener):
+    app = create_app(manager.settings, manager, start=False)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    room = manager.register(REPO)
+    manager.timeline(room.id)
+
+    res = client.post(f"/api/rooms/{room.id}/reads", json={"status": "away"})
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["status"] == "away"
+    mine = [p for p in body["participants"] if p["key"] == body["me"]][0]
+    assert mine["status"] == "away"
+
+    # 커서 없이 온 요청이라 읽음 상태는 그대로다 (두 축이 섞이지 않는다).
+    assert body["cursor"] == ""

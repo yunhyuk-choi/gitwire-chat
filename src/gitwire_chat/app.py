@@ -25,6 +25,7 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
                                            참가자별 커서). **카운트는 담지 않는다** —
                                            브라우저가 커서에서 파생시킨다
     POST /api/rooms/<id>/reads             "여기까지 읽었다" (커서 전진, 낙관적)
+                                           + (선택) `status` = 가용 상태 선언
                                            ⭐ **실제 봉투 ID 만** 받는다 — 화면의
                                            임시 ID 는 400 (`reads.InvalidCursor`)
     GET  /api/rooms/<id>/search?q=          서버측 레코드 검색
@@ -435,8 +436,15 @@ def create_app(
         """
         data = request.get_json(silent=True) or request.form or {}
         cursor = str(data.get("cursor") or "")
+        # ⭐ **가용 상태는 같은 요청에 얹는다** (새 엔드포인트를 만들지 않는다).
+        # 커서와 상태는 같은 파일에 나란히 사는 두 값이고, 커서가 전진할 때 상태를
+        # 함께 싣는 것이 가장 흔한 경우다 — 길을 둘로 내면 그 흔한 경우가 왕복 두
+        # 번이 되고, 둘 사이의 순서가 새 고민거리가 된다.
+        # 커서 없이 상태만 오는 것도 정상이다 (직접 고름 · 창 닫기).
+        status = data.get("status")
+        status = str(status) if status is not None else None
         try:
-            view = manager.mark_read(room_id, cursor)
+            view = manager.mark_read(room_id, cursor, status=status)
         except InvalidCursor as exc:
             return jsonify({"error": str(exc)}), 400
         except RoomNotReady as exc:
