@@ -940,8 +940,15 @@ class RoomManager:
             log.debug("방 %s 아카이브 복구 실패", room_id, exc_info=True)
             return
         if recovered:
-            # 과거 메시지가 다시 읽히게 됐다 — 화면이 다시 그릴 수 있게 알린다.
-            self.bus.publish(room_id, "reads", {"room": room_id, **self.read_view(room_id).to_json()})
+            # ⚠️ SSE 로 밀지 않는다. 복구된 것은 **위쪽의 과거 메시지**이고, 지금
+            # 화면에 보이는 것은 하나도 바뀌지 않는다 — 위로 스크롤하거나 방을
+            # 다시 열 때 평범한 페이징 경로가 그것을 가져온다. 여기서 `reads`
+            # 이벤트를 흘리면(커서 지도를 싣는 배관이다) 뜻이 다른 신호가 되고,
+            # 새 이벤트를 만들면 화면 배관이 하나 더 늘어난다.
+            log.info(
+                "방 %s 의 지워진 날짜를 로컬 아카이브로 복구했다: %s",
+                room_id, ", ".join(recovered),
+            )
 
     # ----------------------------------------------------------- 아카이빙 배치
 
