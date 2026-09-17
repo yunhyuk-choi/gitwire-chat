@@ -83,6 +83,19 @@ from .outbox import Outbox, OutboxState
 
 log = logging.getLogger(__name__)
 
+# ⚠️ 발행 계약을 기반이 소유한다 — 레코드의 시각·ID 는 **원격에 push 되는 순간**에
+# 정해지고, `append()` 는 티켓을, `flush()` 는 *나간 레코드*를 준다. 그것이 없는
+# 구버전 gitwire 와 섞이면 전송이 **조용히** 어긋난다(응답이 봉투를 실은 줄 알고
+# 커서를 옛 방식으로 올리려 하고, `flush()` 반환값이 건수라 `_after_push` 가
+# 아무것도 못 받는다). 그래서 여기서 **크게** 실패시킨다 — `reads.py` 의 같은 방어와
+# 같은 성격이다.
+if not hasattr(gitwire, "PendingRecord"):  # pragma: no cover — 버전 불일치 방어
+    raise ImportError(
+        "기반(gitwire)이 너무 낮다 — 발행 티켓(`gitwire.PendingRecord`)이 없다. "
+        "이 버전은 레코드의 시각·ID 를 push 시점에 정하는 기반을 전제한다. "
+        "`python -m gitwire_chat update` 로 함께 올려라."
+    )
+
 #: 방마다 기억하는 "이미 본 메시지 ID" 상한. 중복 수신 방어용이라 최근 것만 있으면 된다.
 SEEN_LIMIT = 4096
 
