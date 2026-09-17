@@ -65,9 +65,16 @@ export function createStream(env) {
       try { data = JSON.parse(event.data); } catch (err) { return; }
       bus.emit('outbox:state', { roomId: data.room || id, state: data });
     });
+    /* 두 가지가 같은 자리에 뜬다 — 배관을 하나만 쓴다 (새 배너를 만들면 화면
+       요소가 하나 더 늘고 둘 다 낡는다).
+         kind 없음    → 폴링 경고 (서버가 원격을 보다 실패했다)
+         kind=archive → 지난 날짜 정리(아카이빙)가 반복 실패한다. 문구를 서버가
+                        그대로 준다 (빈 문자열 = 나았다 → 상태줄을 비운다). */
     src.addEventListener('trouble', function (event) {
-      try { status.set('폴링 경고: ' + JSON.parse(event.data).detail, true); }
-      catch (err) { /* 무시 */ }
+      var data;
+      try { data = JSON.parse(event.data); } catch (err) { return; }
+      if (data.kind === 'archive') { status.set(data.detail || '', !!data.detail); }
+      else { status.set('폴링 경고: ' + data.detail, true); }
     });
     src.addEventListener('open', function () { status.set(''); });
     src.addEventListener('error', function () {

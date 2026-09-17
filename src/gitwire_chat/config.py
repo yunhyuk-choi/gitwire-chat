@@ -27,11 +27,17 @@ site-packages 에 있고 그 옆에 상태를 쓰는 것은 잘못이다.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from . import archive as _archive
+from . import reads as _reads
+
+log = logging.getLogger(__name__)
 
 #: 방 목록 파일 이름
 ROOMS_FILE = "rooms.json"
@@ -157,11 +163,56 @@ class Settings:
     백그라운드 폴러의 비용뿐이다. 기본값이 끔인 이유이기도 하다.
     """
 
+    daily_archive: bool = True
+    """지난 날짜를 하루 한 번 **로컬 아카이브**로 옮기고, 전원이 확인응답하면
+    레코드를 지우는 배치를 돌릴까 (`archive.py`).
+
+    기본은 켜짐. 끄면 레포가 계속 자란다 — 끌 이유는 진단·테스트뿐이다.
+    환경변수 `GITWIRE_CHAT_DAILY_ARCHIVE=0`."""
+
+    archive_hour: float = _archive.DEFAULT_ARCHIVE_HOUR
+    """배치를 돌리는 **로컬** 시각(시). 기본 4.0 = 04:00.
+
+    ⭐ 참가자마다 시간대가 달라도 상관없다 — 삭제는 합의 뒤에만 일어나므로 시각을
+    맞출 필요가 없다. "어제"의 **정의**는 로컬 시각과 무관하게 UTC 날짜다
+    (`archive.py` 모듈 도크). 환경변수 `GITWIRE_CHAT_ARCHIVE_HOUR`."""
+
+    dormant_days: float = _reads.DORMANT_DAYS
+    """이만큼 응답이 없는 참가자는 합의에서 제외한다 (근거는 `reads.DORMANT_DAYS`).
+
+    환경변수 `GITWIRE_CHAT_DORMANT_DAYS`."""
+
     extra: dict = field(default_factory=dict)
 
     @property
     def rooms_path(self) -> Path:
         return self.home / ROOMS_FILE
+
+
+def _float_from_env(var: str, default: float, *, low: float, high: float) -> float:
+    """숫자 설정 하나를 환경변수에서 읽는다. 이상하면 기본값 (조용히 넘기지 않는다)."""
+    raw = (os.environ.get(var) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("%s 값이 숫자가 아니다 — 기본값 %s 을 쓴다: %r", var, default, raw)
+        return default
+    if not (low <= value <= high):
+        log.warning(
+            "%s 값이 범위(%s~%s)를 벗어났다 — 기본값 %s 을 쓴다: %r",
+            var, low, high, default, raw,
+        )
+        return default
+    return value
+
+
+def _bool_from_env(var: str, default: bool) -> bool:
+    raw = (os.environ.get(var) or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in ("0", "false", "no", "off")
 
 
 def default_author() -> str:
@@ -190,6 +241,14 @@ def load_settings(home: str | os.PathLike | None = None, **overrides) -> Setting
         home=resolved,
         author=default_author(),
         credential_cache=_credential_cache_from_env(),
+        daily_archive=_bool_from_env("GITWIRE_CHAT_DAILY_ARCHIVE", True),
+        archive_hour=_float_from_env(
+            "GITWIRE_CHAT_ARCHIVE_HOUR",
+            _archive.DEFAULT_ARCHIVE_HOUR, low=0.0, high=23.999,
+        ),
+        dormant_days=_float_from_env(
+            "GITWIRE_CHAT_DORMANT_DAYS", _reads.DORMANT_DAYS, low=0.0, high=3650.0,
+        ),
     )
     for key, value in overrides.items():
         if value is not None and hasattr(settings, key):

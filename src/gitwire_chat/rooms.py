@@ -66,14 +66,23 @@ if (
     or not hasattr(gitwire.Channel, "write_state")
     or not hasattr(gitwire, "git_email")
     or not _has_cycle_hook()
+    # ⭐ 아카이브는 **로컬 전용**이고 레코드 삭제는 합의 뒤에만 일어난다. 그 표면이
+    # 없는 기반(예전의 `rollup()`)과 섞이면 아카이브가 다시 커밋되고 삭제가 합의
+    # 없이 일어난다 — 조용히 나빠지는 대표적인 자리라 여기서 크게 실패시킨다.
+    or not hasattr(gitwire.Channel, "archive_days")
+    or not hasattr(gitwire.Channel, "drop_days")
+    or not hasattr(gitwire.Channel, "recover_archive")
+    or not hasattr(gitwire, "last_closed_day")
 ):  # pragma: no cover - 설치 환경 문제
     raise ImportError(
-        "gitwire 가 너무 낮다 — 참가자 상태 예약 경로(write_state/read_states)와 "
-        "폴 틱 훅(subscribe(on_cycle=...))을 주는 gitwire 가 필요하다 "
+        "gitwire 가 너무 낮다 — 참가자 상태 예약 경로(write_state/read_states), "
+        "폴 틱 훅(subscribe(on_cycle=...)), 지난 날짜 아카이빙·삭제 분리"
+        "(archive_days/drop_days/recover_archive)를 주는 gitwire 가 필요하다 "
         "(pip install --force-reinstall "
         '"gitwire @ git+https://github.com/yunhyuk-choi/gitwire.git")'
     )
 
+from . import archive as _archive
 from . import reads as _reads
 from . import schema
 from .config import Room, RoomStore, Settings, with_defaults
@@ -295,6 +304,9 @@ class RoomManager:
         # 방당 읽음 커서 하나 (`reads.ReadTracker`). 내 로컬 커서와 발행값을
         # 함께 쥔다 — 방·HTTP·SSE 를 모르는 물건이라 여기서 만들어 준다.
         self._reads: dict[str, _reads.ReadTracker] = {}
+        # 방당 아카이빙 배치 하나 (`archive.ArchiveBatch`). 옮기기·확인응답·합의
+        # 판정·삭제·복구를 쥔다. 스케줄러는 **전체에 하나**다 (아래 `_daily`).
+        self._archives: dict[str, _archive.ArchiveBatch] = {}
         # 마지막으로 **밀어 보낸** 읽음 스냅샷의 지문. 같은 값을 되풀이해 밀지
         # 않는 근거다 (아웃박스의 `_publish_locked` 와 같은 규율).
         self._read_prints: dict[str, tuple] = {}
@@ -304,6 +316,13 @@ class RoomManager:
         # 화면을 막지 않는 '지금 당기기' 스레드 (방당 최대 1개 — `refresh_async`).
         self._refreshers: dict[str, threading.Thread] = {}
         self._started = False
+        # ⭐ 일일 배치 스레드는 **하나**다 (방마다 하나씩 두지 않는다). 하는 일이
+        # 하루 한 번이고 방 수만큼 스레드를 쌓을 이유가 없다.
+        self._daily = _archive.DailyRunner(
+            self._run_archives,
+            hour=settings.archive_hour,
+            name="gitwire-chat-archive",
+        )
         self.instance = gitwire.installation_id(settings.home)
         """이 설치의 전송 수준 식별자. **gitwire 가 만들고 영속시킨다** — 같은
         머신의 두 인스턴스가 갈리고 재시작해도 유지된다. 표시 이름이 아니다
@@ -557,6 +576,7 @@ class RoomManager:
             channel = self._channels.pop(room_id, None)
             box = self._outboxes.pop(room_id, None)
             self._seen.pop(room_id, None)
+            self._archives.pop(room_id, None)
             self._status.pop(room_id, None)
             self._connecting.pop(room_id, None)
             self._workers.pop(room_id, None)
@@ -898,6 +918,99 @@ class RoomManager:
         self._publish_reads(room_id, view)
         self._publish_rooms()               # 뱃지도 같은 사실의 표현이다
 
+    def _archive_tick(self, room_id: str, head: str | None) -> None:
+        """폴 한 틱 — 지워진 날짜를 관찰하고 필요하면 복구한다.
+
+        비용: 두 커밋의 날짜 나열은 sha 로 캐시되므로 **변화가 없으면 git 0회**다
+        (`Channel.deleted_days`). 복구할 것이 없으면 그대로 돌아온다.
+        """
+        try:
+            with self._lock:
+                if room_id not in self._channels:
+                    return
+            batch = self.archive_batch(room_id)
+        except (RoomError, RoomNotReady):
+            return
+        except Exception:  # noqa: BLE001
+            log.debug("방 %s 아카이빙 배치를 만들지 못했다", room_id, exc_info=True)
+            return
+        try:
+            recovered = batch.observe(head)
+        except Exception:  # noqa: BLE001 — 복구 실패가 폴링을 죽이지 않는다
+            log.debug("방 %s 아카이브 복구 실패", room_id, exc_info=True)
+            return
+        if recovered:
+            # 과거 메시지가 다시 읽히게 됐다 — 화면이 다시 그릴 수 있게 알린다.
+            self.bus.publish(room_id, "reads", {"room": room_id, **self.read_view(room_id).to_json()})
+
+    # ----------------------------------------------------------- 아카이빙 배치
+
+    def archive_batch(self, room_id: str) -> _archive.ArchiveBatch:
+        """방의 아카이빙 배치 (없으면 만든다). 채널이 준비돼 있어야 한다."""
+        with self._lock:
+            batch = self._archives.get(room_id)
+            if batch is not None:
+                return batch
+        channel = self._ready_channel(room_id)      # 락 밖에서 (오래 걸릴 수 있다)
+        tracker = self.reads(room_id)
+        with self._lock:
+            batch = self._archives.get(room_id)
+            if batch is not None:
+                return batch
+            batch = _archive.ArchiveBatch(
+                channel,
+                tracker,
+                dormant_days=self.settings.dormant_days,
+                # 확인응답 파일을 썼다 → 아웃박스가 다음 커밋으로 밀어낸다.
+                # (읽음 커서 발행과 **같은 배관**이다 — 두 벌 만들지 않는다.)
+                on_ack=lambda _rid=room_id: self._nudge_outbox(_rid),
+                on_alert=lambda detail, _rid=room_id: self._publish_archive_alert(
+                    _rid, detail
+                ),
+            )
+            self._archives[room_id] = batch
+        return batch
+
+    def run_archive(self, room_id: str) -> _archive.BatchResult:
+        """방 하나의 배치를 지금 한 번 돌린다 (스케줄러·테스트·진단이 부른다)."""
+        return self.archive_batch(room_id).run_once()
+
+    def _run_archives(self) -> None:
+        """일일 배치 — 등록된 방 전부. 한 방이 실패해도 나머지는 돈다."""
+        for room in self.rooms():
+            with self._lock:
+                ready = room.id in self._channels
+            if not ready:
+                continue        # 아직 안 붙은 방 — 붙고 나서 다음 주기에 돈다
+            try:
+                got = self.run_archive(room.id)
+            except (RoomError, RoomNotReady) as exc:
+                log.debug("방 %s 아카이빙 배치 건너뜀: %s", room.id, exc)
+                continue
+            except Exception:  # noqa: BLE001
+                log.exception("방 %s 아카이빙 배치 실패", room.id)
+                continue
+            if got.dropped or got.recovered:
+                log.info(
+                    "방 %s 지난 날짜 정리 — 삭제 %s / 복구 %s",
+                    room.id, got.dropped or "없음", got.recovered or "없음",
+                )
+
+    def _publish_archive_alert(self, room_id: str, detail: str) -> None:
+        """배치가 반복 실패한다는 사실을 **화면에** 민다 (상태줄).
+
+        ⭐ 왜 알려야 하나: 옮기기가 계속 실패하는 사람은 확인응답이 올라가지 않아
+        **모두의 레코드 삭제를 막는다.** 휴면 규칙(7일)에 결국 걸리지만 그전에
+        사람이 알아야 고칠 수 있다.
+
+        ⚠️ 폴링 경고와 **같은 이벤트 이름**(`trouble`)을 쓰되 `kind` 로 갈라
+        보낸다 — 상태줄은 이미 있는 배관이고, 같은 자리에 문구만 다르게 뜨는 것이
+        맞다 (새 배너를 만들면 화면 요소가 하나 더 늘고 둘 다 낡는다).
+        """
+        self.bus.publish(
+            room_id, "trouble", {"room": room_id, "detail": detail, "kind": "archive"}
+        )
+
     # -------------------------------------------------------------- 아웃박스
 
     def outbox(self, room_id: str) -> Outbox:
@@ -1039,6 +1152,10 @@ class RoomManager:
             # 읽음 커서는 레코드가 아니라 폴링 콜백이 불리지 않는다 — 틱마다
             # 남의 커서를 보고 **바뀐 순간에만** 화면에 알린다 (`_reads_tick`).
             self._reads_tick(_rid)
+            # ⭐ 같은 틱에서 **레코드 삭제를 받았는지**도 본다. 남이 지운 날짜가
+            # 내 로컬 아카이브에 없거나 불완전하면 히스토리에서 채운다 — 그렇지
+            # 않으면 그 날의 대화가 내 화면에서 조용히 사라진다.
+            self._archive_tick(_rid, _head)
 
         try:
             sub = channel.subscribe(callback, on_error=on_error, on_cycle=on_cycle)
@@ -1062,9 +1179,14 @@ class RoomManager:
                 self._start_room(room.id)
             else:
                 self._connect_async(room.id)
+        # ⭐ 일일 아카이빙 배치. 기동 직후 한 번 돌아 **밀린 분을 따라잡는다**
+        # (앱이 04:00 에 꺼져 있었을 수 있다 — `archive.DailyRunner`).
+        if self.settings.daily_archive:
+            self._daily.start()
 
     def stop(self) -> None:
         self._started = False
+        self._daily.stop()                   # 배치를 먼저 세운다 (채널을 쓴다)
         self.wait_for_connect(timeout=5.0)   # 진행 중인 클론을 먼저 정리한다
         with self._lock:
             refreshers = list(self._refreshers.values())
@@ -1088,6 +1210,7 @@ class RoomManager:
             channels = list(self._channels.values())
             self._channels.clear()
             self._reads.clear()
+            self._archives.clear()
             self._read_prints.clear()
         for sub in subs:
             try:

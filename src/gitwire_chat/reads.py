@@ -44,6 +44,27 @@
 (`parse_state`) 새 파일에서 커서를 그대로 읽고, 새 클라이언트는 `status` 가 없는
 파일을 기본값(`활동 중`)으로 읽는다.
 
+⭐ 같은 파일에 **아카이빙 확인응답**도 얹는다 (`archived`)
+----------------------------------------------------------
+`archived` = "이 **UTC 날짜**까지는 그 날의 레코드를 내 **로컬 아카이브**로 다
+옮겼다". 레코드 삭제가 이 값들의 합의로만 일어난다 (`archive.py`).
+
+왜 같은 파일인가 — 판정에 필요한 것이 이미 여기 다 있다:
+
+* 쓰기자가 같다 (**본인 하나** — 경로당 단일 쓰기자 규율 안이다).
+* 읽는 쪽이 **이미 이 파일 집합을 폴 주기마다 나열한다.** 그래서 합의 판정이
+  공짜다 — 배관도, 왕복도 늘지 않는다.
+* 휴면 판정에 쓰는 `updated_at` 도 같은 봉투에 이미 있다 (기반이 매 쓰기에 찍는다).
+
+새 파일을 만들면 이 세 가지를 전부 한 번 더 증명해야 한다.
+
+⚠️ 값은 **단조 증가**다 (커서와 같은 규율) — 되돌리는 API 를 두지 않는다. 뒤로
+가면 "옮겼다고 했던 날짜를 이제는 안 옮겼다"가 되어, 그 사이에 그 말을 믿고
+레코드를 지운 참가자와 사실이 어긋난다.
+
+⚠️ 옛 파일에는 이 키가 **없다**(= 응답 없음 = 합의 미달). 그 참가자가 앱을 올리면
+그때부터 응답이 붙는다. 그동안 삭제가 미뤄지는 것은 **의도된 안전측 실패**다.
+
 식별자 = `git user.email` (**사람** 단위)
 ----------------------------------------
 설치본 식별자(`installation_id`)를 쓰면 한 사람이 노트북·데스크탑을 쓸 때
@@ -94,6 +115,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import gitwire
@@ -135,6 +157,19 @@ LOCAL_CONSUMER = "read"
 
 #: 뱃지에 그대로 싣기엔 큰 수. 화면 표기는 브라우저가 정한다 (여기서는 세기만).
 MAX_BADGE = 999
+
+#: ⭐ **아카이빙 확인응답** — 같은 파일에 얹은 세 번째 사실 (모듈 도크 참조).
+#: "이 UTC 날짜까지는 로컬 아카이브로 다 옮겼다". 빈 문자열 = 응답 없음.
+ARCHIVED_KEY = "archived"
+
+#: 휴면으로 보는 기간(일). 이 기간 동안 `updated_at` 이 움직이지 않은 참가자는
+#: **합의에서 제외한다.**
+#:
+#: 근거: 한 명이 앱을 안 켜면 삭제가 영원히 일어나지 않는다. 퇴사자면 영구히다.
+#: 7일은 "휴가 한 주는 기다려 주고, 그 이상은 기다리지 않는다"는 선이다. 제외해도
+#: **데이터를 버리지 않는다** — 그 사람이 돌아와 삭제를 pull 하면 히스토리에서
+#: 자기 로컬 아카이브를 복구한다 (`gitwire.Channel.recover_archive`).
+DORMANT_DAYS = 7.0
 
 
 #: 사람 식별자를 **명시적으로** 지정하는 환경변수. 기반의 `GITWIRE_SENDER` 와 같은
@@ -180,6 +215,23 @@ def sane_cursor(cursor: Any, *, where: str = "") -> str:
         f" ({where})" if where else "",
         value,
     )
+    return ""
+
+
+def sane_day(value: Any) -> str:
+    """읽어 들인 날짜 워터마크를 **형식이 맞는 값으로만** 좁힌다. 아니면 빈 문자열.
+
+    형식 판정은 날짜의 주인인 기반이 한다 (`gitwire.is_day`) — 커서와 같은 규율이고
+    이유도 같다. 오염된 값이 **미래**를 가리키면 그 참가자가 "다 옮겼다"고 말하는
+    셈이 되어 아직 아무도 안 옮긴 날짜가 지워질 수 있다. 그래서 읽기에서 떨군다
+    (= 응답 없음 = 합의 미달 = **안 지운다**). 조용히 넘기지 않고 로그를 남긴다.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if gitwire.is_day(text):
+        return text
+    log.warning("아카이빙 확인응답이 날짜 형식이 아니다 — 없음으로 취급한다: %r", text)
     return ""
 
 
@@ -254,7 +306,15 @@ class ReadCursor:
     (본인), 읽는 쪽이 이미 그 파일을 나열하고 있기 때문이다.
     """
 
+    archived: str = ""
+    """⭐ **아카이빙 확인응답** — "이 UTC 날짜까지는 로컬 아카이브로 다 옮겼다".
+
+    빈 문자열 = 응답 없음(= 합의 미달). 단조 증가 값이다 (모듈 도크 참조).
+    """
+
     updated_at: str = ""
+    """기반이 이 파일을 쓸 때 찍은 시각. **휴면 판정의 유일한 입력**이다
+    (`is_dormant`) — 이미 봉투에 있으므로 판정이 공짜다."""
 
     def to_json(self) -> dict:
         return {
@@ -263,26 +323,38 @@ class ReadCursor:
             "cursor": self.cursor,
             "senders": list(self.senders),
             "status": self.status,
+            "archived": self.archived,
             "updated_at": self.updated_at,
         }
 
 
 def build_value(
-    cursor: str, senders: Iterable[str], status: str = DEFAULT_STATUS
+    cursor: str,
+    senders: Iterable[str],
+    status: str = DEFAULT_STATUS,
+    archived: str = "",
 ) -> dict:
     """발행할 `value` 를 만든다 (스키마 버전을 항상 싣는다).
 
-    ⭐ `status` 는 **키 하나로 얹힌다** — 스키마 버전을 올리지 않는다. 옛 파서는
-    모르는 키를 그냥 무시하므로(`parse_state`) 버전을 올리면 옛 클라이언트가
-    "내가 모르는 버전"이라며 커서까지 버릴 위험만 생긴다.
+    ⭐ `status` 와 `archived` 는 **키 하나씩으로 얹힌다** — 스키마 버전을 올리지
+    않는다. 옛 파서는 모르는 키를 그냥 무시하므로(`parse_state`) 버전을 올리면 옛
+    클라이언트가 "내가 모르는 버전"이라며 커서까지 버릴 위험만 생긴다.
+
+    ⚠️ `archived` 가 빈 문자열이면 **키를 아예 넣지 않는다.** 그래야 이 기능이
+    붙기 전과 파일이 바이트로 같고(= 쓸 이유 없는 push 가 생기지 않고), "응답
+    없음"이 *키 없음*과 *빈 값* 두 형태로 갈리지 않는다.
     """
-    return {
+    value = {
         "kind": CURSOR_KIND,
         "v": CURSOR_SCHEMA,
         "cursor": cursor or "",
         "senders": sorted({s for s in senders if s}),
         "status": sane_status(status),
     }
+    day = sane_day(archived)
+    if day:
+        value[ARCHIVED_KEY] = day
+    return value
 
 
 def _state_label(state: Any) -> str:
@@ -322,8 +394,57 @@ def parse_state(state: Any) -> ReadCursor | None:
         # 읽힌다. 상태를 모르는 사람을 "자리 비움"으로 칠하면, 아직 갱신하지 않은
         # 동료가 전부 조용히 자리를 비운 것처럼 보인다.
         status=sane_status(value.get("status")),
+        # ⭐ 옛 파일에는 이 키가 없다 → "" = 응답 없음 = 합의 미달 (= 안 지운다).
+        archived=sane_day(value.get(ARCHIVED_KEY)),
         updated_at=when.isoformat().replace("+00:00", "Z") if when else "",
     )
+
+
+def is_dormant(
+    who: ReadCursor, now: datetime, *, dormant_days: float = DORMANT_DAYS
+) -> bool:
+    """이 참가자를 **합의에서 제외**해도 되는가 (근거는 `DORMANT_DAYS`).
+
+    판정 입력은 `updated_at` 하나다 — 봉투에 이미 있으므로 왕복이 없다.
+
+    ⚠️ 읽을 수 없는 `updated_at`(없거나 형식이 깨짐)은 **휴면이 아니다.** 모르는
+    것을 "없는 사람"으로 치면 조용히 남의 레코드를 지우는 쪽으로 기운다 — 판정
+    불가는 언제나 *안 지우는* 쪽으로 떨어져야 한다.
+    """
+    raw = (who.updated_at or "").strip()
+    if not raw:
+        return False
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (now - when) > timedelta(days=max(0.0, float(dormant_days)))
+
+
+def consensus_day(
+    people: dict,
+    *,
+    now: datetime,
+    dormant_days: float = DORMANT_DAYS,
+) -> str:
+    """⭐ **전원이 옮겼다고 말한 가장 이른 날짜** (= 여기까지는 지워도 된다).
+
+    휴면 참가자는 분모에서 빠진다 (`is_dormant`). 응답이 없는 참가자(옛 파일·아직
+    한 번도 배치를 돌리지 않은 사람)는 `""` 이므로 **합의를 막는다** — 그것이
+    안전측 기본값이다.
+
+    참가자가 아무도 없으면(파일 집합이 빈 새 방) `""` — 지울 근거가 없다.
+    """
+    days = [
+        w.archived
+        for w in people.values()
+        if not is_dormant(w, now, dormant_days=dormant_days)
+    ]
+    if not days:
+        return ""
+    return min(days)
 
 
 @dataclass
@@ -492,7 +613,13 @@ class ReadTracker:
             self.publish(force=True)
             return True
 
-    def publish(self, *, force: bool = False, status: str | None = None) -> bool:
+    def publish(
+        self,
+        *,
+        force: bool = False,
+        status: str | None = None,
+        archived: str | None = None,
+    ) -> bool:
         """내 커서를 발행한다 (best-effort). 실제로 썼으면 True.
 
         ⭐ **밀어내기는 아웃박스가 한다** — 여기서는 파일만 쓴다(기반이 예약 경로
@@ -513,6 +640,15 @@ class ReadTracker:
         비웠다 돌아온다) `max` 같은 합치기 규칙이 없다 — 마지막으로 선언한 것이
         곧 현재다. 같은 사람의 두 기기가 다투면 나중 선언이 이긴다 (둘 다 그 사람
         본인이라 그게 맞다).
+
+        ⭐ `archived`(아카이빙 확인응답)는 **커서와 같은 규율**이다 — 주면 저장된
+        값과 `max` 를 취하고, 안 주면 그대로 유지한다. 절대 뒤로 가지 않는다
+        (모듈 도크 「아카이빙 확인응답」).
+
+        ⚠️⚠️ **호출 순서가 데이터 안전의 전부다.** 이 발행은 아카이브 파일을
+        **디스크에 확실히 쓴 뒤에만** 불려야 한다 (`archive.py` 가 그 순서를
+        지킨다). 반대로 하면 "옮겼다"고 말해 놓고 죽었을 때 남들이 레코드를 지우고
+        **그 사람만 잃는다.**
         """
         with self._lock:
             mine = self.local()
@@ -529,6 +665,13 @@ class ReadTracker:
             # (= 원격의 오염이 다음 발행에 저절로 정정된다).
             candidates = [c for c in (mine, stored.cursor if stored else "") if c]
             cursor = max(candidates) if candidates else ""
+            # 확인응답도 단조 증가 — 저장된 값과 `max`. 안 주면 그대로 유지한다.
+            acks = [
+                d
+                for d in (sane_day(archived), stored.archived if stored else "")
+                if d
+            ]
+            ack = max(acks) if acks else ""
             # 상태는 **주면 바꾸고 안 주면 그대로**다. 저장된 값이 없으면 기본값.
             want = sane_status(status) if status is not None else (
                 stored.status if stored else DEFAULT_STATUS
@@ -538,12 +681,14 @@ class ReadTracker:
                 # "바뀜"에 포함**시키되(안 그러면 상태 변경이 영원히 안 나간다),
                 # 커서·상태가 둘 다 그대로면 여전히 아무것도 쓰지 않는다.
                 if (stored.cursor == cursor and sender in senders
-                        and stored.status == want):
+                        and stored.status == want and stored.archived == ack):
                     return False          # 바뀔 것이 없다 — push 를 만들지 않는다
             senders.add(sender)
             try:
                 self.channel.write_state(
-                    self.key, build_value(cursor, senders, want), identity=self.person
+                    self.key,
+                    build_value(cursor, senders, want, ack),
+                    identity=self.person,
                 )
             except Exception as exc:  # noqa: BLE001 — 조용히 넘기지 않는다
                 log.warning("읽음 커서를 발행하지 못했다 (다음에 다시 시도한다): %s", exc)
