@@ -1156,7 +1156,12 @@ def spawn_app(port: int, home: Path, registry: Path, log: Path) -> subprocess.Po
     handle = open(log, "w", encoding="utf-8", errors="replace", newline="\n")
     env = dict(os.environ)
     env[runstate.ENV_DIR] = str(registry)
-    env["PYTHONPATH"] = str(ROOT / "src")
+    # ⚠️ 부모의 `PYTHONPATH` 를 **버리지 않는다.** 버리면 자식이 다른 조합으로 뜬다 —
+    # 기반(gitwire)을 작업 트리에서 쓰는 개발·검증 환경에서는 자식만 설치본(옛 버전)을
+    # 집어 들고, 그건 스위트의 나머지가 검증한 조합이 아니다. 실제로 그렇게 갈렸다:
+    # 새 발행 계약을 전제하는 `rooms.py` 가 자식에서 `ImportError` 로 죽었다.
+    inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), *inherited])
     env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
         [
