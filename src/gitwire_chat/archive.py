@@ -289,7 +289,7 @@ class ArchiveBatch:
         result = BatchResult()
         for day in days:
             self._recover(day, result)
-        self._settle(result, count_failure=False)
+        self._settle(result, healed=False)
         return result.recovered
 
     def _recover(self, day: str, result: BatchResult) -> None:
@@ -307,12 +307,17 @@ class ArchiveBatch:
 
     # --------------------------------------------------------------- 알림
 
-    def _settle(self, result: BatchResult, *, count_failure: bool = True) -> None:
-        """연속 실패를 세고, 문턱을 넘으면 **한 번** 알린다 (나으면 해제한다)."""
+    def _settle(self, result: BatchResult, *, healed: bool = True) -> None:
+        """연속 실패를 세고, 문턱을 넘으면 **한 번** 알린다 (나으면 해제한다).
+
+        `healed=False` 는 "문제가 없었다고 해서 **나았다고 선언하지는 말라**"는
+        뜻이다. 폴 틱의 관찰 경로가 그렇다 — 그쪽은 아카이빙을 시도하지 않으므로
+        조용했다는 사실이 "이제 옮길 수 있다"를 뜻하지 않는다. 그걸 나음으로
+        읽으면 **배치가 계속 실패하는 동안 경고가 매 틱 지워진다.**
+        """
         if result.problems:
             self.last_error = result.problems[0]
-            if count_failure:
-                self.failures += 1
+            self.failures += 1
             if self.failures >= FAILURE_ALERT_AFTER and not self._alerted:
                 self._alerted = True
                 self._alert(
@@ -320,9 +325,10 @@ class ArchiveBatch:
                     f"{self.last_error} (그동안 이 방의 레코드 삭제가 미뤄진다)"
                 )
             return
+        if not healed:
+            return
         self.last_error = ""
-        if count_failure:
-            self.failures = 0
+        self.failures = 0
         if self._alerted:
             self._alerted = False
             self._alert("")          # 상태줄을 비운다 (나았다)

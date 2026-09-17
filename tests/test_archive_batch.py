@@ -310,6 +310,27 @@ def test_repeated_failures_reach_the_screen(manager, fake_opener):
     assert cleared and cleared[-1]["detail"] == ""
 
 
+def test_a_quiet_poll_tick_does_not_clear_a_standing_alert(manager, fake_opener):
+    """⚠️ 관찰 경로가 조용했다고 **나았다고 선언하지 않는다.**
+
+    폴 틱은 아카이빙을 시도하지 않으므로 "문제 없음"이 "이제 옮길 수 있다"를 뜻하지
+    않는다. 그걸 나음으로 읽으면 배치가 계속 실패하는 동안 경고가 매 틱 지워진다.
+    """
+    room = manager.register("https://example.com/me/room.git")
+    channel = fake_opener.channels[gitwire.normalize_repo_url(room.repo_url)]
+    manager.send(room.id, "안녕")
+    batch = _batch(manager, room.id)
+    channel.archive_error = OSError("디스크가 꽉 찼다")
+    for _ in range(_archive.FAILURE_ALERT_AFTER):
+        batch.run_once()
+    assert batch._alerted is True
+
+    batch.observe("h1")
+    batch.observe("h2")                      # 지워진 날짜 없음 = 조용한 틱
+    assert batch._alerted is True, "관찰이 경고를 지웠다"
+    assert batch.failures >= _archive.FAILURE_ALERT_AFTER
+
+
 def test_one_or_two_failures_do_not_cry_wolf(manager, fake_opener):
     """1~2회는 알리지 않는다 — 흔히 생기고 다음 주기에 저절로 낫는다."""
     room = manager.register("https://example.com/me/room.git")

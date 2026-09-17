@@ -67,13 +67,15 @@ export function createStream(env) {
     });
     /* 두 가지가 같은 자리에 뜬다 — 배관을 하나만 쓴다 (새 배너를 만들면 화면
        요소가 하나 더 늘고 둘 다 낡는다).
-         kind 없음    → 폴링 경고 (서버가 원격을 보다 실패했다)
-         kind=archive → 지난 날짜 정리(아카이빙)가 반복 실패한다. 문구를 서버가
-                        그대로 준다 (빈 문자열 = 나았다 → 상태줄을 비운다). */
+         kind 없음    → 폴링 경고. 일상적인 `set` 이다 — 다음 폴이 성공하면 덮인다.
+         kind=archive → 지난 날짜 정리가 **반복** 실패한다. 이건 다음 진행 메시지가
+                        덮어서는 안 되는 사실이므로 `stick` 이다 (그 사람의 응답이
+                        안 올라가 모두의 레코드 삭제가 멈춰 있다). 서버가 나았다고
+                        알릴 때 빈 문구를 보내고, 그때 고정을 푼다. */
     src.addEventListener('trouble', function (event) {
       var data;
       try { data = JSON.parse(event.data); } catch (err) { return; }
-      if (data.kind === 'archive') { status.set(data.detail || '', !!data.detail); }
+      if (data.kind === 'archive') { status.stick(data.detail || ''); }
       else { status.set('폴링 경고: ' + data.detail, true); }
     });
     src.addEventListener('open', function () { status.set(''); });
