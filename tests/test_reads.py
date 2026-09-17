@@ -525,9 +525,13 @@ def test_API_읽음_스냅샷과_전진(manager, fake_opener):
     assert body["me"] == gitwire.state_key(manager.person)
     # ⭐ 응답에 메시지별 카운트가 없다 (파생값이다 — 화면이 계산한다).
     assert "counts" not in body
+    # ⭐ 참가자 한 명의 항목은 이 키들 **전부**다 (그리고 이것만이다). `archived`
+    # 는 지난 날짜 아카이빙 확인응답이고, 같은 파일·같은 응답에 얹혀 온다
+    # (`archive.py` — 새 배관을 만들지 않는 근거). 화면은 이 키를 쓰지 않지만,
+    # 여기 있다는 사실이 "합의 판정이 이미 있는 나열로 공짜다"를 뜻한다.
     for participant in body["participants"]:
         assert set(participant) == {
-            "person", "key", "cursor", "senders", "status", "updated_at"
+            "person", "key", "cursor", "senders", "status", "archived", "updated_at"
         }
 
     res = client.post(f"/api/rooms/{room.id}/reads", json={"cursor": recs[1].id})
@@ -584,7 +588,11 @@ def real_manager(tmp_path, bare_repo):
         recent_limit=50,
         page_limit=50,
         notifications=False,
-        extra={"channel_kwargs": {"runner": runner, "auto_rollup": False}},
+        # ⚠️ 이 테스트들은 **git 호출 수**를 센다. 그래서 기반의 배경 아카이빙과
+        # 소비자의 일일 배치를 둘 다 끈다 — 둘 다 원격·나열을 만지므로 켜 두면
+        # 세는 대상이 달라진다 (기능 자체는 test_archive_*.py 가 본다).
+        daily_archive=False,
+        extra={"channel_kwargs": {"runner": runner, "auto_archive": False}},
     )
     mgr = ConnectedRoomManager(
         settings, bus=EventBus(keepalive=0.2), notifier=RecordingNotifier()
