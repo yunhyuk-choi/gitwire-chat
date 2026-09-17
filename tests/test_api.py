@@ -49,12 +49,25 @@ def test_빈_주소는_400(client):
 
 
 def test_보내기와_타임라인(client, manager):
+    """보내기 응답은 **"받아 뒀다"(202)** 까지만 말한다 — 봉투가 없다.
+
+    ⭐ 레코드의 ID·시각은 원격에 push 되는 순간에 정해진다(`rooms.send` 도크).
+    그래서 이 응답에 봉투를 실을 수가 없고, 실으려면 지어내야 한다. 화면은
+    낙관적 항목으로 그리고, 진짜 봉투는 push 뒤 SSE 로 온다.
+    """
     room = manager.register(REPO)
     res = client.post(
         f"/api/rooms/{room.id}/messages", json={"text": "안녕", "author": "최윤혁"}
     )
-    assert res.status_code == 201
-    message = res.get_json()["message"]
+    assert res.status_code == 202
+    assert res.get_json() == {"queued": True}
+    assert "message" not in res.get_json(), "없는 봉투를 지어냈다"
+
+    # 나간 뒤에는 조회 경로에 그대로 보인다 (기다리는 것은 테스트용 매니저다).
+    assert manager.outbox(room.id).wait_idle(10.0)
+    message = client.get(
+        f"/api/rooms/{room.id}/messages"
+    ).get_json()["messages"][-1]
     assert message["author"] == "최윤혁" and message["text"] == "안녕"
     assert message["id"].startswith("records/")
 
@@ -327,10 +340,10 @@ def test_내_메시지는_다시_읽어도_내_것이다(client, manager):
     """⭐ 회귀: 보내고 → **다시 읽었을 때** (= 새로고침) 판정이 살아 있나."""
     room = manager.register(REPO)
 
-    sent = client.post(
-        f"/api/rooms/{room.id}/messages", json={"text": "내가 쓴 말"}
-    ).get_json()["message"]
-    assert sent["mine"] is True                      # 전송 응답
+    # ⚠️ 전송 응답에는 봉투가 없으므로 '내 것' 판정도 없다 (그때는 판정할 봉투가
+    # 아직 없다 — `test_보내기와_타임라인`). 판정이 실리는 곳은 **조회와 SSE** 이고
+    # 그 둘이 같은 값을 준다 (`test_SSE_도_같은_판정을_싣는다`).
+    manager.send(room.id, "내가 쓴 말")
 
     again = client.get(f"/api/rooms/{room.id}/messages").get_json()["messages"]
     assert _mine_by_text(again) == {"내가 쓴 말": True}   # 다시 읽어도 내 것

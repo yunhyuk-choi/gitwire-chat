@@ -5,12 +5,24 @@
  * 화면에 붙은 말풍선은 타임라인 것이고, 그 말을 서버에 보내는 일은 여기 것이다.
  * 둘 사이는 네 개의 이벤트로만 만난다:
  *
- *   composer → timeline : `draft:add` · `draft:settle` · `draft:fail`
+ *   composer → timeline : `draft:add` · `draft:fail`
  *   timeline → composer : `draft:retry`
  *
  * ⭐ 낙관적 전송 — 서버 응답을 **기다리지 않고** 지금 붙인다. 어차피 갈 것이고,
  * 실패하면 그때 그 말풍선 옆에 '전송 실패' 와 재시도를 준다. 예전에는 POST 응답을
  * 받은 뒤에 붙여서, 원격이 느려지거나 막히면 그대로 멈춘 것처럼 보였다.
+ *
+ * ⭐ **POST 응답으로 말풍선을 확정하지 않는다** (예전에는 했다)
+ *
+ * 서버는 이제 봉투를 돌려주지 않는다 — 레코드의 ID·시각은 *원격에 push 되는
+ * 순간*에 정해지고, POST 는 "받아 뒀다"(202)까지만 말한다. 그래서 확정(= 임시
+ * ID 를 진짜 봉투 ID 로 갈아끼우기)은 **push 뒤에 오는 SSE `message`** 가 한다
+ * (`timeline.js` 의 `matchPending`).
+ *
+ * 이게 단순히 배선이 바뀐 것이 아니라 **사용자에게 하는 말이 정확해진 것**이다:
+ * 아직 안 나간 메시지는 앱이 죽으면 사라지는데(대기열은 메모리다), 그것을
+ * "보냈다"로 그려 두면 사용자가 본 말이 조용히 없어진다. *보내는 중…* 에서
+ * 사라지는 것은 괜찮고, *보냈다* 에서 사라지는 것은 안 된다.
  *
  * ⭐ IME(한글·일본어·중국어) 조합 중의 Enter — **조합이 끝난 뒤에 보낸다.**
  *
@@ -179,7 +191,7 @@ export function createComposer(env) {
       unknown: false,
       /* ⚠️ 여기가 `mine` 을 손으로 세우는 **유일한** 자리다. 그리고 그럴 자격이
          있다 — 이건 아직 봉투가 없는 낙관적 항목(`~pending/…`)이고, 방금 이
-         입력칸에서 나왔으니 정의상 내 것이다. 봉투가 도착하는 순간(`draft:settle`)
+         입력칸에서 나왔으니 정의상 내 것이다. 봉투가 도착하는 순간(SSE `message`)
          부터는 서버가 봉투를 보고 판정한 값이 이 자리를 대신한다. */
       mine: true,
       pending: true,
@@ -199,9 +211,10 @@ export function createComposer(env) {
     return api('/api/rooms/' + encodeURIComponent(target) + '/messages', {
       method: 'POST',
       body: { text: draft.text, author: draft.author, reply_to: draft.reply_to }
-    }).then(function (data) {
-      if (roomId !== target) { return; }
-      bus.emit('draft:settle', { tempId: draft.id, message: data.message });
+    }).then(function () {
+      /* ⚠️ 여기서 **확정하지 않는다.** 202 는 "받아 뒀다"이고 봉투가 없다.
+         말풍선은 *보내는 중…* 으로 남아 있다가, push 가 끝나 SSE 로 진짜
+         레코드가 오면 그때 갈아끼워진다 (위 헤더의 그 이유). */
     })['catch'](function (err) {
       if (roomId !== target) { return; }
       /* ⚠️ 입력칸으로 되돌리지 않는다. 글은 이미 저 말풍선 안에 있다 —

@@ -108,11 +108,22 @@ class Instance:
         return self.room_id
 
     def say(self, text: str) -> dict:
+        """보내기 → **202 "받아 뒀다"**. 나간 뒤의 그 메시지를 돌려준다.
+
+        ⭐ 응답에는 **봉투가 없다** — 레코드의 ID·시각은 *원격에 push 되는 순간*에
+        정해진다 (`rooms.send` 도크). 그래서 이 헬퍼가 나갈 때까지 기다린 뒤
+        (`settle()`) 타임라인에서 그 말을 찾아 돌려준다. 기다림을 헬퍼가 흡수하므로
+        아래 검증 본문은 예전 그대로 읽힌다.
+        """
         res = self.client.post(
             f"/api/rooms/{self.room_id}/messages", json={"text": text}
         )
-        assert res.status_code == 201, res.get_data(as_text=True)
-        return res.get_json()["message"]
+        assert res.status_code == 202, res.get_data(as_text=True)
+        assert res.get_json() == {"queued": True}
+        self.settle()
+        hits = [m for m in self.timeline() if m["text"] == text]
+        assert hits, f"보낸 말이 나간 뒤에도 타임라인에 없다: {text!r}"
+        return hits[-1]
 
     def settle(self, timeout: float = DEADLINE) -> None:
         """아직 원격에 못 간 것이 없어질 때까지 기다린다.
@@ -205,7 +216,8 @@ def test_두_인스턴스가_실제_git_으로_대화한다(pair, bare_repo):
     assert next(chunks).decode("utf-8").startswith("retry:")
     assert "event: hello" in next(chunks).decode("utf-8")
 
-    # (4) A 가 말한다. 이 한 번의 HTTP POST 가 git commit + push 가 된다.
+    # (4) A 가 말한다. POST 는 **대기열에 넣는 것**까지이고(202), commit + push 는
+    #     아웃박스가 뒤에서 한다 — 그 순간에 레코드의 시각·ID 가 정해진다.
     said = a.say("안녕 B, 나 A야")
 
     # (5) 지상 검증 — 앱의 보고가 아니라 **bare 레포 안의 파일**을 직접 본다.
