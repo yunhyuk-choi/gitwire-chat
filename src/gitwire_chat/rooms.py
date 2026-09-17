@@ -9,10 +9,11 @@
   대화가 쌓인 방이나 느린 네트워크에서 버튼이 수십 초 멈춰 있고 화면에는 아무
   설명이 없다 — 사용자는 앱이 죽은 줄 안다.
 * 타임라인 조회 (최근 N + 이전 불러오기) · 검색
-* 메시지 전송 (+ **로컬 에코**). ⭐ 전송 응답은 **원격 push 를 기다리지 않는다** —
-  레코드 파일을 디스크에 남기는 즉시 돌아오고, 커밋·push 는 `outbox.Outbox` 가
-  백그라운드로 민다. 왜 그래도 유실이 없는지·상태를 무엇으로 말하는지는
-  `outbox` 모듈 도크 하나에 모여 있다.
+* 메시지 전송. ⭐ 전송 응답은 **원격 push 를 기다리지 않는다** — 기반의 대기열에
+  넣는 즉시 돌아오고, 시각·ID·커밋·push 는 `outbox.Outbox` 가 백그라운드로 민다.
+  그래서 **응답에는 봉투가 없다**(ID 는 push 때 생긴다): 화면의 말풍선은 브라우저의
+  낙관적 항목이고, 진짜 레코드는 push 직후 SSE 로 흘러 그 자리를 채운다
+  (`send()` · `_after_push()`). 상태를 무엇으로 말하는지는 `outbox` 모듈 도크에.
 * 상시 구독 → 새 메시지를 이벤트 버스로, 그리고 조건이 맞으면 OS 알림으로
 
 전송 계층은 **전부 gitwire 에 위탁한다.** 여기에 git 명령이 단 한 줄도 없다.
@@ -456,9 +457,10 @@ class RoomManager:
             self._set_status(room_id, status)
             return False
         self._set_status(room_id, RoomStatus(READY))
-        # 붙자마자 한 번 — 지난 실행이 커밋·push 하지 못하고 남긴 레코드가 여기서
-        # 나간다 (강제 종료 후 유실 방지의 본체 — `_drain_outbox` 도크).
-        self._drain_outbox(room_id)
+        # ⚠️ 예전에는 여기서 아웃박스를 한 번 깨워 "지난 실행이 남긴 미푸시
+        # 레코드"를 밀어냈다. 그런 것이 더는 존재하지 않는다 — 대기열은 메모리이고
+        # 프로세스가 죽으면 사라진다 (`send()` 도크). 남은 것이 없는데 깨우면
+        # 붙을 때마다 무의미한 push 왕복이 한 번 생긴다.
         if self._started:
             self._start_room(room_id)
             self._publish_rooms()       # 구독까지 붙은 상태를 한 번 더 알린다
@@ -670,12 +672,24 @@ class RoomManager:
         *,
         author: str = "",
         reply_to: str | None = None,
-    ) -> schema.Message:
-        """메시지 발행 + **로컬 에코**.
+    ) -> Any:
+        """메시지를 **대기열에 넣는다.** 반환값은 기반의 티켓(`PendingRecord`).
 
-        로컬 에코가 필요한 이유: 구독은 폴 주기(기본 15초)마다 돈다. 에코가
-        없으면 *내가 방금 보낸 말*이 화면에 뜨는 데 최대 폴 주기가 걸린다.
-        에코와 나중의 구독 전달은 **같은 레코드 ID** 라 중복 제거로 합쳐진다.
+        ⭐ **여기서는 봉투가 없다.** 기반은 레코드의 시각·ID 를 *원격에 push 되는
+        순간*에 정한다 (`gitwire.Channel.append` 도크 — 오프라인에서 쓴 말이 며칠
+        뒤 과거 날짜 ID 로 도착해 "전원 읽음"으로 보이던 결함 때문이다). 그래서
+        이 호출은 ID 도, 시각도, `schema.Message` 도 만들 수 없다.
+
+        바뀌는 것은 **에코를 그리는 시점**이다:
+
+        * 화면의 말풍선은 브라우저가 **즉시** 띄운다 — 봉투 없는 낙관적 항목
+          (`~pending/` 임시 ID, `static/js/composer.js`)이고 *전송 중*으로 그려진다.
+        * push 가 성공하면 그때 `_after_push()` 가 진짜 봉투로 SSE 를 흘리고,
+          브라우저가 임시 항목을 그 레코드로 갈아끼운다.
+
+        ⚠️ 그래서 응답이 "보냈다"가 아니라 **"받아 뒀다"** 다. 아직 안 나간 것을
+        "보냈다"고 표시하면, 프로세스가 죽어 대기열이 사라졌을 때 사용자가 이미
+        본 말이 조용히 없어진다. 그 구분이 `~pending/` 임시 ID 의 존재 이유다.
         """
         room = self.get(room_id)
         payload = schema.build_payload(
@@ -683,36 +697,55 @@ class RoomManager:
         )
         channel = self._ready_channel(room_id)
         try:
-            # ⭐ `flush=True` 를 뗐다. 기반은 이 호출에서 **파일을 디스크에 쓴다** —
-            # 거기까지가 내구성이고, `flush=True` 가 더 얹던 것은 *동기 push* 뿐이다.
-            # 그 push 가 응답에 2.7~3.4초를 붙이고 있었다 (`outbox` 모듈 도크).
-            record = channel.append(payload)
+            ticket = channel.append(payload)
         except Exception as exc:  # noqa: BLE001
             raise RoomError(f"메시지를 보낼 수 없다: {exc}") from exc
-        # ⭐ 내가 보낸 말은 내가 읽은 말이다 — 커서를 그 자리까지 올린다. 그래야
-        # (1) 내 뱃지가 내 말 때문에 늘어나지 않고 (2) 남의 화면에서 **내가**
-        # 그 메시지를 안 읽은 사람으로 세어지지 않는다 (카운트 공식의 `p ≠ A`
-        # 가 여기서 자연히 성립한다). 발행 파일은 아래 아웃박스가 **같은 커밋**
-        # 으로 밀어낸다 — 읽음 발행이 메시지보다 앞서 끼어들 여지가 없다.
-        try:
-            tracker = self.reads(room_id)
-            tracker.mark(record.id)
-            # ⭐ **전송 = 활동 중.** 말을 보낸 사람이 "메시지를 읽을 수 없는 상태"
-            # 일 수는 없다. 그래서 커서가 움직였는지와 무관하게 발행을 시도한다 —
-            # 바뀔 것이 없으면 `publish` 의 가드가 아무것도 쓰지 않는다(그 가드가
-            # 있으므로 여기서 조건을 한 번 더 세지 않는다).
-            tracker.publish(status=_reads.STATUS_ACTIVE)
-        except Exception:  # noqa: BLE001 — 읽음 표시가 전송을 막지 않는다
-            log.debug("방 %s 전송 후 읽음 커서 전진 실패", room_id, exc_info=True)
-        # 파일이 생긴 **뒤에** 센다. 순서가 반대면 append 가 실패한 건까지 세어
+        # 대기열에 든 **뒤에** 센다. 순서가 반대면 append 가 실패한 건까지 세어
         # "안 나간 것이 있다"고 거짓말한다.
         self.outbox(room_id).add()
+        return ticket
 
-        # 기반이 방금 만든 Record 를 그대로 준다 — 에코를 그리려고 ID 에서 시각을
-        # 되파싱하지 않는다(그 경로에서 마이크로초가 깎였다).
-        message = schema.parse_record(record)
-        self._deliver(room_id, message, own=True)
-        return message
+    def _flush_room(self, room_id: str) -> list:
+        """아웃박스 워커가 부르는 밀어내기. **나간 레코드를 여기서 받는다.**
+
+        기반의 `flush()` 가 *방금 원격에 착지한 레코드*를 돌려주므로, "내가 보낸
+        말이 실제로 나갔다"를 알 수 있는 자리가 여기 하나다. 그래서 읽음 커서
+        전진과 로컬 에코도 여기서 한다 (`_after_push`).
+        """
+        channel = self._ready_channel(room_id)
+        made = list(channel.flush())
+        if made:
+            self._after_push(room_id, made)
+        return made
+
+    def _after_push(self, room_id: str, records: list) -> None:
+        """레코드가 원격에 **착지했다** — 커서를 올리고 화면에 흘린다.
+
+        ⭐ 내가 보낸 말은 내가 읽은 말이다. 커서를 그 자리까지 올려야
+        (1) 내 뱃지가 내 말 때문에 늘어나지 않고 (2) 남의 화면에서 **내가** 그
+        메시지를 안 읽은 사람으로 세어지지 않는다 (카운트 공식의 `p ≠ A` 가
+        여기서 자연히 성립한다).
+
+        ⚠️ 전진은 **push 된 뒤**여야 한다. 예전에는 발행 즉시 올렸는데, 그때는
+        커서 값(= 레코드 ID)이 이미 정해져 있었기 때문이다. 이제 ID 는 push 때
+        생기므로 그 전에 올릴 값 자체가 없다 — 그리고 그게 더 안전하다: 커서가
+        *아직 원격에 없는* 레코드를 가리킬 여지가 사라진다.
+
+        커서 발행(참가자 상태 파일)은 이 커밋에 못 실리므로 **다음** 커밋으로
+        나간다. 순서가 뒤집힐 위험은 없다 — 가리키는 레코드가 이미 원격에 있다.
+        """
+        try:
+            tracker = self.reads(room_id)
+            tracker.mark(records[-1].id)      # ID 는 정렬 가능 — 마지막이 최대다
+            # ⭐ **전송 = 활동 중.** 말을 보낸 사람이 "메시지를 읽을 수 없는 상태"
+            # 일 수는 없다. 그래서 커서가 움직였는지와 무관하게 발행을 시도한다 —
+            # 바뀔 것이 없으면 `publish` 의 가드가 아무것도 쓰지 않는다.
+            tracker.publish(status=_reads.STATUS_ACTIVE)
+            self._nudge_outbox(room_id)       # 발행 파일을 다음 커밋으로 밀어낸다
+        except Exception:  # noqa: BLE001 — 읽음 표시가 전달을 막지 않는다
+            log.debug("방 %s push 후 읽음 커서 전진 실패", room_id, exc_info=True)
+        for record in records:
+            self._deliver(room_id, schema.parse_record(record), own=True)
 
     # ---------------------------------------------------------------- 읽음
 
@@ -866,7 +899,7 @@ class RoomManager:
             if box is not None:
                 return box
             box = Outbox(
-                channel.flush,
+                lambda _rid=room_id: self._flush_room(_rid),
                 on_state=lambda state, _rid=room_id: self._publish_outbox(_rid, state),
                 describe=lambda exc, _rid=room_id: self._push_reason(_rid, exc),
                 name=f"outbox-{room_id[:8]}",
@@ -896,19 +929,6 @@ class RoomManager:
 
     def _publish_outbox(self, room_id: str, state: OutboxState) -> None:
         self.bus.publish(room_id, "outbox", {"room": room_id, **state.to_json()})
-
-    def _drain_outbox(self, room_id: str) -> None:
-        """기동·재연결 직후 한 번 — 지난 실행이 남긴 미푸시 레코드를 밀어낸다.
-
-        ⭐ **유실 방지의 본체가 여기다.** 앱이 강제 종료되면 레코드 파일은 커밋도
-        push 도 되지 않은 채 작업 사본에 남는데, 기반의 `flush()` 가 그것을
-        먼저 커밋(`_absorb_worktree`)한 뒤 밀어낸다. 그래서 "보내고 바로 죽여도
-        다음 기동이 밀어낸다"가 성립한다.
-        """
-        try:
-            self.outbox(room_id).kick()
-        except (RoomError, RoomNotReady) as exc:
-            log.debug("방 %s 아웃박스 기동 실패: %s", room_id, exc)
 
     # -------------------------------------------------------------- 구독
 
@@ -1014,9 +1034,6 @@ class RoomManager:
             return
         with self._lock:
             self._subs[room_id] = sub
-        # `start()` 가 **이미 열려 있는** 채널을 바로 여기로 보내는 길도 있다
-        # (`_connect` 를 안 탄다). 그 길에서도 지난 실행의 잔여분이 나가야 한다.
-        self._drain_outbox(room_id)
 
     def start(self) -> None:
         """등록된 모든 방을 연결·구독한다. 한 방이 실패해도 나머지는 돈다.
@@ -1044,8 +1061,9 @@ class RoomManager:
         with self._lock:
             boxes = list(self._outboxes.values())
             self._outboxes.clear()
-        # ⭐ 채널을 닫기 **전에** 밀어낸다. 정상 종료라면 다음 기동까지 미룰 이유가
-        # 없다 (강제 종료는 이 경로를 못 타지만, 그때는 다음 기동이 밀어낸다).
+        # ⭐ 채널을 닫기 **전에** 밀어낸다 — 정상 종료에서 대기열을 버릴 이유가
+        # 없다. 강제 종료는 이 경로를 못 타고, 그때는 아직 안 나간 것이 **사라진다**
+        # (의도된 성질 — `send()` 도크). 그래서 이 한 번이 마지막 기회다.
         for box in boxes:
             try:
                 box.close()

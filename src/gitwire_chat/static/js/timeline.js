@@ -760,8 +760,12 @@ export function createTimeline(env) {
     bus.emit('draft:retry', { draft: draft });
   }
 
-  /* SSE 로 온 레코드가 내가 띄운 보류 항목인가. 봉투 ID 는 아직 모르므로
-     같은 이름·같은 본문의 **가장 먼저 보낸 것**과 짝짓는다. */
+  /* SSE 로 온 레코드가 내가 띄운 보류 항목인가. 봉투 ID 는 **원격에 push 될
+     때** 정해지므로 보낼 때는 알 수가 없다 — 그래서 같은 이름·같은 본문의
+     **가장 먼저 보낸 것**과 짝짓는다. 전송 순서가 유지되므로(방마다 워커 하나)
+     같은 말을 두 번 보내도 앞의 것이 앞의 레코드와 짝지어진다.
+
+     ⭐ 이 경로가 **유일한 확정 경로**다 (예전에는 POST 응답도 확정했다). */
   function matchPending(msg) {
     var found = null;
     pendings.forEach(function (item, id) {
@@ -861,8 +865,7 @@ export function createTimeline(env) {
       if (e.roomId !== view.roomId) { return; }
       var msg = e.message;
       /* 내가 낙관적으로 띄운 그 말이 되돌아온 것이면 **갈아끼운다.**
-         POST 응답보다 SSE 가 먼저 오는 경우가 실제로 있고, 그때 짝짓지 않으면
-         같은 말이 잠깐 두 줄로 보인다. */
+         내 말이 진짜 레코드가 되는 순간(= push 성공)을 아는 것은 이 이벤트뿐이다. */
       var settled = matchPending(msg);
       if (settled) { settlePending(settled, msg); onNewRendered(true); return; }
       /* `msg.mine` 은 서버가 봉투를 보고 붙여 보냈다 — 여기서 덮지 않는다.
@@ -891,7 +894,7 @@ export function createTimeline(env) {
     /* 레이아웃 전환 직전에 조르는 신호 (theme.js). 자리를 아는 것은 우리다. */
     bus.on('anchor:keep', function () { return keepAnchor(); });
     bus.on('draft:add', function (e) { addPending(e.draft); });
-    bus.on('draft:settle', function (e) { settlePending(e.tempId, e.message); });
+    /* `draft:settle` 은 없다 — 확정은 위 `message:new` 하나가 한다. */
     bus.on('draft:fail', function (e) { failPending(e.tempId, e.error); });
 
     /* 가상 스크롤. 없음(라이브러리가 안 옴)과 안 됨(와도 못 씀) 둘 다 여기서

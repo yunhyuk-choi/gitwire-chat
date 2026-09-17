@@ -29,7 +29,9 @@ import gitwire  # noqa: E402
 from gitwire_chat.config import Settings  # noqa: E402
 from gitwire_chat.events import EventBus  # noqa: E402
 from gitwire_chat.notify import Notifier  # noqa: E402
+from gitwire_chat.outbox import STUCK as OUTBOX_STUCK  # noqa: E402
 from gitwire_chat.rooms import RoomManager  # noqa: E402
+from gitwire_chat import schema  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,6 +76,9 @@ class FakeChannel:
         self.state_writes = 0
         # 이 앱은 이제 sender 를 넘기지 않는다 — 기반이 설치본 식별자를 준다.
         self.sender = kwargs.get("sender") or f"fake.host.{abs(hash(repo_url)) % 999999:06d}"
+        # ⭐ 발행 대기열 — 기반과 같이 **메모리**다. `append()` 는 여기에만 넣고
+        # 시각·ID 는 `flush()`(= push)가 정한다 (`gitwire.Channel.append` 도크).
+        self.queue: list[gitwire.PendingRecord] = []
         self.records: list[gitwire.Record] = []
         self.subscribers: list = []
         self.cycle_hooks: list = []
@@ -91,27 +96,29 @@ class FakeChannel:
         self._cursor = 0
         self._clock = datetime(2026, 9, 3, 1, 0, 0, tzinfo=timezone.utc)
         self._n = 0
+        self._seq = 0
         self._lock = threading.Lock()
 
     # -- 발행 ---------------------------------------------------------
-    def append(self, payload, *, sender=None, flush=False) -> gitwire.Record:
-        """기반과 같이 **Record 를 돌려준다** (ID 문자열이 아니다)."""
+    def append(self, payload, *, sender=None, flush=False) -> gitwire.PendingRecord:
+        """기반과 같이 **티켓을 돌려준다** — 봉투(ID·시각)는 아직 없다.
+
+        ⭐ 티켓 타입은 **기반의 진짜 클래스**를 쓴다. 계약을 두 벌 쓰면 한 벌이
+        반드시 낡는다 — 대역이 흉내 낼 것은 *언제 settled 되는가*뿐이다.
+        """
         with self._lock:
-            self._n += 1
-            ts = self._clock + timedelta(seconds=self._n)
-            who = sender or self.sender
-            rid = gitwire.records.make_record_id(ts, who, nonce=f"{self._n:06d}")
-            record = gitwire.Record(id=rid, sender=who, timestamp=ts, payload=payload)
-            self.records.append(record)
-        for callback in list(self.subscribers):
-            callback(record)
-        return record
+            self._seq += 1
+            ticket = gitwire.PendingRecord(self._seq, payload, sender or self.sender)
+            self.queue.append(ticket)
+        if flush:
+            self.flush()
+        return ticket
 
-    def flush(self, push_attempts: int = 5) -> int:
-        """대기 중인 레코드를 원격까지 민다 (기반 `Channel.flush` 자리).
+    def flush(self, push_attempts: int = 5) -> list[gitwire.Record]:
+        """대기열을 원격까지 민다 — **여기서 시각·ID 가 정해진다.**
 
-        ⚠️ 실패는 `flushed` 를 전진시키지 않는다 — 그래야 '아직 안 나갔다' 가
-        대역에서도 진짜 사실이 된다.
+        ⚠️ 실패는 대기열을 비우지 않는다 — 그래야 '아직 안 나갔다' 가 대역에서도
+        진짜 사실이 된다 (그리고 순서가 유지된다).
         """
         self.flushes += 1
         if self.flush_delay:
@@ -119,14 +126,28 @@ class FakeChannel:
         if self.flush_error is not None:
             raise self.flush_error
         with self._lock:
-            n = len(self.records) - self.pushed
+            batch = list(self.queue)
+            self.queue.clear()
+            made = []
+            for item in batch:
+                self._n += 1
+                ts = self._clock + timedelta(seconds=self._n)
+                rid = gitwire.records.make_record_id(
+                    ts, item.sender, nonce=f"{self._n:06d}"
+                )
+                record = gitwire.Record(
+                    id=rid, sender=item.sender, timestamp=ts, payload=item.payload
+                )
+                self.records.append(record)
+                item._settle(record)          # 기반이 push 성공 때 하는 일
+                made.append(record)
             self.pushed = len(self.records)
-        return n
+        return made
 
-    def unpushed(self) -> list[gitwire.Record]:
-        """아직 원격에 못 간 레코드 (지상 검증용)."""
+    def unpushed(self) -> list[gitwire.PendingRecord]:
+        """아직 원격에 못 간 것 = **대기열** (지상 검증용)."""
         with self._lock:
-            return self.records[self.pushed:]
+            return list(self.queue)
 
     def inject(self, payload, sender="other.host") -> gitwire.Record:
         """다른 참가자가 보낸 것처럼 레코드를 밀어 넣는다 (구독 전달까지)."""
@@ -285,7 +306,7 @@ class RecordingNotifier(Notifier):
 
 
 class ConnectedRoomManager(RoomManager):
-    """등록이 **끝까지** 진행된 뒤 돌려주는 테스트용 매니저.
+    """**끝까지** 진행된 뒤 돌려주는 테스트용 매니저 (등록·전송 둘 다).
 
     실제 `register()` 는 즉시 반환하고 클론은 백그라운드에서 돈다(그게 요점이다).
     브라우저는 SSE 로 완료를 기다리는데, 대부분의 테스트는 그 타이밍이 관심사가
@@ -297,6 +318,27 @@ class ConnectedRoomManager(RoomManager):
         room = super().register(*args, **kwargs)
         self.wait_for_connect(timeout=30.0)
         return room
+
+    def send(self, room_id, *args, **kwargs):
+        """보내고 **원격에 나갈 때까지** 기다린 뒤 그 메시지를 돌려준다.
+
+        실제 `send()` 는 대기열에 넣고 즉시 돌아오며(봉투가 아직 없다) 밀어내기는
+        아웃박스 워커가 한다. 대부분의 테스트는 그 타이밍이 아니라 *나간 메시지*가
+        필요하므로 여기서 기다린다 — 그래서 옛 호출부가 그대로 읽힌다.
+
+        못 나가면 **None** 이다 (`flush_error` 를 심은 테스트). 그것도 정상
+        결과이므로 예외로 만들지 않는다.
+        """
+        ticket = super().send(room_id, *args, **kwargs)
+        box = self.outbox(room_id)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if box.wait_idle(0.05):
+                break
+            if box.state.state == OUTBOX_STUCK:
+                break                       # 더 기다려도 안 나간다
+        record = ticket.record
+        return schema.parse_record(record) if record is not None else None
 
 
 @pytest.fixture

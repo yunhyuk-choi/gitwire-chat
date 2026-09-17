@@ -569,13 +569,16 @@ await test('메시지 본문은 textContent 로만 들어간다 (HTML 이 실행
   assert.equal(doc.counts.innerHTML, 0);
 });
 
-await test('보내기: 로컬 에코가 즉시 붙고 뒤이은 SSE 는 중복으로 걸러진다', async () => {
-  const sent = msg(30, '내가 방금 보낸 말', '나');
+await test('보내기: 로컬 에코가 즉시 붙고, push 된 뒤 SSE 가 그 자리를 채운다', async () => {
+  /* ⚠️ 서버 응답(202)에는 **봉투가 없다** — 레코드의 ID·시각은 원격에 push 되는
+     순간에 정해진다. 그래서 확정은 뒤이은 SSE 가 하고, 그때 같은 노드를 쓴다
+     (말풍선이 두 줄로 늘어나지 않는다). */
+  const sent = msg(30, '내가 방금 보낸 말', '기본이름');
   const doc0 = await boot();
   const { doc, chat, context } = doc0;
   // 전송 라우트를 추가한다.
   context.fetch = makeFetch({
-    '/api/rooms/r1/messages': () => ({ message: sent }),
+    '/api/rooms/r1/messages': () => ({ queued: true }),
     '/api/rooms': { rooms: [] }
   });
   doc.getElementById('text').value = '내가 방금 보낸 말';
@@ -584,8 +587,17 @@ await test('보내기: 로컬 에코가 즉시 붙고 뒤이은 SSE 는 중복�
   const list = doc.getElementById('messages');
   assert.equal(list.children.length, 4);
   const echoed = list.children[3];
+  assert.ok(String(echoed.className).includes('pending'), '아직 나가지 않았다');
+  assert.equal(chat.pendings().size, 1);
 
-  StubEventSource.current.emit('message', sent);   // 잠시 뒤 폴링으로 되돌아온 같은 레코드
+  StubEventSource.current.emit('message', sent);   // push 성공 → 진짜 봉투가 온다
+  assert.equal(list.children.length, 4);
+  assert.equal(list.children[3], echoed);
+  assert.equal(echoed.dataset.id, sent.id);
+  assert.equal(String(echoed.className).includes('pending'), false);
+  assert.equal(chat.pendings().size, 0);
+
+  StubEventSource.current.emit('message', sent);   // 폴링으로 또 와도 중복이 아니다
   assert.equal(list.children.length, 4);
   assert.equal(list.children[3], echoed);
 });
@@ -1033,8 +1045,18 @@ await test('⭐ 성공 시 진짜 봉투 ID 로 갈아끼우되 노드를 다시
   const createdBefore = chat.stats.created;
 
   const real = msg(30, '갈아끼울 말', '기본이름');
-  await context.fetch.answer({ message: real });
+  /* ⭐ 202 = "받아 뒀다" — 봉투가 없다. 그래서 응답만으로는 **확정하지 않는다.**
+     아직 안 나간 말을 "보냈다"로 그려 두면, 앱이 죽어 대기열이 사라졌을 때
+     사용자가 이미 본 말이 조용히 없어진다. */
+  await context.fetch.answer({ queued: true }, 202);
   await sending;
+  assert.ok(String(bubble.className).includes('pending'), '응답만으로 확정했다');
+  assert.equal(chat.pendings().size, 1);
+  assert.equal(bubble.dataset.id.indexOf('~pending/'), 0);
+
+  /* push 가 끝나 진짜 레코드가 SSE 로 돌아온 순간 — 여기서 확정된다. */
+  StubEventSource.current.emit('message', real);
+  await settle();
 
   assert.equal(list.children.length, before + 1);
   assert.equal(list.children[before], bubble, '노드가 교체됐다');
@@ -1082,7 +1104,9 @@ await test('⭐ 실패: 말풍선이 남고 "보내지 못했다" + 재시도가
   assert.ok(String(bubble.className).includes('pending'), '다시 보내는 중이 아니다');
 
   const real = msg(31, '실패할 말', '기본이름');
-  await context.fetch.answer({ message: real });
+  await context.fetch.answer({ queued: true }, 202);   // 받아 뒀다 (봉투는 없다)
+  StubEventSource.current.emit('message', real);       // push 성공 → 진짜 봉투
+  await settle();
   assert.equal(list.children[before], bubble, '재시도가 노드를 갈아치웠다');
   assert.equal(chat.stats.created, createdBefore);
   assert.equal(chat.stats.rebuiltInView, 0);
@@ -1104,7 +1128,7 @@ await test('⭐ SSE 가 응답보다 먼저 와도 같은 말이 두 번 뜨지 
   assert.equal(chat.stats.created, createdBefore);
 
   // 뒤늦게 온 응답도 아무것도 어지르지 않는다.
-  await context.fetch.answer({ message: real });
+  await context.fetch.answer({ queued: true }, 202);
   await sending;
   assert.equal(list.children.length, before + 1);
   assert.equal(list.children[before], bubble);
@@ -1264,15 +1288,22 @@ await test("⭐ 봉투가 도착하면 서버 판정이 그 자리를 대신한�
      화면의 판정과 서버의 판정이 갈린다. 그 하드코딩이 없다는 것을 **서버가
      반대로 말하게 해서** 증명한다 (실제로는 일어나지 않는 상황이다). */
   const first = await startSending('서버가 아니라고 말할 말');
-  await first.context.fetch.answer({ message: msg(40, '서버가 아니라고 말할 말') });
+  await first.context.fetch.answer({ queued: true }, 202);
   await first.sending;
+  /* ⚠️ 작성자는 같아야 한다 — 확정은 이제 SSE 가 하고, 짝짓기는 작성자+본문으로
+     한다(봉투 ID 를 보낼 때는 모르므로). 뒤집는 것은 **`mine` 판정**뿐이다. */
+  StubEventSource.current.emit(
+    'message', msg(40, '서버가 아니라고 말할 말', '기본이름'));
+  await settle();
   assert.equal(isMine(first.bubble), false, '화면이 서버 판정을 무시했다');
   assert.equal(first.chat.stats.rebuiltInView, 0);
 
   /* 정상적인 경우 — 서버도 내 것이라고 말하고, 말풍선은 오른쪽에 그대로 있다. */
   const second = await startSending('서버도 내 것이라 할 말');
-  await second.context.fetch.answer({ message: mineMsg(41, '서버도 내 것이라 할 말') });
+  await second.context.fetch.answer({ queued: true }, 202);
   await second.sending;
+  StubEventSource.current.emit('message', mineMsg(41, '서버도 내 것이라 할 말'));
+  await settle();
   assert.equal(isMine(second.bubble), true);
   assert.equal(second.chat.stats.rebuiltInView, 0);
 });
@@ -3096,10 +3127,14 @@ await test('⭐ 실사용 경로: 보내는 중인 낙관적 항목이 읽음 �
   assert.deepEqual(posted, [], '아직 나갈 것이 없다 — 부팅 몫은 이미 흘려보냈다');
   assert.equal(chat.readsStats().skipped >= 0, true);
 
-  /* 봉투가 도착하면 그 **실제 ID** 로 커서가 전진한다. */
+  /* 봉투가 도착하면(= push 성공 → SSE) 그 **실제 ID** 로 커서가 전진한다.
+     ⚠️ POST 응답은 202 "받아 뒀다" 뿐이라 여기서 커서가 움직일 재료가 없다 —
+     커서가 움직이는 계기는 *실제 봉투*여야 한다 (그것이 이 버그의 교훈이다). */
   const real = msg(30, '보내는 중인 말', '기본이름');
-  await fetch.answer({ message: real });
+  await fetch.answer({ queued: true }, 202);
   await sending;
+  StubEventSource.current.emit('message', real);
+  await settle();
   context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
   await settle();
   const after = readPosts(fetch);

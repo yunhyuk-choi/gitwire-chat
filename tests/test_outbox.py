@@ -157,21 +157,28 @@ def test_close_가_밀어내기에_실패해도_종료를_막지_않는다():
 
 
 def test_전송_응답이_밀어내기를_기다리지_않는다(manager, fake_opener):
-    """⭐ 이 변경의 전부 — push 가 느려도 응답은 빠르다."""
+    """⭐ 이 변경의 전부 — push 가 느려도 응답은 빠르다.
+
+    ⚠️ **진짜 `RoomManager.send` 를 부른다** (테스트용 매니저의 `send` 는 편의로
+    push 까지 기다려 주므로 이 성질을 잴 수 없다).
+    """
     room = manager.register(REPO)
     channel = manager.channel(room.id)
     channel.flush_delay = 2.0            # 느린 원격
 
     t0 = time.perf_counter()
-    message = manager.send(room.id, "빨리 돌아와야 한다")
+    ticket = RoomManager.send(manager, room.id, "빨리 돌아와야 한다")
     elapsed = time.perf_counter() - t0
 
     assert elapsed < 0.5, f"응답이 push 를 기다렸다 ({elapsed*1000:.0f} ms)"
-    assert message.text == "빨리 돌아와야 한다"
-    # 응답 시점에 레코드는 **이미** 채널에 있다 (내구성은 여기서 끝난다).
-    assert channel.records[-1].id == message.id
-    # 그리고 밀어내기는 뒤따라 일어난다.
+    # 응답 시점에는 **봉투가 없다** — 대기열에 들어갔을 뿐이다.
+    assert ticket.pushed is False
+    assert ticket.payload["text"] == "빨리 돌아와야 한다"
+    assert channel.records == []
+    # 그리고 밀어내기는 뒤따라 일어난다. 그때 봉투가 생긴다.
     assert manager.outbox(room.id).wait_idle(20.0)
+    assert ticket.pushed is True
+    assert channel.records[-1].id == ticket.id
     assert channel.unpushed() == []
 
 
@@ -244,11 +251,15 @@ def test_다시_보내기가_회복시킨다(manager, fake_opener):
     assert channel.unpushed() == []
 
 
-def test_방이_붙으면_지난_실행의_잔여분을_밀어낸다(settings, fake_opener):
-    """⭐ 유실 방지의 본체 — 강제 종료로 남은 레코드는 다음 기동이 민다.
+def test_방에_붙는_것만으로는_밀지_않는다(settings, fake_opener):
+    """⭐ 기동 직후의 '잔여분 밀어내기'가 **없다** — 밀 것이 남지 않기 때문이다.
 
-    (대역은 '밀었다'까지만 말한다. 진짜 git 으로 커밋되지 않은 파일이 살아
-    돌아오는지는 `test_two_instances.py` 가 실제 레포에서 본다.)
+    예전에는 붙자마자 한 번 밀었다(`_drain_outbox`). 레코드가 커밋 전에 작업
+    사본에 남아 있을 수 있어서, 강제 종료 뒤 다음 기동이 그걸 밀어내는 것이
+    유실 방지의 본체였다. 지금은 대기열이 **메모리**이므로 지난 실행이 남긴 것이
+    없다 (`gitwire.Channel.append` 도크 — 시각·ID 를 push 때 정하기 위해 그
+    보장을 버렸다). 남은 게 없는데 깨우면 방에 붙을 때마다 헛 push 왕복이 한 번
+    생기므로 그 호출을 없앴고, 여기서 없음을 못 박는다.
     """
     mgr = RoomManager(settings, opener=fake_opener)
     try:
@@ -256,7 +267,8 @@ def test_방이_붙으면_지난_실행의_잔여분을_밀어낸다(settings, f
         mgr.wait_for_connect()
         channel = mgr.channel(room.id)
         assert mgr.outbox(room.id).wait_idle(10.0)
-        assert channel.flushes >= 1, "붙었는데 잔여분을 밀지 않았다"
+        assert channel.flushes == 0, "붙기만 했는데 밀었다 (헛 왕복)"
+        assert channel.queue == []
     finally:
         mgr.stop()
 

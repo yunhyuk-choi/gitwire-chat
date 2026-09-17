@@ -19,7 +19,12 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
-    POST /api/rooms/<id>/messages          보내기 (**원격 push 를 기다리지 않는다**)
+    POST /api/rooms/<id>/messages          보내기 — 202 `{"queued": true}`.
+                                           ⭐ **봉투를 돌려주지 않는다**: 레코드의
+                                           ID·시각은 원격에 push 되는 순간에
+                                           정해진다. 화면의 말풍선은 브라우저의
+                                           낙관적 항목이고, 진짜 레코드는 push
+                                           직후 SSE(`message`)로 온다
     POST /api/rooms/<id>/outbox            아직 못 나간 것을 지금 다시 밀기
     GET  /api/rooms/<id>/reads             ⭐ 읽음 스냅샷 (내 안 읽은 개수 +
                                            참가자별 커서). **카운트는 담지 않는다** —
@@ -355,9 +360,18 @@ def create_app(
 
     @app.post("/api/rooms/<room_id>/messages")
     def post_message(room_id: str):
+        """보내기 — **받아 뒀다**(202)까지만 말한다.
+
+        ⭐ 201 + 봉투를 돌려주던 자리다. 이제 레코드의 ID·시각은 *원격에 push
+        되는 순간*에 정해지므로(`rooms.send` 도크) 이 응답에는 봉투가 없다.
+        그래서 상태 코드도 202(Accepted)다 — "만들었다"가 아니라 "받아 뒀다".
+
+        브라우저는 이 응답으로 말풍선을 **확정하지 않는다.** 확정은 push 뒤에
+        오는 SSE `message` 이벤트가 한다 (`static/js/composer.js`).
+        """
         data = request.get_json(silent=True) or request.form or {}
         try:
-            message = manager.send(
+            manager.send(
                 room_id,
                 str(data.get("text") or ""),
                 author=str(data.get("author") or ""),
@@ -371,7 +385,7 @@ def create_app(
             return jsonify({"error": str(exc)}), 400
         except ValueError as exc:  # schema.InvalidMessage
             return jsonify({"error": str(exc)}), 400
-        return jsonify({"message": manager.message_json(room_id, message)}), 201
+        return jsonify({"queued": True}), 202
 
     @app.get("/api/rooms/<room_id>/search")
     def search(room_id: str):
