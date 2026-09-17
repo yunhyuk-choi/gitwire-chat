@@ -52,6 +52,17 @@ def _isolated_env(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("GITWIRE_CHAT_AUTHOR", raising=False)
 
 
+class FrozenClock:
+    """고정 시계 (기반 `SystemClock` 의 소비자 표면만). 테스트가 값을 옮긴다."""
+
+    def __init__(self, at: datetime) -> None:
+        self.at = at
+        self.offset = 0.0
+
+    def now(self) -> datetime:
+        return self.at
+
+
 # --------------------------------------------------------------- 대역 채널
 
 
@@ -95,6 +106,22 @@ class FakeChannel:
         self.flush_delay = 0.0      # 느린 push 흉내 (응답이 이걸 기다리면 안 된다)
         self._cursor = 0
         self._clock = datetime(2026, 9, 3, 1, 0, 0, tzinfo=timezone.utc)
+        # ⭐ 공통 시계 — 기반이 git 호스트의 HTTP Date 로 맞춘 것. 아카이빙 배치가
+        # 휴면 판정·"어제" 판정에 이것을 쓰므로(로컬 시계를 따로 보지 않는다) 대역도
+        # 준다. **레코드 시각보다 이틀 뒤**로 둔다 — 그래야 대역으로 만든 메시지가
+        # 곧 "지난 날짜"가 되어 아카이빙 경로를 실제로 탄다.
+        self.clock = FrozenClock(self._clock + timedelta(days=2))
+        # 지난 날짜 아카이빙·삭제 대역. 기반에서는 로컬 파일 + 삭제 커밋이지만,
+        # 여기서 흉내 낼 것은 **호출과 그 순서**뿐이다 (읽기는 그대로 돌아간다).
+        self.archived: dict[str, int] = {}
+        self.dropped: list[str] = []
+        self.recovered: list[str] = []
+        self.gaps: list[str] = []
+        self.deleted_map: dict[tuple[str, str], list[str]] = {}
+        self.recover_problems: list[str] = []
+        self.archive_error: BaseException | None = None
+        self.archive_skipped: dict[str, str] = {}
+        self.syncs = 0
         self._n = 0
         self._seq = 0
         self._lock = threading.Lock()
@@ -246,15 +273,70 @@ class FakeChannel:
             updated_at=datetime(2026, 9, 8, tzinfo=timezone.utc),
         )
 
+    # -- 지난 날짜 아카이빙 / 삭제 / 복구 ------------------------------
+    #
+    # ⚠️ 이 목록이 곧 "아카이빙 기능이 기반에 요구하는 표면"의 전부다.
+    def sync(self):
+        self.syncs += 1
+        return "head"
+
+    def archive_days(self, **kwargs) -> dict:
+        """지난 날짜를 로컬 아카이브로 옮긴 것처럼 한다 (레코드는 그대로 둔다)."""
+        if self.archive_error is not None:
+            raise self.archive_error
+        today = f"{self.clock.now().astimezone(timezone.utc):%Y%m%d}"
+        days: dict[str, int] = {}
+        for record in list(self.records):
+            day = gitwire.rollup.day_of(record.id)
+            if day and day < today and day not in self.archive_skipped:
+                days[day] = days.get(day, 0) + 1
+        self.archived.update(days)
+        through = "" if self.archive_skipped else gitwire.last_closed_day(
+            self.clock.now()
+        )
+        if self.archive_skipped:
+            through = gitwire.previous_day(min(self.archive_skipped))
+        return {
+            "archived": sorted(days),
+            "written": sorted(days),
+            "records": sum(days.values()),
+            "skipped": dict(self.archive_skipped),
+            "through": through,
+        }
+
+    def archive_state(self) -> dict:
+        return {day: f"stamp-{n}" for day, n in self.archived.items()}
+
+    def drop_days(self, days, **kwargs) -> dict:
+        """삭제를 **기록만** 한다 — 대역의 읽기 경로는 라이브/아카이브를 가르지 않는다."""
+        wanted = [d for d in days if d in self.archived]
+        self.dropped += wanted
+        return {"dropped": bool(wanted), "days": sorted(wanted), "skipped": {}}
+
+    def deleted_days(self, base, target) -> list:
+        return list(self.deleted_map.get((base, target), []))
+
+    def recover_archive(self, day: str) -> dict:
+        self.recovered.append(day)
+        return {
+            "recovered": not self.recover_problems,
+            "day": day,
+            "added": 0 if self.recover_problems else 1,
+            "problems": list(self.recover_problems),
+        }
+
+    def archive_gaps(self, through, *, max_days=60) -> list:
+        return list(self.gaps)
+
     def skip_to_now(self) -> None:
         with self._lock:
             self.skipped_to = len(self.records)
             self._cursor = len(self.records)
 
-    def tick(self) -> int:
+    def tick(self, head: str = "head") -> int:
         """폴 한 틱이 끝난 것처럼 훅을 부른다 (레코드가 0건이어도 불린다)."""
         for hook in list(self.cycle_hooks):
-            hook("head")
+            hook(head)
         return len(self.cycle_hooks)
 
     def info(self) -> dict:
@@ -288,6 +370,10 @@ def settings(tmp_path) -> Settings:
         recent_limit=5,
         page_limit=3,
         notifications=False,
+        # ⭐ 일일 배치 스레드를 띄우지 않는다 — 배치를 보는 테스트는 `tick()`·
+        # `run_archive()` 를 **직접** 불러 시점을 손에 쥔다 (실제 시간을 기다리는
+        # 테스트를 만들지 않는다).
+        daily_archive=False,
     )
 
 
