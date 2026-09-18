@@ -37,7 +37,6 @@ git 이 대화형으로 물어보는데, 이 앱은 ``pythonw`` 로 **창 없이
 
 from __future__ import annotations
 
-import logging
 import os
 import subprocess
 import urllib.parse
@@ -46,7 +45,9 @@ from typing import Callable
 
 from . import winspawn
 
-log = logging.getLogger(__name__)
+# ⚠️ 이 모듈에는 로거가 **없다.** 여기서 다루는 것이 자격증명 값이고, 로거가
+# 있으면 "디버깅용으로 한 줄만" 이 언젠가 들어간다 — 그 한 줄이 곧 유출이다.
+# 남길 것이 있으면 값이 아닌 것(출처·git stderr 한 줄)을 반환값에 실어 올린다.
 
 #: 기본 환경변수 이름 (기반·앱이 같이 쓰는 이름).
 DEFAULT_ENV = "GITWIRE_TOKEN"
