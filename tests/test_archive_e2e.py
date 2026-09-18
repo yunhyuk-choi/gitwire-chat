@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,46 @@ from gitwire_chat import archive as _archive
 from gitwire_chat import reads as _reads
 
 DAY = 86400.0
+
+
+# --------------------------------------------------------------- 고정 시계
+#
+# ⚠️ **이 파일의 "지금"은 벽시계가 아니다.**
+#
+# 여기 있는 것들은 전부 "지난 날짜"(UTC 날짜 경계 + 유예 2시간 —
+# `gitwire.rollup.is_closed`) 판정을 타므로, 벽시계로 돌리면 **하루 중 어느
+# 시각에 도는지에 따라 결론이 달라진다.** 실제로 그렇게 깨졌다:
+# `write_past(a, 2, …)` 가 만든 날짜와 `last_closed_day(now)` 가
+# UTC 00:00~02:00 사이에 **같은 날짜**가 되어 (`('20260916','20260916')`)
+# "이틀 전 기록이므로 워터마크보다 앞선다"는 전제가 그 두 시간 동안만 거짓이 됐다.
+#
+# 그래서 시계를 못박는다. 기반의 시계 주입 관용구(`Channel(clock=…)`)를 그대로
+# 쓰되, `FixedOffsetClock` 의 `base` 를 **움직이지 않는 함수**로 바꿔 끼운다
+# (기본값이 `time.time` 이라 오프셋만 주면 여전히 벽시계를 따라간다).
+#
+# 못박는 지점은 **그 UTC 날짜의 정오**다. 날짜는 실제로 흐르게 두고(하드코딩한
+# 날짜는 언젠가 거짓말이 된다) 하루 안의 시각만 경계에서 가장 먼 곳으로 옮긴다 —
+# 정오면 자정 경계에서 12시간, 유예 경계에서 10시간 떨어져 있어 어느 쪽으로도
+# 걸리지 않는다.
+#
+# ⭐ 이 값은 **모듈이 실려올 때 한 번** 정해진다. 한 실행이 UTC 자정을 넘겨도
+# 테스트 도중에 "지금"이 바뀌지 않는다.
+
+
+def noon_utc(epoch: float | None = None) -> datetime:
+    """그 시각이 속한 UTC 날짜의 정오. 인자를 주면 그 epoch 기준(검증용)."""
+    now = datetime.fromtimestamp(time.time() if epoch is None else epoch, tz=timezone.utc)
+    return now.replace(hour=12, minute=0, second=0, microsecond=0)
+
+
+def fixed_clock(at: datetime) -> FixedOffsetClock:
+    """`at` 에 멈춘 시계. 기반의 시계 표면(`now()`·`offset`)을 그대로 만족한다."""
+    stamp = at.timestamp()
+    return FixedOffsetClock(0.0, base=lambda: stamp)
+
+
+#: 이 파일 전체의 "지금".
+NOW = noon_utc()
 
 
 def git_bare(repo: Path, *args: str) -> str:
@@ -78,7 +119,7 @@ def party(bare_repo, tmp_path):
         home.mkdir(parents=True, exist_ok=True)
         channel = gitwire.Channel(
             str(bare_repo), home=home, sender=name, consumer="chat",
-            clock=FixedOffsetClock(0.0), auto_archive=False,
+            clock=kwargs.pop("clock", None) or fixed_clock(NOW), auto_archive=False,
             **kwargs,
         ).open()
         tracker = _reads.ReadTracker(channel, f"{name}@x.io")
@@ -95,9 +136,13 @@ def party(bare_repo, tmp_path):
 
 
 def write_past(p: Party, days: float, texts):
-    """days 일 전 시각으로 메시지를 발행한다 (실제 발행 경로를 그대로 탄다)."""
+    """days 일 전 시각으로 메시지를 발행한다 (실제 발행 경로를 그대로 탄다).
+
+    기준은 벽시계가 아니라 이 파일의 `NOW` 다 — 그래야 "이틀 전"이 언제 돌려도
+    같은 날짜를 가리킨다 (모듈 상단 「고정 시계」).
+    """
     real = p.channel.clock
-    p.channel.clock = FixedOffsetClock(-days * DAY)
+    p.channel.clock = fixed_clock(NOW - timedelta(days=days))
     try:
         return [
             p.channel.append({"kind": "msg", "author": p.name, "text": t}, flush=True)
@@ -220,9 +265,9 @@ def test_a_dormant_participant_does_not_block_forever(party, bare_repo):
     gone = party("gone")
 
     # 'gone' 의 상태 파일을 8일 전 시각으로 만든다 (앱을 그만 켠 사람)
-    gone.channel.clock = FixedOffsetClock(-8 * DAY)
+    gone.channel.clock = fixed_clock(NOW - timedelta(days=8))
     gone.tracker.publish(force=True)
-    gone.channel.clock = FixedOffsetClock(0.0)
+    gone.channel.clock = fixed_clock(NOW)
     gone.close()
 
     old = write_past(a, 2, [f"어제 {i}" for i in range(3)])
@@ -305,9 +350,9 @@ def test_a_participant_that_never_answered_recovers_from_history(party, bare_rep
     day = day_of(old[0])
 
     # quiet 을 휴면으로 만들어 a·b 만으로 합의가 성립하게 한다
-    quiet.channel.clock = FixedOffsetClock(-8 * DAY)
+    quiet.channel.clock = fixed_clock(NOW - timedelta(days=8))
     quiet.tracker.publish(force=True)
-    quiet.channel.clock = FixedOffsetClock(0.0)
+    quiet.channel.clock = fixed_clock(NOW)
 
     a.batch.run_once()
     got = b.batch.run_once()
@@ -337,9 +382,9 @@ def test_startup_sweep_recovers_what_happened_while_the_app_was_off(party, bare_
     b = party("b")
     old = write_past(a, 2, [f"어제 {i}" for i in range(3)])
     day = day_of(old[0])
-    b.channel.clock = FixedOffsetClock(-8 * DAY)
+    b.channel.clock = fixed_clock(NOW - timedelta(days=8))
     b.tracker.publish(force=True)
-    b.channel.clock = FixedOffsetClock(0.0)
+    b.channel.clock = fixed_clock(NOW)
     a.batch.run_once()
     assert a.batch.last_result.dropped == [day]
 
@@ -414,7 +459,7 @@ def test_reading_past_messages_still_works_after_the_drop(party, bare_repo):
     # 주말 내내 꺼져 있던 소비자 (커서를 '지금'에 맞춰 둔다)
     reader = gitwire.Channel(
         str(bare_repo), home=b.channel.home, sender="b", consumer="weekend",
-        clock=FixedOffsetClock(0.0), auto_archive=False,
+        clock=fixed_clock(NOW), auto_archive=False,
     ).open()
     try:
         reader.skip_to_now()
