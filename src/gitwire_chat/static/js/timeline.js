@@ -163,11 +163,17 @@ export function createTimeline(env) {
   /* 읽음 모델은 **남의 것**이다 (`reads.js`). 우리는 계산을 부탁하고 그 결과를
      노드에 덧입힐 뿐이다. 그 모듈이 서지 못했으면 카운트가 0 이라 아무것도 그리지
      않는다 — 읽음 표시가 없는 것은 대화가 안 되는 것과 다른 급의 사건이다. */
-  var NO_READS = { count: function () { return 0; }, firstUnread: function () { return null; } };
+  /* `mine` 이 없으면 **아무것도 내 것이 아니다** — 읽음 모듈이 서지 못한 경우이고,
+     그때는 커서 발행 자체가 없으므로(그 모듈이 하는 일이다) 값이 무엇이든 무해하다. */
+  var NO_READS = {
+    count: function () { return 0; },
+    mine: function () { return false; },
+    firstUnread: function () { return null; }
+  };
 
   function reads() {
     var mod = env.reads ? env.reads() : null;
-    return mod && mod.count ? mod : NO_READS;
+    return mod && mod.count && mod.mine ? mod : NO_READS;
   }
 
   var hooks = {
@@ -336,7 +342,8 @@ export function createTimeline(env) {
     var visible = v.getVirtualItems();
     var keep = new Set();
     var reader = reads();
-    /* 이번 창에서 **가장 아래까지** 보인 메시지. 읽음 커서의 근거다. */
+    /* 이번 창에서 **가장 아래까지** 보인 **남의** 메시지. 읽음 커서의 근거다
+       (내 것은 근거가 아니다 — 아래 선별 지점의 도크). */
     var maxSeen = '';
     for (var i = 0; i < visible.length; i++) {
       var vi = visible[i];
@@ -378,8 +385,19 @@ export function createTimeline(env) {
          서버·원격까지 올라가 커서를 굳혔고(단조 증가라 되돌릴 수 없다) 카운트가
          영구히 0 이 됐다. 그래서 **여기서** 걸러야 한다 — 받는 쪽에서만 막으면
          `view.seenMax` 가 임시 ID 로 굳어 그 뒤 실제 ID 를 아예 알리지 못한다
-         (같은 함정의 다른 얼굴이다). */
-      if (msg.id > maxSeen && isMessageId(msg.id)) { maxSeen = msg.id; }
+         (같은 함정의 다른 얼굴이다).
+
+         ⭐⚠️ **내 메시지도 근거가 아니다.** 읽음 커서가 말하는 것은 "남의 말을
+         어디까지 읽었나"이고, 내가 보낸 말은 그 문장에 들어가지 않는다 — 커서
+         값은 내 메시지의 카운트에 아무 영향이 없고(공식이 작성자를 뺀다) 내
+         뱃지도 내 레코드를 세지 않는다(`gitwire_chat/reads.py`). 그런데 내 말은
+         언제나 창의 맨 아래 = 최대값이라, 안 빼면 **전송마다** 커서가 전진하고
+         발행이 나갔다. 그것이 전송당 두 번째 커밋·push 의 정체였다 (`reads.js`
+         모듈 도크의 실측). 판정은 그 모듈 것을 그대로 부른다 — 작성자 판정
+         규칙을 여기서 다시 쓰면 카운트와 어긋난다. */
+      if (msg.id > maxSeen && isMessageId(msg.id) && !reader.mine(msg)) {
+        maxSeen = msg.id;
+      }
       if (remeasure.has(msg.id)) {
         remeasure['delete'](msg.id);
         stats.headRemeasured += 1;
@@ -402,9 +420,9 @@ export function createTimeline(env) {
     announceSeen(maxSeen);
   }
 
-  /* ⭐ **창 안에 무엇이 있었나**를 읽음 모델에 알린다 (여기가 그것을 아는 곳이다).
-     단조 증가만 알린다 — 위로 스크롤해도 읽은 위치가 뒤로 가지 않는다. 디바운스와
-     발행 판단은 받는 쪽(`reads.js`)의 몫이다. */
+  /* ⭐ **창 안에 남의 것이 어디까지 있었나**를 읽음 모델에 알린다 (여기가 그것을
+     아는 곳이다). 단조 증가만 알린다 — 위로 스크롤해도 읽은 위치가 뒤로 가지
+     않는다. 가시성 게이트·디바운스·발행 판단은 받는 쪽(`reads.js`)의 몫이다. */
   function announceSeen(id) {
     if (!id || !view.roomId) { return; }
     /* `view.seenMax` 는 단조 증가로 굳는 값이다 — 실제 봉투 ID 가 아닌 값이 여기

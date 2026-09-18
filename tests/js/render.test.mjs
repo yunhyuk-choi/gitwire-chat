@@ -3291,7 +3291,12 @@ await test('⭐ 실사용 경로: 보내는 중인 낙관적 항목이 읽음 �
 
   /* 봉투가 도착하면(= push 성공 → SSE) 그 **실제 ID** 로 커서가 전진한다.
      ⚠️ POST 응답은 202 "받아 뒀다" 뿐이라 여기서 커서가 움직일 재료가 없다 —
-     커서가 움직이는 계기는 *실제 봉투*여야 한다 (그것이 이 버그의 교훈이다). */
+     커서가 움직이는 계기는 *실제 봉투*여야 한다 (그것이 이 버그의 교훈이다).
+
+     ⚠️ 이 방의 참가자 지도는 **비어 있다**(`emptyReads`) — 작성자를 판정할
+     근거가 없으므로 이 봉투는 '남의 것'으로 취급된다. 지도가 있으면 내 말은
+     커서 후보에서 빠진다: 그쪽은 아래 「내가 보낸 말이 창에 들어와도 …」가
+     본다. 여기서 보는 것은 **임시 ID 가 아닌 실제 ID 가 나간다**는 것뿐이다. */
   const real = msg(30, '보내는 중인 말', '기본이름');
   await fetch.answer({ queued: true }, 202);
   await sending;
@@ -3302,6 +3307,164 @@ await test('⭐ 실사용 경로: 보내는 중인 낙관적 항목이 읽음 �
   const after = readPosts(fetch);
   assert.deepEqual(after, [real.id],
     '봉투가 도착했는데 커서가 실제 ID 로 전진하지 않았다: ' + JSON.stringify(after));
+});
+
+/* --------------------- ⭐ 발행 조건 — *남의* 안 읽은 말 × 보이는 탭
+ *
+ * 전송당 push 가 두 번 나가던 원인의 화면 쪽 절반이 여기다. 내가 보낸 말은
+ * 언제나 창의 맨 아래 = 최대값이라, 창 스캔이 그것을 커서 후보로 고르면
+ * **전송마다** POST → 참가자 상태 파일 재작성 → 두 번째 커밋·push 가 난다.
+ * 내 커서 값은 내 메시지의 카운트에 아무 영향이 없으므로(공식이 작성자를 뺀다)
+ * 그 왕복은 살 것이 없었다.
+ *
+ * 아래 넷이 새 조건의 네 모서리다: 내 말만 → 안 나간다 / 남의 말 → 나간다 /
+ * 섞이면 남의 것까지 / 탭이 안 보이면 안 나간다.
+ */
+
+/* 내가 참가자 지도 안에 있어야 작성자 판정이 선다 (`reads.isMine`). */
+function readsWithMe(extra) {
+  return readsOf([
+    who('me@x.io', '', ['me.host']),
+    who('b@x.io', '', ['b.host'])
+  ], extra || {});
+}
+
+await test('⭐ 내가 보낸 말이 창에 들어와도 읽음 커서가 나가지 않는다 (push 1회)', async () => {
+  const booted = await boot({ messages: [], reads: readsWithMe() });
+  const { doc, chat, context } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);      /* 부팅 몫을 흘려보낸다 */
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  doc.getElementById('text').value = '내가 보내는 말';
+  const sending = chat.send();
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  /* 봉투가 도착한다 = push 성공 → SSE. **내 것**이다 (`mine: true`). */
+  const real = mineMsg(30, '내가 보내는 말');
+  await fetch.answer({ queued: true }, 202);
+  await sending;
+  StubEventSource.current.emit('message', real);
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  /* 전제: 그 말이 **정말로** 창 안의 최대 ID 다 (아니면 대조군이 성립하지 않는다). */
+  const ids = chat.items().map((m) => m.id);
+  assert.equal(ids.slice().sort().pop(), real.id, '내 말이 최대값이 아니다');
+  assert.ok(chat.nodes().get(real.id), '내 말이 창 안에 그려지지 않았다');
+  /* ⭐ 그런데도 커서는 나가지 않는다. */
+  assert.deepEqual(readPosts(fetch), [],
+    '내 말로 읽음 커서가 발행됐다 (= 전송당 두 번째 push)');
+  assert.equal(chat.reads().cursor, '', '내 말로 커서가 전진했다');
+});
+
+await test('⭐ 남의 안 읽은 말이 있으면 나간다 (발행 조건의 다른 쪽)', async () => {
+  const booted = await boot({ messages: [], reads: readsWithMe() });
+  const { chat, context } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  chat.appendMessage(msg(40, '남이 한 말'));
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  assert.deepEqual(readPosts(fetch), [msg(40).id],
+    '남의 안 읽은 말을 봤는데 읽음이 나가지 않았다');
+});
+
+await test('⭐ 내 말 뒤에 남의 말이 오면 커서는 **남의 것까지** 간다', async () => {
+  /* 커서는 워터마크 하나다 — 내 말을 건너뛰어도 그 아래 남의 말이 함께 읽힌다. */
+  const booted = await boot({ messages: [], reads: readsWithMe() });
+  const { chat, context } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  chat.appendMessage(msg(40, '남이 먼저'));
+  chat.appendMessage(mineMsg(41, '내가 답'));
+  chat.appendMessage(msg(42, '남이 또'));
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+
+  const posted = readPosts(fetch);
+  assert.deepEqual(posted, [msg(42).id],
+    '커서가 남의 최대 ID 로 가지 않았다: ' + JSON.stringify(posted));
+  /* 내 말은 최대값이 아니므로 커서가 **내 말을 지나** 가는 것도 아니다. */
+  assert.ok(posted.every((c) => c !== mineMsg(41).id));
+});
+
+await test('⭐ 안 보이는 탭에서는 남의 말이 와도 읽음이 나가지 않는다 (가시성 게이트)', async () => {
+  const booted = await boot({ messages: [], reads: readsWithMe() });
+  const { chat, context, doc } = booted;
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  const fetch = deferredOverBoot(booted);
+
+  doc.visibilityState = 'hidden';                 /* 탭이 안 보인다 */
+  chat.appendMessage(msg(40, '안 보는 동안 온 말'));
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  assert.deepEqual(readPosts(fetch), [],
+    '안 보이는 탭에서 읽음 처리가 났다');
+
+  /* 다시 보이면 그때 나간다 (같은 말을 뒤늦게 읽는 경우다). */
+  doc.visibilityState = 'visible';
+  doc.dispatch('visibilitychange');
+  await settle();
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  assert.deepEqual(readPosts(fetch), [msg(40).id],
+    '탭이 보이게 됐는데 읽음이 나가지 않았다');
+});
+
+await test('⭐ 이미 있던 남의 과거 메시지를 뒤늦게 처음 읽어도 나간다 ("새로운" = 안 읽음)', async () => {
+  /* "새로운"은 도착 시각이 아니라 **내가 아직 안 읽음**이라는 뜻이다. 커서가
+     중간에 있는 방을 열면, 그 아래 남의 말들이 새로 도착한 것이 아니어도
+     읽음으로 올라간다. */
+  const booted = await boot({
+    messages: [msg(1), msg(2), msg(3)],
+    reads: readsWithMe({ cursor: msg(1).id })
+  });
+  const { chat, context } = booted;
+  const fetch = deferredOverBoot(booted);
+  context.win.runTimers(readsMod.MARK_DEBOUNCE_MS);
+  await settle();
+  assert.deepEqual(readPosts(fetch), [msg(3).id],
+    '이미 있던 남의 메시지를 읽었는데 커서가 안 올라갔다');
+  /* ⚠️ 낙관적 갱신을 여기서 다시 보지 않는다 — 대역의 `/reads` 는 **같은
+     스냅샷**을 되돌려주므로(정적 라우트) 서버 값이 정본이라는 규칙에 따라
+     내 추측이 덮인다. 그 규칙 자체는 위 「내 커서는 낙관적으로 …」가 본다. */
+  assert.ok(chat.items().length === 3);
+});
+
+await test('⭐ 작성자 판정은 **한 규칙**이다 (카운트와 커서 문이 같은 값을 본다)', async () => {
+  /* 규칙이 두 벌이 되면 "카운트에서는 작성자인데 커서 문에서는 남"이 생긴다. */
+  const list = [who('me@x.io', '', ['me.host']), who('b@x.io', '', ['b.host'])];
+  const mineOne = mineMsg(41, '내 말');
+  const fromBob = Object.assign(msg(42, '밥이 한 말'), { sender: 'b.host' });
+  assert.equal(readsMod.isMine('me@x.io', list, mineOne), true);
+  assert.equal(readsMod.isMine('me@x.io', list, fromBob), false);
+  /* ⭐ 카운트 쪽도 **같은 판정**을 한다 — 작성자는 분모에서 빠진다. 각 메시지의
+     분모가 서로 반대쪽 한 명이 되는 것이 그 증거다. */
+  assert.equal(readsMod.countUnread(list, mineOne), 1);   /* 밥만 센다 */
+  assert.equal(readsMod.countUnread(list, fromBob), 1);   /* 나만 센다 */
+  /* 둘 다 남이면(참가자 파일 없는 제3자) 둘 다 센다 — 판정이 `senders` 짝짓기
+     하나라는 뜻이고, `isMine` 도 같은 이유로 `false` 다. */
+  const stranger = msg(43, '모르는 사람');                 /* sender: 'a.host' */
+  assert.equal(readsMod.countUnread(list, stranger), 2);
+  assert.equal(readsMod.isMine('me@x.io', list, stranger), false);
+  /* 모르면 `false` — 참가자 지도를 아직 못 받은 순간에 남의 말을 내 것으로
+     보면 읽음이 영원히 안 나간다 (조용히 '다 읽음'). */
+  assert.equal(readsMod.isMine('me@x.io', [], mineOne), false);
+  assert.equal(readsMod.isMine('', list, mineOne), false);
+  assert.equal(readsMod.isMine('me@x.io', list, null), false);
 });
 
 await test('⭐ 임시 ID 가 창에 있어도 단조 증가가 굳지 않는다 (실제 ID 로 되돌아온다)', async () => {

@@ -412,21 +412,147 @@ def test_커서는_뒤로_가지_않는다(manager, fake_opener):
     assert manager.mark_read(room.id, "").cursor == recs[2].id
 
 
-# ---------------------------------- R-4. 내가 보낸 말 = 내가 읽은 말
+# --------------------- R-4. 내가 보낸 말은 **커서를 건드리지 않는다**
 
 
-def test_보내면_내_커서가_그_자리까지_간다(manager, fake_opener):
+def test_보내도_내_커서가_움직이지_않는다(manager, fake_opener):
+    """⭐ 보내기 경로에는 커서 발행 트리거가 없다 (전송당 push 1회의 근거).
+
+    예전에는 내 커서를 내 메시지까지 올렸다. 그 전진은 아무것도 사지 못했고
+    (카운트 공식이 작성자를 빼고, 아카이브 합의는 커서를 안 본다) 전송마다
+    참가자 상태 파일을 다시 써 **커밋·push 를 하나 더** 만들었다.
+    """
     room = manager.register(REPO)
+    channel = _channel(fake_opener)
     manager.timeline(room.id)
+    writes = channel.state_writes
     message = manager.send(room.id, "내 말")
 
     view = manager.read_view(room.id)
-    assert view.cursor == message.id
+    assert view.cursor == "", "보내기가 내 커서를 밀었다"
     mine = [p for p in view.participants if p.key == view.me][0]
-    assert mine.cursor == message.id
-    # 봉투 sender 가 내 커서 파일에 적혀 있다 — 카운트 공식이 작성자를 가려낼
-    # 유일한 근거다 (봉투에는 사람 키가 없다).
-    assert _channel(fake_opener).sender in mine.senders
+    assert mine.cursor == "", "보내기가 커서를 발행했다"
+    # ⭐ 그래도 **파일을 다시 쓰지 않았다** = 커밋·push 가 하나 늘지 않았다.
+    assert channel.state_writes == writes, "보내기가 참가자 상태 파일을 다시 썼다"
+    # 봉투 sender 는 여전히 내 커서 파일에 적혀 있다 — 카운트 공식이 작성자를
+    # 가려낼 유일한 근거다 (봉투에는 사람 키가 없다). 방을 열 때 적힌다.
+    assert channel.sender in mine.senders
+    assert message.id > view.cursor
+
+
+def test_내_말은_내_뱃지를_늘리지_않는다(manager, fake_opener):
+    """⭐ ①의 본체 — 뱃지는 **내 커서를 읽지 않고** 내 레코드를 뺀다.
+
+    남이 보낸 것은 그대로 센다 (그 구분이 뱃지의 뜻이다).
+    """
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    tracker = manager.reads(room.id)
+
+    manager.send(room.id, "내 말 1")
+    manager.send(room.id, "내 말 2")
+    assert manager.read_view(room.id).unread == 0, "내 말이 내 뱃지를 늘렸다"
+    assert tracker.local() == "", "뱃지가 커서 전진에 기대고 있다"
+
+    # 남이 보내면 오른다.
+    other = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "야"})
+    view = manager.read_view(room.id)
+    assert view.unread == 1
+    assert view.first_unread == other.id, "첫 안 읽음이 내 말을 가리켰다"
+
+    # 내가 그 뒤에 또 보내도 1 그대로다 (내 것은 안 세고, 남의 것은 남는다).
+    manager.send(room.id, "내 말 3")
+    assert manager.read_view(room.id).unread == 1
+
+    # 실제로 읽으면 0 이 된다.
+    manager.mark_read(room.id, other.id)
+    assert manager.read_view(room.id).unread == 0
+
+
+def test_내_다른_기기가_보낸_말도_내_말이다(manager, fake_opener):
+    """⭐ 판정 근거가 `senders` **목록**인 이유 — 사람 하나가 설치본 여럿이다.
+
+    노트북·데스크탑이 같은 참가자 파일을 공유하므로, 목록에 적힌 설치본이 쓴
+    레코드는 전부 내 말이다. 설치본 하나로 판정하면 다른 기기에서 보낸 내 말이
+    내 뱃지에 안 읽음으로 남는다.
+    """
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    tracker = manager.reads(room.id)
+
+    # 같은 사람의 두 번째 기기를 내 파일에 적는다 (그 기기가 발행한 것처럼).
+    channel.inject_state(
+        tracker.person,
+        reads_mod.build_value("", [channel.sender, "my.laptop.aa11bb"]),
+    )
+    channel.inject({"kind": "msg", "v": 1, "author": "나", "text": "노트북에서"},
+                   sender="my.laptop.aa11bb")
+    assert manager.read_view(room.id).unread == 0
+
+    # 남의 설치본은 그대로 세어진다.
+    channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "밥"},
+                   sender="bob.host.cc22dd")
+    assert manager.read_view(room.id).unread == 1
+
+
+def test_뱃지_경로가_오염_커서_경고를_새로_만들지_않는다(manager, fake_opener, caplog):
+    """⭐ 오염 경고를 줄이려는 변경이 **새 경고 원천**이 되면 안 된다.
+
+    뱃지는 방 목록이 다시 그려질 때마다 도는 자리다. 작성자 판정을 위해 내 참가자
+    파일을 읽게 됐으므로, 거기서 커서 위생을 함께 돌리면 내 파일이 한 번 오염된
+    동안 같은 경고가 로그를 채운다. 그래서 그 경로는 **설치본 목록만** 읽는다
+    (`reads.state_senders`).
+    """
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    tracker = manager.reads(room.id)
+    # 옛 버전이 올려 둔 내 오염 커서 (원격에 남아 있는 상태).
+    channel.inject_state(
+        tracker.person,
+        reads_mod.build_value("", [channel.sender]) | {"cursor": "~pending/000004"},
+    )
+    channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "야"},
+                   sender="bob.host")
+
+    with caplog.at_level("WARNING", logger="gitwire_chat.reads"):
+        for _ in range(5):
+            assert tracker.unread()[0] == 1        # 남의 말 하나 (내 것은 안 센다)
+    dirty = [r for r in caplog.records if "~pending/" in r.getMessage()]
+    assert dirty == [], f"뱃지 경로가 오염 경고를 남겼다 ({len(dirty)}줄)"
+
+    # 그래도 **참가자 목록**을 그릴 때는 여전히 경고한다 — 그 값은 사람이 알아야
+    # 하고, 그쪽은 커서를 실제로 쓰는 자리다 (안전측으로 '커서 없음'으로 떨군다).
+    with caplog.at_level("WARNING", logger="gitwire_chat.reads"):
+        caplog.clear()
+        view = manager.read_view(room.id)
+    assert [p.cursor for p in view.participants if p.key == view.me] == [""]
+    assert any("~pending/" in r.getMessage() for r in caplog.records)
+
+
+def test_레코드_ID_에서_발신자를_꺼낸다(manager, fake_opener):
+    """⭐ 작성자 판정이 **왕복을 하나도 늘리지 않는** 근거 (봉투를 안 연다)."""
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    record = channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "야"},
+                            sender="bob.host")
+    assert reads_mod.record_sender(record.id) == "bob.host"
+    # 슬러그 규칙의 주인은 기반이다 — 양쪽을 같은 규칙으로 통과시킨다.
+    dashed = channel.inject({"kind": "msg", "v": 1, "author": "남", "text": "어"},
+                            sender="a-b@example.com")
+    assert reads_mod.record_sender(dashed.id) == gitwire.records.slug_sender(
+        "a-b@example.com"
+    )
+    assert reads_mod._slug_all(["a-b@example.com"]) == {
+        reads_mod.record_sender(dashed.id)
+    }
+    # ID 가 아닌 값은 발신자가 없다 (임시 ID 가 여기로 새지 않는다).
+    assert reads_mod.record_sender("~pending/000004") == ""
+    assert reads_mod.record_sender("") == ""
+    assert reads_mod.record_sender(None) == ""
+    assert room.id
 
 
 # -------------------------------------------- R-5. 유령 참가자

@@ -6,9 +6,10 @@
 넷이고, 여기서 전부 못 박는다:
 
 1. `send()` 는 **봉투 없는 티켓**을 준다 — HTTP 응답은 202 "받아 뒀다"다.
-2. 읽음 커서는 **push 된 뒤**에 그 ID 까지 오른다 (그 전에는 올릴 값이 없다).
-   그리고 그 뒤에도 *내 뱃지가 내 말로 늘지 않는다* · *남의 화면에서 내가 안 읽은
-   사람으로 세어지지 않는다* 가 그대로 성립한다.
+2. 읽음 커서는 **보내기로는 오르지 않는다** (발행 트리거가 없다 — 전송당
+   커밋·push 가 하나다). 그런데도 *내 뱃지가 내 말로 늘지 않는다* · *남의
+   화면에서 내가 안 읽은 사람으로 세어지지 않는다* 가 그대로 성립한다 —
+   근거가 커서에서 **작성자 판정**으로 옮겨졌기 때문이다.
 3. 못 나간 말은 **"보냈다"로 표시된 적이 없다** — SSE 로 흐르지도, 타임라인에
    보이지도 않고, `stuck` 으로 드러난다. (*보내는 중* 에서 사라지는 것은 괜찮고,
    *보냈다* 에서 사라지는 것은 안 된다.)
@@ -75,11 +76,17 @@ def test_전송_응답은_받아_뒀다까지만_말한다(manager, fake_opener)
     assert res.get_json() == {"queued": True}
 
 
-# ------------------------------------------------- 2. 커서는 push 뒤에 오른다
+# --------------------------- 2. 커서는 **보내기로는 아예 오르지 않는다**
 
 
-def test_커서는_push_된_뒤에_그_ID_까지_오른다(manager, fake_opener):
-    """⭐ 못 나간 동안에는 커서가 움직이지 않고, 나가면 그 ID 로 오른다."""
+def test_보내기는_커서를_올리지_않고_뱃지도_늘리지_않는다(manager, fake_opener):
+    """⭐ 못 나간 동안에도, 나간 뒤에도 커서는 그대로다 — 그런데 뱃지는 0 이다.
+
+    예전에는 push 가 끝난 뒤 그 ID 까지 커서를 올렸다(`_after_push`). 그 전진은
+    카운트 공식에도(작성자는 분모에서 빠진다) 아카이브 합의에도(`archived` 만
+    본다)영향이 없었고, 값은 **전송당 커밋·push 하나**로 치렀다. 뱃지가 내
+    레코드를 세지 않게 된 지금은 올릴 이유가 남지 않는다.
+    """
     room = manager.register(REPO)
     channel = _channel(fake_opener)
     manager.timeline(room.id)                          # 커서 파일 하나가 생긴다
@@ -93,23 +100,30 @@ def test_커서는_push_된_뒤에_그_ID_까지_오른다(manager, fake_opener)
     assert "~" not in view.cursor
 
     channel.flush_error = None                         # 네트워크가 돌아왔다
+    writes = channel.state_writes
     manager.flush_outbox(room.id)
     assert manager.outbox(room.id).wait_idle(10.0)
 
     landed = channel.records[-1]
+    assert gitwire.is_record_id(landed.id)
     view = manager.read_view(room.id)
-    assert view.cursor == landed.id                    # 내가 보낸 말 = 내가 읽은 말
-    assert gitwire.is_record_id(view.cursor)
+    assert view.cursor == "", "나간 뒤 보내기 경로가 커서를 밀었다"
     mine = [p for p in view.participants if p.key == view.me][0]
-    assert mine.cursor == landed.id                    # 남이 보는 값도 같다
+    assert mine.cursor == "", "보내기가 커서를 발행했다"
+    # ⭐ 두 번째 push 가 생기지 않는다 — 참가자 상태 파일을 아예 안 만졌다.
+    assert channel.state_writes == writes, "보내기가 참가자 상태 파일을 다시 썼다"
+    # 그런데도 내 말은 내 뱃지에 뜨지 않는다 (판정은 커서가 아니라 작성자다).
     assert view.unread == 0, "내 말이 내 뱃지를 늘렸다"
+    assert view.first_unread is None
 
 
 def test_남의_화면에서_내가_안_읽은_사람으로_세어지지_않는다(manager, fake_opener):
-    """카운트 공식의 `p ≠ A` — 내 커서가 내 말까지 가 있어야 성립한다.
+    """카운트 공식의 `p ≠ A` — **작성자 판정**이 그것을 성립시킨다 (커서가 아니다).
 
-    남의 화면이 세는 값은 **발행된 커서 집합**이므로, 그 집합을 그대로 재현해
-    "나는 이 메시지를 안 읽은 사람으로 세어지지 않는다"를 확인한다.
+    남의 화면이 세는 값은 발행된 커서 집합 + 각자의 `senders` 목록이다
+    (`static/js/reads.js` 의 `countUnread`). 그 계산을 그대로 재현해 "나는 내
+    메시지를 안 읽은 사람으로 세어지지 않는다"를 확인한다 — 내 발행 커서가
+    **빈 문자열인 채로도** 성립하는 것이 이 변경의 요점이다.
     """
     room = manager.register(REPO)
     channel = _channel(fake_opener)
@@ -125,14 +139,21 @@ def test_남의_화면에서_내가_안_읽은_사람으로_세어지지_않는�
     }
     me = manager.person
     assert published[me] is not None
-    assert published[me].cursor == landed.id, "내 발행 커서가 내 말보다 뒤에 있다"
-    # 남의 화면이 세는 것과 같은 계산 — 나는 분자에서 빠진다.
+    assert published[me].cursor == "", "보내기가 커서를 발행했다"
+    # ⭐ 남의 화면이 세는 것과 **같은 계산**: 작성자(`p ≠ A`)를 먼저 빼고,
+    #    그 다음에 커서를 본다. 짝짓기 근거는 봉투의 sender ∈ 그 사람의 senders.
     unread_by = {
-        key: bool(state and state.cursor < landed.id)
+        key: bool(
+            state
+            and landed.sender not in state.senders        # ① 작성자는 안 센다
+            and (not state.cursor or state.cursor < landed.id)   # ② 커서
+        )
         for key, state in published.items()
     }
-    assert unread_by[me] is False
+    assert unread_by[me] is False, "내 커서가 안 올랐다고 내가 세어졌다"
     assert unread_by["bob@example.com"] is True        # 밥은 아직 안 읽었다
+    # ①이 판정의 전부라는 것 — 내 파일에 내 설치본이 적혀 있기 때문이다.
+    assert landed.sender in published[me].senders
 
 
 # ------------------------------- 3. 못 나간 말은 "보냈다"로 표시된 적이 없다

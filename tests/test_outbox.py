@@ -228,6 +228,7 @@ def test_max_batch_를_넘긴_대기분도_남지_않는다(manager, fake_opener
     channel = manager.channel(room.id)
     channel.max_batch = 2                      # 한 커밋에 2건까지
     box = manager.outbox(room.id)
+    sub = manager.bus.subscribe(room.id, "tab1")
 
     for i in range(5):
         RoomManager.send(manager, room.id, f"{i}번")
@@ -238,8 +239,16 @@ def test_max_batch_를_넘긴_대기분도_남지_않는다(manager, fake_opener
         "0번", "1번", "2번", "3번", "4번",
     ]
     assert manager.outbox_state(room.id).state == SYNCED
-    # 나간 뒤 처리(읽음 커서)도 **전량**에 대해 돌았다 — 마지막 건까지 올라간다.
-    assert manager.read_view(room.id).cursor == channel.records[-1].id
+    # ⭐ 나간 뒤 처리(`_after_push`)도 **전량**에 대해 돌았다. 그 증거는 로컬
+    # 에코다 — 회차마다 불리는 것이 그것이라, 마지막 회차가 빠지면 뒤 두 건이
+    # 화면에 뜨지 않는다. (예전에는 읽음 커서가 마지막 ID 까지 올라간 것으로
+    # 이것을 봤는데, 이제 보내기 경로는 커서를 올리지 않는다.)
+    echoed = []
+    while not sub.queue.empty():
+        event = sub.queue.get_nowait()
+        if event.name == "message":
+            echoed.append(event.data["text"])
+    assert echoed == ["0번", "1번", "2번", "3번", "4번"], echoed
 
 
 def test_밀어내기_실패는_이벤트로_드러나고_로컬에는_남는다(manager, fake_opener):
