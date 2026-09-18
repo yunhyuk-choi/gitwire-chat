@@ -322,6 +322,82 @@ def test_레포_생성_성공은_주소를_돌려준다(client, monkeypatch):
     assert res.get_json()["repo"]["clone_url"] == "https://github.com/me/our-room.git"
 
 
+# ---------------------------------------- G-3. 자격증명 탐색 · 발급 거들기
+
+"""⭐ 자격증명은 **선택**이고, 그 상태를 화면이 알아야 한다.
+
+기반(gitwire)은 자격증명을 기동 시 한 번 읽어 들고 쓴다. 못 찾으면 git 이
+대화형으로 묻는데 이 앱은 창 없이 돌아 물어볼 곳이 없다 — 조용히 멈춘다.
+그래서 서버가 "어디 있나"를 답한다.
+
+⚠️ 이 묶음이 가장 중요하게 보는 것: **응답에 값이 없다.**
+"""
+
+SECRET_TOKEN = "ghp_ThisIsASecretTokenValue1234567890"
+
+
+def _no_git(monkeypatch, reply=None):
+    """git 을 부르지 않게 한다 (기본: helper 가 아무것도 못 준 상태)."""
+    from gitwire_chat import tokens
+
+    empty = (1, "", "fatal: could not read Username: terminal prompts disabled")
+    calls = []
+
+    def runner(args, stdin=""):
+        calls.append((list(args), stdin))
+        return reply or empty
+
+    monkeypatch.setattr(tokens, "_run_git", runner)
+    return calls
+
+
+def test_토큰_상태는_출처만_말한다(client, monkeypatch):
+    monkeypatch.setenv("GITWIRE_TOKEN", SECRET_TOKEN)
+    _no_git(monkeypatch)
+    body = client.get("/api/token").get_json()
+    assert body["found"] is True and body["source"] == "env"
+    assert "환경변수 GITWIRE_TOKEN" in body["label"]
+    # ⚠️ 값은 응답 어디에도 없다.
+    assert SECRET_TOKEN not in json.dumps(body, ensure_ascii=False)
+
+
+def test_토큰이_없으면_왜_못_찾았는지까지_말한다(client, monkeypatch):
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    _no_git(monkeypatch)
+    body = client.get("/api/token").get_json()
+    assert body["found"] is False and body["source"] == "none"
+    # 조용한 실패 금지 — git 이 준 사유가 남는다
+    assert "terminal prompts disabled" in body["detail"]
+
+
+def test_토큰_상태는_한_번만_git_을_부른다(client, monkeypatch):
+    """`git credential fill` 은 실측 435ms — 요청마다 부르면 화면이 느려진다."""
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    calls = _no_git(monkeypatch)
+    for _ in range(3):
+        client.get("/api/token")
+    assert len(calls) == 1, calls
+    # 화면이 명시로 다시 물으면 그때는 본다 (만료·취소된 토큰을 바꾼 뒤)
+    client.get("/api/token?fresh=1")
+    assert len(calls) == 2, calls
+
+
+def test_토큰이_없어도_방_등록과_전송은_그대로_된다(client, manager, monkeypatch):
+    """⭐ 토큰은 **선택이다.** 발급을 건너뛴 사람의 앱이 멈추지 않는다."""
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    _no_git(monkeypatch)
+    assert client.get("/api/token").get_json()["found"] is False
+
+    res = client.post("/api/rooms", json={"repo_url": REPO, "name": "토큰 없는 방"})
+    assert res.status_code == 201
+    room_id = res.get_json()["room"]["id"]
+    sent = client.post(f"/api/rooms/{room_id}/messages", json={"text": "토큰 없이"})
+    assert sent.status_code == 202
+    manager.outbox(room_id).wait_idle(5.0)
+    got = client.get(f"/api/rooms/{room_id}/messages").get_json()["messages"]
+    assert [m["text"] for m in got] == ["토큰 없이"]
+
+
 # ------------------------------------------------------- H. '내 것' 판정
 
 """⭐ `mine` — 봉투(`sender`)와 이 설치본의 식별자를 비교한 결과다.

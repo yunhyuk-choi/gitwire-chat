@@ -17,6 +17,9 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     DEL  /api/rooms/<id>                   방 목록에서 제거
     POST /api/repos/plan                   레포 만들기 계획(무엇이 만들어지는지)
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
+    GET  /api/token                        ⭐ 자격증명이 **어디** 있나 (env /
+                                           OS 저장소 / 주소에 박힘 / 없음).
+                                           ⚠️ **값은 절대 싣지 않는다** — 출처만
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기 — 202 `{"queued": true}`.
@@ -55,7 +58,7 @@ from flask import (
     send_from_directory,
 )
 
-from . import assets, csrf, events, forges, updaterun
+from . import assets, csrf, events, forges, tokens, updaterun
 from .config import Settings, load_settings
 from .reads import InvalidCursor
 from .rooms import RoomError, RoomManager, RoomNotReady
@@ -561,6 +564,45 @@ def create_app(
         except forges.ForgeError as exc:
             return jsonify({"error": str(exc), "code": exc.code, "hint": exc.hint}), 400
         return jsonify({"repo": created}), 201
+
+    # -------------------------------- 자격증명 탐색·발급 거들기 (G-3)
+    #
+    # 기반(gitwire)은 자격증명을 **기동 시 한 번** 읽어 들고 쓴다. 못 찾는
+    # 사용자가 실제로 있다(한 번도 push 해 본 적 없음 · 자격증명 관리자가 없는
+    # 환경 · 저장된 것이 만료·취소됨). 그때 git 은 **대화형으로 묻는데** 이 앱은
+    # 창 없이 돌아 물어볼 곳이 없다 → 조용히 멈춘다. 그래서 "있나 · 어디 있나"를
+    # 앱이 먼저 알고 화면에 말한다. 규율·순서는 `tokens.py` 도크.
+
+    #: 탐색 결과 캐시. `git credential fill` 은 실측 435ms 라 요청마다 부르면
+    #: 화면이 느려진다. 자격증명은 "기동 시 한 번 읽는 값"이라는 기반의 성질을
+    #: 그대로 따른다 — 사실이 바뀌는 자리(저장 직후 · 화면이 명시로 다시
+    #: 물을 때)에서만 버린다.
+    token_seen: dict[str, tokens.Discovery] = {}
+
+    def _discover(env_name: str, repo_url: str, host: str, *, fresh: bool):
+        key = "|".join([
+            (env_name or "").strip(), (host or "").strip(), (repo_url or "").strip()
+        ])
+        if fresh:
+            token_seen.pop(key, None)
+        got = token_seen.get(key)
+        if got is None:
+            got = tokens.discover(env_name=env_name, repo_url=repo_url, host=host)
+            token_seen[key] = got
+        return got
+
+    @app.get("/api/token")
+    def token_state():
+        """자격증명이 **어디** 있나. 상태를 바꾸지 않는다."""
+        args = request.args
+        found = _discover(
+            str(args.get("env") or ""),
+            str(args.get("repo_url") or ""),
+            str(args.get("host") or ""),
+            fresh=str(args.get("fresh") or "") in ("1", "true", "yes"),
+        )
+        # ⚠️ 여기 실리는 것에 **값이 없다** — `Discovery` 가 값을 들고 있지 않다.
+        return jsonify(found.to_json())
 
     # ------------------------------------------------------------ SSE
 
