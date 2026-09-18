@@ -279,6 +279,9 @@ export const ELEMENT_IDS = [
   'new-repo-toggle', 'new-repo-form', 'new-repo-owner', 'new-repo-name',
   'new-repo-check', 'new-repo-plan', 'new-repo-link', 'new-repo-create',
   'new-repo-use', 'new-repo-error',
+  /* 자격증명 — 탐색 결과 표시 + 발급 거들기 (`js/token.js`) */
+  'token-check', 'token-found', 'token-form', 'token-why', 'token-link',
+  'token-paste', 'token-save', 'token-save-note', 'token-error',
   'outbox', 'outbox-text', 'outbox-retry',
   'sticky-head', 'sticky-author', 'sticky-ts',
   'toggle-theme', 'theme-bar', 'theme-select', 'theme-note',

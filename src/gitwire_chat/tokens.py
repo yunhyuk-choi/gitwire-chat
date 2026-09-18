@@ -1,4 +1,4 @@
-"""자격증명 **탐색** — 값은 이 모듈 밖으로 나가지 않는다.
+"""자격증명 **탐색**과 **발급 거들기** — 값은 이 모듈 밖으로 나가지 않는다.
 
 왜 이 파일이 생겼나
 ------------------
@@ -19,7 +19,7 @@ git 이 대화형으로 물어보는데, 이 앱은 ``pythonw`` 로 **창 없이
 3. **레포 주소에 박힌 것** (``https://사용자:토큰@호스트/…``). 권하지 않는
    형태지만(``.git/config`` 에 평문으로 남는다 — `gitwire.credentials` 도크)
    실제로 그렇게 쓰는 사람이 있고, 그 사람에게 "없다"고 말하면 거짓말이다.
-4. 없음 → 호출자가 사용자에게 그 사실을 말한다 (조용히 멈추지 않는다).
+4. 없음 → 화면이 **발급 거들기**를 내민다 (`issue_link`).
 
 ⚠️ 값을 절대 싣지 않는다 — 이 모듈의 반환값에 토큰이 없다
 ---------------------------------------------------------
@@ -30,6 +30,9 @@ git 이 대화형으로 물어보는데, 이 앱은 ``pythonw`` 로 **창 없이
 아니지만, GitHub HTTPS 에는 **토큰을 username 자리에 넣는 형태**가 실제로 있어서
 (``username=<PAT>`` / ``password=x-oauth-basic``) 그 필드를 화면에 실으면 어떤
 사용자에게는 그것이 곧 토큰 유출이 된다. 출처만 말하면 그 위험이 존재하지 않는다.
+
+토큰을 **인자로 넘기지 않는다** — ``git credential`` 은 규약상 값을 **stdin** 으로
+받는다. 그래서 프로세스 명령줄(``ps``·작업 관리자)에도 남지 않는다.
 """
 
 from __future__ import annotations
@@ -58,6 +61,26 @@ ENV = "env"            # 환경변수
 HELPER = "helper"      # OS 자격증명 저장소 (git credential helper)
 URL = "url"            # 레포 주소에 박힘
 NONE = "none"          # 없음
+
+#: 사용자에게 필요한 GitHub 토큰 권한.
+#:
+#: 이 앱이 토큰으로 하는 일은 **두 가지뿐**이다:
+#:   · 채널 레포 clone·push (비공개 레포) → classic ``repo``
+#:   · 레포 생성 (`forges.create_github_repo` — ``POST /user/repos``,
+#:     ``POST /orgs/{조직}/repos``, 둘 다 private) → classic ``repo``
+#:   · 토큰 주인 조회 (`forges.github_login` — ``GET /user``) → 스코프 불필요
+#: 그래서 ``repo`` 하나다. ``workflow``·``admin:org``·``delete_repo`` 는 이 앱이
+#: 부르는 API 가 없으므로 요구하지 않는다 — **과한 권한을 받아 두는 것 자체가
+#: 사고 표면이다.**
+#:
+#: 같은 판단이 이미 `forges._http_error` 의 403 힌트에 적혀 있다 (단일 원천이
+#: 두 곳에 갈리지 않게 문구를 그쪽과 맞춰 둔다).
+GITHUB_SCOPES = ("repo",)
+
+#: 발급 페이지에 채워 넣을 설명. 사용자가 나중에 토큰 목록에서 **무엇에 쓰는
+#: 토큰인지** 알아볼 수 있어야 한다.
+GITHUB_NOTE = "gitwire-chat"
+
 
 # --------------------------------------------------------------- 탐색 결과
 
@@ -229,3 +252,85 @@ def discover(
 
     # 4. 없음. 왜 거기서 멈췄는지는 남긴다 (조용한 실패 금지).
     return Discovery(NONE, env_name=var, host=where, detail=detail)
+
+
+# ------------------------------------------------------------ 발급 거들기
+
+
+def issue_link(
+    kind: str = "github", *, scopes=GITHUB_SCOPES, note: str = GITHUB_NOTE
+) -> str:
+    """**필요한 것이 미리 채워진** 토큰 발급 페이지 링크. 없으면 빈 문자열.
+
+    새 레포 만들기와 **같은 패턴**이다 (`forges.new_repo_link`) — 사용자가
+    설정을 손으로 고르지 않고 「생성」만 누르면 되게 한다.
+
+    근거: GitHub 문서 "Managing your personal access tokens" 가
+    ``/settings/tokens/new`` 의 쿼리 파라미터로 ``description``(메모)·
+    ``scopes``(쉼표 구분)·``default_expires_at`` 을 문서화한다.
+
+    ⚠️ ``default_expires_at`` 은 **주지 않는다.** 만료를 우리가 정하는 것은
+    사용자의 보안 결정을 대신하는 일이고, "만료 없음"을 미리 채워 두는 것은 그
+    중에서도 나쁜 쪽이다. GitHub 기본값이 그대로 보이고 사용자가 고른다.
+
+    GitLab 등은 링크를 만들지 않는다 — 프리필 규약을 확인하지 못했고, 확인하지
+    못한 것을 짐작해서 넣으면 사용자가 엉뚱한 화면에 도착한다 (`forges` 의
+    gitlab 처리와 같은 태도).
+    """
+    if kind != "github":
+        return ""
+    params = {"description": note, "scopes": ",".join(scopes)}
+    return "https://github.com/settings/tokens/new?" + urllib.parse.urlencode(params)
+
+
+class SaveError(Exception):
+    """저장 실패. 메시지는 **그대로 화면에 보여줘도 되는** 내용이다."""
+
+    def __init__(self, message: str, *, code: str = "error", hint: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
+
+
+def save(
+    token: str,
+    *,
+    host: str = "github.com",
+    username: str = "gitwire",
+    runner: Callable[[list[str], str], tuple[int, str, str]] | None = None,
+) -> str:
+    """토큰을 **OS 자격증명 저장소에 저장한다** (``git credential approve``).
+
+    ⚠️ 이것은 사용자의 자격증명 저장소를 **바꾸는** 동작이다. 조용히 하지
+    않는다 — 호출자가 "저장합니다"를 화면에 먼저 알리고 사용자가 누른 뒤에만
+    부른다 (레포 생성과 같은 규율 — `forges.create_github_repo` 도크).
+
+    값은 **stdin** 으로만 간다 (인자·환경변수·로그 어디에도 없다).
+    반환값은 저장에 쓴 ``username`` — 화면에 "어느 이름으로 저장했다"를
+    말하기 위한 것이고, 비밀이 아니다.
+    """
+    value = (token or "").strip()
+    if not value:
+        raise SaveError("토큰이 비어 있다", code="empty")
+    if "\n" in value or "\r" in value or "\0" in value:
+        # git credential 규약은 한 줄 = 한 항목이다. 줄바꿈이 섞이면 우리가
+        # 만들려던 항목이 아닌 것이 저장된다 — 붙여넣기 사고를 여기서 막는다.
+        raise SaveError(
+            "토큰에 줄바꿈이 섞여 있다 (붙여넣기를 확인하라)", code="format"
+        )
+    who = (username or "").strip() or "gitwire"
+    where = (host or "").strip().lower() or "github.com"
+    run = runner or _run_git
+    rc, _out, err = run(
+        ["credential", "approve"],
+        f"protocol=https\nhost={where}\nusername={who}\npassword={value}\n\n",
+    )
+    if rc != 0:
+        raise SaveError(
+            "OS 자격증명 저장소에 저장하지 못했다 — " + (_one_line(err) or "사유 불명"),
+            code="store",
+            hint="git 자격증명 헬퍼가 설정돼 있어야 한다 "
+                 "(git config --global credential.helper manager 등). "
+                 f"설정할 수 없는 환경이면 환경변수 {DEFAULT_ENV} 로도 된다.",
+        )
+    return who

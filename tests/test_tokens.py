@@ -6,7 +6,8 @@
 * ⚠️ **값이 밖으로 나가지 않는다** — `Discovery` 에 값을 담을 필드가 아예
   없고, 토큰은 git 의 **stdin** 으로만 간다 (인자·환경변수에 없다 = ``ps`` 에
   안 보인다).
-* 탐색은 **실제 git** 왕복으로도 확인한다 — 단, 사용자의 진짜 자격증명 저장소를
+* 발급 링크는 **문서화된 파라미터**로 **필요한 스코프만** 요구한다.
+* 저장은 **실제 git** 왕복으로 확인한다 — 단, 사용자의 진짜 자격증명 저장소를
   건드리지 않는다 (격리된 ``GIT_CONFIG_GLOBAL`` + ``store --file=<tmp>``).
 """
 
@@ -163,6 +164,70 @@ def test_helper_가_username_에_토큰을_담는_형태도_새지_않는다(mon
     assert SECRET not in str(got.to_json()) and SECRET not in repr(got)
 
 
+def test_저장은_값을_인자로_넘기지_않는다_stdin_뿐이다():
+    """``ps``·작업 관리자에 토큰이 보이지 않아야 한다."""
+    run = Runner([(0, "", "")])
+    tokens.save(SECRET, host="github.com", username="me", runner=run)
+    args, stdin = run.calls[0]
+    assert args == ["credential", "approve"]
+    assert SECRET not in " ".join(args)          # ⭐ 인자에 없다
+    assert f"password={SECRET}" in stdin         # stdin 으로만 간다
+    assert "username=me" in stdin and "host=github.com" in stdin
+
+
+def test_저장_실패_사유에도_값이_없다():
+    run = Runner([(1, "", "fatal: credential helper 'nope' not found")])
+    with pytest.raises(tokens.SaveError) as caught:
+        tokens.save(SECRET, runner=run)
+    assert SECRET not in str(caught.value) and SECRET not in caught.value.hint
+    assert caught.value.code == "store"
+    assert "helper" in caught.value.hint or "credential.helper" in caught.value.hint
+
+
+# ------------------------------------------------------------ 발급 링크
+
+
+def test_발급_링크는_문서화된_파라미터로_필요한_스코프만_요구한다():
+    link = tokens.issue_link("github")
+    parts = urllib.parse.urlsplit(link)
+    query = urllib.parse.parse_qs(parts.query)
+    assert (parts.scheme, parts.netloc, parts.path) == (
+        "https", "github.com", "/settings/tokens/new"
+    )
+    assert query["scopes"] == ["repo"]
+    assert query["description"] == ["gitwire-chat"]
+    # ⭐ 과한 권한을 받아 두지 않는다 — 이 앱이 부르는 API 가 없는 스코프들.
+    for over in ("admin:org", "delete_repo", "workflow", "write:packages", "gist"):
+        assert over not in link
+    # 만료는 우리가 정하지 않는다 (사용자의 보안 결정이다)
+    assert "default_expires_at" not in link
+
+
+def test_모르는_호스트에는_발급_링크를_짐작하지_않는다():
+    assert tokens.issue_link("gitlab") == ""
+    assert tokens.issue_link("unknown") == ""
+
+
+# ------------------------------------------------------------ 입력 방어
+
+
+def test_빈_토큰은_저장하지_않는다():
+    run = Runner()
+    with pytest.raises(tokens.SaveError) as caught:
+        tokens.save("   ", runner=run)
+    assert caught.value.code == "empty"
+    assert run.calls == []                      # git 을 부르지도 않는다
+
+
+def test_줄바꿈이_섞인_붙여넣기는_거절한다():
+    """git credential 규약은 한 줄 = 한 항목이다 — 섞이면 엉뚱한 것이 저장된다."""
+    run = Runner()
+    with pytest.raises(tokens.SaveError) as caught:
+        tokens.save(f"{SECRET}\nhost=evil.invalid", runner=run)
+    assert caught.value.code == "format"
+    assert run.calls == []
+
+
 # ------------------------------------------------- ⭐ 실제 git 왕복 (격리)
 
 
@@ -184,6 +249,29 @@ def isolated_store(tmp_path, monkeypatch):
         check=True, capture_output=True,
     )
     return store
+
+
+def test_저장하면_다음_탐색에서_그것이_나온다(isolated_store, monkeypatch):
+    """⭐ 지상검증 — 붙여넣은 값이 저장되고, 다음 조회에서 **거기서** 나온다."""
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+
+    # 저장 전: 저장소가 비어 있으니 못 찾는다 (그리고 **멈추지 않는다**)
+    before = tokens.discover(host="example.invalid")
+    assert before.source == tokens.NONE, before
+
+    saved = tokens.save(SECRET, host="example.invalid", username="me")
+    assert saved == "me"
+    assert isolated_store.is_file()
+
+    # 저장 후: 2단계에서 나온다
+    after = tokens.discover(host="example.invalid")
+    assert after.source == tokens.HELPER, after
+    assert "OS 자격증명 저장소" in after.label
+    assert SECRET not in str(after.to_json())
+
+    # 저장된 파일에는 값이 있어야 한다 (그래야 저장이 진짜다). 그 파일은
+    # 사용자의 것이 아니라 이 테스트의 tmp 파일이다.
+    assert SECRET in isolated_store.read_text(encoding="utf-8")
 
 
 def test_탐색은_대화형으로_떨어지지_않는다(isolated_store, monkeypatch):

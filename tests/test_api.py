@@ -328,7 +328,7 @@ def test_레포_생성_성공은_주소를_돌려준다(client, monkeypatch):
 
 기반(gitwire)은 자격증명을 기동 시 한 번 읽어 들고 쓴다. 못 찾으면 git 이
 대화형으로 묻는데 이 앱은 창 없이 돌아 물어볼 곳이 없다 — 조용히 멈춘다.
-그래서 서버가 "어디 있나"를 답한다.
+그래서 서버가 "어디 있나"를 답하고, 없으면 발급 링크를 내민다.
 
 ⚠️ 이 묶음이 가장 중요하게 보는 것: **응답에 값이 없다.**
 """
@@ -361,12 +361,16 @@ def test_토큰_상태는_출처만_말한다(client, monkeypatch):
     assert SECRET_TOKEN not in json.dumps(body, ensure_ascii=False)
 
 
-def test_토큰이_없으면_왜_못_찾았는지까지_말한다(client, monkeypatch):
+def test_토큰이_없으면_발급_링크를_준다(client, monkeypatch):
     monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
     _no_git(monkeypatch)
     body = client.get("/api/token").get_json()
     assert body["found"] is False and body["source"] == "none"
-    # 조용한 실패 금지 — git 이 준 사유가 남는다
+    assert body["issue"]["scopes"] == ["repo"]       # 필요한 것만
+    assert body["issue"]["link"].startswith(
+        "https://github.com/settings/tokens/new?"
+    )
+    # 왜 못 찾았는지도 함께 (조용한 실패 금지)
     assert "terminal prompts disabled" in body["detail"]
 
 
@@ -380,6 +384,77 @@ def test_토큰_상태는_한_번만_git_을_부른다(client, monkeypatch):
     # 화면이 명시로 다시 물으면 그때는 본다 (만료·취소된 토큰을 바꾼 뒤)
     client.get("/api/token?fresh=1")
     assert len(calls) == 2, calls
+
+
+def test_토큰_저장은_우리_화면에서_온_요청만_받는다(client, monkeypatch):
+    """저장은 사용자의 자격증명 저장소를 **바꾼다** — 드라이브바이로 덮어쓸 수 없다."""
+    from gitwire_chat import csrf
+
+    _no_git(monkeypatch)
+    res = client.post("/api/token", json={"token": SECRET_TOKEN})
+    assert res.status_code == 403
+    assert res.get_json()["code"] == "forbidden"
+
+    # 우리 화면의 헤더가 붙으면 통과한다 (그 뒤는 아래 테스트가 본다)
+    monkeypatch.setattr(
+        "gitwire_chat.forges.github_login", lambda token: "yunhyuk-choi"
+    )
+    monkeypatch.setattr("gitwire_chat.tokens.save", lambda *a, **k: "yunhyuk-choi")
+    ok = client.post(
+        "/api/token", json={"token": SECRET_TOKEN},
+        headers={csrf.HEADER: csrf.HEADER_VALUE},
+    )
+    assert ok.status_code == 201, ok.get_json()
+
+
+def test_저장_응답에도_값이_없다(client, monkeypatch):
+    from gitwire_chat import csrf
+
+    _no_git(monkeypatch, reply=(0, "password=x\n", ""))
+    monkeypatch.setattr(
+        "gitwire_chat.forges.github_login", lambda token: "yunhyuk-choi"
+    )
+    seen = {}
+
+    def fake_save(token, *, host="", username="", runner=None):
+        seen["token"] = token          # 서버는 값을 받아 git 에 넘기기만 한다
+        seen["username"] = username
+        return username
+
+    monkeypatch.setattr("gitwire_chat.tokens.save", fake_save)
+    body = client.post(
+        "/api/token", json={"token": SECRET_TOKEN},
+        headers={csrf.HEADER: csrf.HEADER_VALUE},
+    ).get_json()
+    assert seen["token"] == SECRET_TOKEN
+    assert seen["username"] == "yunhyuk-choi"     # 토큰 주인으로 저장한다
+    assert body["saved"] is True and body["verified"] is True
+    assert SECRET_TOKEN not in json.dumps(body, ensure_ascii=False)
+
+
+def test_못_쓰는_토큰은_저장하지_않는다(client, monkeypatch):
+    """틀린 값을 저장하면 그 사람의 git 이 전부 인증에 실패한다 — 확인이 먼저다."""
+    from gitwire_chat import csrf, forges
+
+    _no_git(monkeypatch)
+
+    def boom(token):
+        raise forges.ForgeError("GitHub 인증에 실패했다 (401)", code="auth",
+                                hint="토큰이 만료됐거나 값이 잘못됐다.")
+
+    monkeypatch.setattr("gitwire_chat.forges.github_login", boom)
+    called = []
+    monkeypatch.setattr(
+        "gitwire_chat.tokens.save",
+        lambda *a, **k: called.append(1) or "x",
+    )
+    res = client.post(
+        "/api/token", json={"token": "ghp_wrong"},
+        headers={csrf.HEADER: csrf.HEADER_VALUE},
+    )
+    assert res.status_code == 400
+    assert res.get_json()["code"] == "auth"
+    assert called == [], "인증에 실패한 토큰을 저장했다"
 
 
 def test_토큰이_없어도_방_등록과_전송은_그대로_된다(client, manager, monkeypatch):

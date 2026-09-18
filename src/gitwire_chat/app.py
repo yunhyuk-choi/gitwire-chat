@@ -20,6 +20,9 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     GET  /api/token                        ⭐ 자격증명이 **어디** 있나 (env /
                                            OS 저장소 / 주소에 박힘 / 없음).
                                            ⚠️ **값은 절대 싣지 않는다** — 출처만
+    POST /api/token                        붙여넣은 토큰을 OS 자격증명 저장소에
+                                           저장 (`git credential approve`).
+                                           우리 화면에서 온 요청만 받는다 (`csrf.py`)
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기 — 202 `{"queued": true}`.
@@ -591,6 +594,17 @@ def create_app(
             token_seen[key] = got
         return got
 
+    def _token_payload(found: tokens.Discovery) -> dict:
+        """⚠️ 여기 실리는 것에 **값이 없다** — `Discovery` 가 값을 들고 있지 않다."""
+        return {
+            **found.to_json(),
+            "issue": {
+                "link": tokens.issue_link("github"),
+                "scopes": list(tokens.GITHUB_SCOPES),
+                "note": tokens.GITHUB_NOTE,
+            },
+        }
+
     @app.get("/api/token")
     def token_state():
         """자격증명이 **어디** 있나. 상태를 바꾸지 않는다."""
@@ -601,8 +615,61 @@ def create_app(
             str(args.get("host") or ""),
             fresh=str(args.get("fresh") or "") in ("1", "true", "yes"),
         )
-        # ⚠️ 여기 실리는 것에 **값이 없다** — `Discovery` 가 값을 들고 있지 않다.
-        return jsonify(found.to_json())
+        return jsonify(_token_payload(found))
+
+    @app.post("/api/token")
+    def token_save():
+        """⚠️ 붙여넣은 토큰을 **사용자의 OS 자격증명 저장소에 쓴다.**
+
+        그래서 둘을 먼저 한다:
+
+        1. **우리 화면에서 온 요청인가** (`csrf.py`). 이 문이 없으면 다른
+           오리진의 페이지가 폼 하나로 사용자의 github.com 자격증명을 쓰레기 값으로
+           덮어쓸 수 있다 — 그 뒤 그 사람의 git 은 전부 인증에 실패한다.
+           갱신 실행과 **같은 문**을 쓴다 (값이 하나로 고정된 shibboleth 이고,
+           동작마다 다른 값을 두면 그 목록이 곧 낡는다).
+        2. **정말 쓸 수 있는 토큰인가** (`forges.github_login` = ``GET /user``).
+           틀린 값을 저장하면 그 사람의 저장소에 **못 쓰는 자격증명**이 남아
+           다음 git 호출이 전부 실패한다 — 저장은 그 자체로 되돌리기 어려운
+           동작이므로 확인이 먼저다. 네트워크가 안 되는 경우는 확인 불가이지
+           틀린 값이 아니므로, 그 사실을 응답에 적고 저장은 진행한다.
+
+        ⚠️ 응답·로그에 토큰이 없다. 저장에 쓴 **이름**(username)만 돌려준다.
+        """
+        reason = csrf.deny_reason(request.headers, request.host)
+        if reason:
+            log.warning("토큰 저장 요청을 거절했다 — %s", reason)
+            return jsonify({"error": reason, "code": "forbidden", "hint": csrf.HINT}), 403
+
+        data = request.get_json(silent=True) or request.form or {}
+        token = str(data.get("token") or "")
+        host = str(data.get("host") or "github.com").strip().lower() or "github.com"
+        # 토큰 주인 조회. 실패 사유가 "인증"이면 저장하지 않는다.
+        owner, verified, detail = str(data.get("username") or "").strip(), False, ""
+        if host in forges.GITHUB_HOSTS:
+            try:
+                owner = forges.github_login(token) or owner
+                verified = True
+            except forges.ForgeError as exc:
+                if exc.code == "auth":
+                    return jsonify({
+                        "error": f"{exc}", "code": "auth", "hint": exc.hint,
+                    }), 400
+                detail = f"{exc} — 토큰 주인을 확인하지 못했다 (저장은 했다)"
+        try:
+            saved = tokens.save(token, host=host, username=owner)
+        except tokens.SaveError as exc:
+            return jsonify({"error": str(exc), "code": exc.code, "hint": exc.hint}), 400
+        # 저장으로 사실이 바뀌었다 — 캐시를 통째로 버린다 (키가 여러 벌이다).
+        token_seen.clear()
+        found = _discover("", "", host, fresh=True)
+        return jsonify({
+            **_token_payload(found),
+            "saved": True,
+            "username": saved,
+            "verified": verified,
+            "detail": detail,
+        }), 201
 
     # ------------------------------------------------------------ SSE
 
