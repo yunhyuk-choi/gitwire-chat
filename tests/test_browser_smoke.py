@@ -1039,11 +1039,16 @@ def served_with_room(tmp_path, bare_repo):
     #    `records/`(0x72) 보다 사전식 뒤라 `cursor(p) < M` 이 거짓이 되고, 그 사람이
     #    "다 읽은 사람"으로 세어져 카운트가 **0** 이 된다(= 숫자가 아예 안 뜬다).
     #    새 코드는 이 값을 커서 없음으로 떨궈 안 읽은 것으로 세므로 카운트 = 1 이다.
+    #    ⚠️ `flush=True` — 앱의 채널은 `autopublish=False` 라(`rooms._open_channel`)
+    #    기반이 스스로 밀지 않는다. 참가자 상태는 **커밋된 트리**에서 읽으므로
+    #    (`read_states`), 여기서 밀지 않으면 그 사람이 아예 보이지 않아 이 화면이
+    #    재현하려는 상태가 만들어지지 않는다.
     channel = manager.reads(room.id).channel
     channel.write_state(
         "bob@example.com",
         reads_mod.build_value("~pending/000001", ["bob.host"]),
         identity="bob@example.com",
+        flush=True,
     )
     manager.start()
     try:

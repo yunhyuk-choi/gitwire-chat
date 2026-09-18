@@ -718,11 +718,17 @@ def test_원격에_올라간_오염_커서를_만나도_카운트가_동작한�
 
     # (1) B 가 **구버전처럼** 오염된 커서를 발행한다 (기반 API 를 직접 쓴다 —
     #     새 코드의 쓰기 경로는 이제 이 값을 거부하므로 앱으로는 만들 수 없다).
+    #     ⚠️ `flush=True` 로 **그 자리에서** 올린다. 앱의 채널은
+    #     `autopublish=False` 라(`rooms._open_channel` — HTTP 응답이 push 를
+    #     기다리지 않게) 기반이 스스로 밀지 않고, 미는 일은 아웃박스가 한다.
+    #     이 호출은 그 배관을 타지 않는 **구버전 흉내**이므로 여기서 직접 민다
+    #     (아웃박스를 깨우면 "앱이 이 값을 발행한" 것이 되어 흉내가 깨진다).
     channel = b.manager.reads(b.room_id).channel
     channel.write_state(
         b.manager.reads(b.room_id).key,
         reads_mod.build_value(DIRTY_CURSOR, [channel.sender]),
         identity=b.manager.person,
+        flush=True,
     )
     b.manager.poll_now(b.room_id)
     b.settle()
