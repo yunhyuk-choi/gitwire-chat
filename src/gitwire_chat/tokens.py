@@ -177,6 +177,25 @@ def _one_line(text: str) -> str:
     return picked[:200]
 
 
+#: ``git credential`` 규약을 깨는 문자 — 줄바꿈과 NUL.
+#:
+#: ⚠️ **주입 방어다.** 그 규약은 "한 줄 = 한 항목"이라, 어느 항목에든 줄바꿈이
+#: 섞이면 우리가 만들려던 것이 아닌 항목이 생긴다. 구체적으로:
+#:   · ``username`` 에 ``나<개행>password=엉뚱한값`` → 엉뚱한 자격증명이 **저장된다**
+#:   · ``host`` 에 ``github.com<개행>password=x`` → ``fill`` 이 우리가 심은 값을
+#:     되돌려 주어 "찾았다"가 **거짓**이 된다
+#: 그래서 stdin 에 들어가는 모든 항목이 이 함수를 지난다 (값도 이름도 호스트도).
+_FORBIDDEN = ("\n", "\r", "\0")
+
+
+def _one_line_value(text: str) -> str:
+    """git credential 항목 하나로 쓸 수 있는 값. 아니면 **빈 문자열**."""
+    value = (text or "").strip()
+    if any(bad in value for bad in _FORBIDDEN):
+        return ""
+    return value
+
+
 def _has_password(stdout: str) -> bool:
     """``git credential fill`` 출력에 **비지 않은** ``password`` 가 있나.
 
@@ -231,21 +250,31 @@ def discover(
     `rooms.RoomManager(opener=…)` · `api.createApi(fetchImpl)` 와 같다).
     """
     run = runner or _run_git
-    var = (env_name or "").strip() or DEFAULT_ENV
-    where = (host or "").strip().lower() or host_of(repo_url)
+    var = _one_line_value(env_name) or DEFAULT_ENV
+    # ⚠️ 호스트를 **지어내지 않는다.** 규약을 깨는 호스트가 들어오면 기본값
+    #    (github.com)으로 슬쩍 바꾸지 않고 "물어볼 수 없다"로 남긴다 —
+    #    엉뚱한 호스트를 대신 조회하면 그 답이 거짓이 된다.
+    asked = (host or "").strip()
+    where = _one_line_value(host).lower() if asked else host_of(repo_url)
 
     # 1. 환경변수 — 앱이 이미 읽는 곳.
     if os.environ.get(var, "").strip():
         return Discovery(ENV, env_name=var, host=where)
 
     # 2. OS 자격증명 저장소. git 이 자기 규약으로 뒤진다.
+    #    ⚠️ 호스트도 규약 항목이다 — 그대로 넣지 않는다 (`_one_line_value`
+    #    도크: 줄바꿈이 섞이면 `fill` 이 우리가 심은 값을 되돌려 줘서
+    #    "찾았다"가 거짓이 된다). 못 쓸 호스트면 이 단계를 건너뛴다.
     detail = ""
-    rc, out, err = run(
-        ["credential", "fill"], f"protocol=https\nhost={where}\n\n"
-    )
-    if rc == 0 and _has_password(out):
-        return Discovery(HELPER, env_name=var, host=where)
-    detail = _one_line(err)
+    if not where:
+        detail = "물어볼 호스트 이름이 규약에 맞지 않는다"
+    else:
+        rc, out, err = run(
+            ["credential", "fill"], f"protocol=https\nhost={where}\n\n"
+        )
+        if rc == 0 and _has_password(out):
+            return Discovery(HELPER, env_name=var, host=where)
+        detail = _one_line(err)
 
     # 3. 주소에 박힌 것.
     if url_has_token(repo_url):
@@ -310,17 +339,25 @@ def save(
     반환값은 저장에 쓴 ``username`` — 화면에 "어느 이름으로 저장했다"를
     말하기 위한 것이고, 비밀이 아니다.
     """
-    value = (token or "").strip()
-    if not value:
+    if not (token or "").strip():
         raise SaveError("토큰이 비어 있다", code="empty")
-    if "\n" in value or "\r" in value or "\0" in value:
-        # git credential 규약은 한 줄 = 한 항목이다. 줄바꿈이 섞이면 우리가
-        # 만들려던 항목이 아닌 것이 저장된다 — 붙여넣기 사고를 여기서 막는다.
+    # 붙여넣기 사고·주입을 여기서 막는다 (`_one_line_value` 도크).
+    value = _one_line_value(token)
+    if not value:
         raise SaveError(
             "토큰에 줄바꿈이 섞여 있다 (붙여넣기를 확인하라)", code="format"
         )
-    who = (username or "").strip() or "gitwire"
-    where = (host or "").strip().lower() or "github.com"
+    # 이름·호스트도 같은 규약 항목이다 — 화면에서 오는 값이므로 같이 지난다.
+    # ⚠️ 규약을 깨는 값은 **조용히 기본값으로 바꾸지 않는다.** 사용자가 말한
+    #    이름이 아닌 곳에 저장하면 다음 조회에서 안 나오거나 남의 항목을
+    #    덮는다 — 되돌리기 어려운 쪽이라 거절이 맞다.
+    who = _one_line_value(username) if (username or "").strip() else "gitwire"
+    where = _one_line_value(host).lower() if (host or "").strip() else "github.com"
+    if not who or not where:
+        raise SaveError(
+            "저장할 이름·호스트에 줄바꿈이 섞여 있다 (git credential 규약은 "
+            "한 줄 = 한 항목이다)", code="format",
+        )
     run = runner or _run_git
     rc, _out, err = run(
         ["credential", "approve"],

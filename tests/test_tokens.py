@@ -228,6 +228,42 @@ def test_줄바꿈이_섞인_붙여넣기는_거절한다():
     assert run.calls == []
 
 
+# --------------------------------------- git credential 규약 주입 방어
+
+
+def test_username_에_줄바꿈을_넣어_다른_항목을_심을_수_없다():
+    """⚠️ 그 규약은 "한 줄 = 한 항목"이다.
+
+    `username` 에 줄바꿈을 섞으면 우리가 만들려던 것이 아닌 항목
+    (`password=엉뚱한값`)이 **저장된다.** 그러면 그 사람의 git 이 전부 인증에
+    실패한다 — 되돌리기 어려운 쪽의 사고다.
+    """
+    run = Runner([(0, "", "")])
+    with pytest.raises(tokens.SaveError) as caught:
+        tokens.save(SECRET, username="me" + chr(10) + "password=evil", runner=run)
+    assert caught.value.code == "format"
+    assert run.calls == [], "규약이 깨진 값으로 git 을 불렀다"
+
+
+def test_host_에_줄바꿈을_넣어_찾았다를_거짓으로_만들_수_없다(monkeypatch):
+    """`fill` 요청에 `password=x` 를 심으면 helper 가 그것을 되돌려 준다.
+
+    그러면 저장소에 아무것도 없는 사람에게 "OS 자격증명 저장소에서 찾았습니다"
+    라고 말하게 된다 — 화면이 거짓말을 하는 쪽이라 더 나쁘다.
+    """
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    run = Runner([FOUND])
+    got = tokens.discover(host="github.com" + chr(10) + "password=x", runner=run)
+    assert got.source == tokens.NONE, got
+    assert run.calls == [], "규약이 깨진 호스트로 git 을 불렀다"
+
+
+def test_환경변수_이름에_줄바꿈이_있으면_기본_이름으로_떨어진다(monkeypatch):
+    monkeypatch.setenv("GITWIRE_TOKEN", SECRET)
+    got = tokens.discover(env_name="A" + chr(10) + "B", runner=Runner())
+    assert got.env_name == tokens.DEFAULT_ENV and got.source == tokens.ENV
+
+
 # ------------------------------------------------- git 호출 그 자체
 
 
