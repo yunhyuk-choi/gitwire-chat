@@ -22,6 +22,27 @@
 * 그래서 이 파일에는 **판정에 필요한 값**(커서·참가자 집합)만 있고, 카운트라는
   숫자는 어디에도 저장되지 않는다. 화면에서 매번 계산한다 (`static/js/reads.js`).
 
+⭐ 그래서 **내가 보낼 때 커서를 발행할 이유가 없다**
+------------------------------------------------
+위 공식이 작성자를 분모에서 빼므로(`p ≠ A`) **내 커서 값은 내 메시지의 카운트에
+아무 영향이 없다.** 아카이브 합의도 커서를 보지 않는다 (`consensus_day` 는
+`archived` 워터마크만 본다). 남은 이유는 뱃지 하나였는데 — 안 읽은 개수를 세는
+루프가 작성자를 안 가려서 내가 보낸 말이 내 뱃지에 "1 안 읽음"으로 떴다 — 그것은
+**커서가 아니라 그 루프**에서 고칠 일이다 (`ReadTracker.unread` 가 이제
+`record_sender` 로 내 레코드를 뺀다).
+
+그 하나를 고치기 전까지 값을 치른 것은 왕복이었다: 전송마다 참가자 상태 파일이
+다시 쓰였고, 그것이 **전송당 커밋·push 를 하나 더** 만들었다 (실측: 메시지
+커밋 뒤 2초쯤 뒤 「참가자 상태 1건」 커밋이 예외 없이 따라왔고, 그 두 번째 push
+가 다음 전송의 레코드 스탬프를 439ms 늦췄다). 그래서 **보내기 경로에는 커서 발행
+트리거가 없다** (`rooms._after_push`).
+
+커서가 전진하고 발행되는 자리는 하나로 남는다 — **내가 아직 읽지 않은 *남의*
+메시지를 보이는 탭에서 실제로 봤을 때** (`static/js/reads.js` 의 `visible()` +
+작성자 판정, `static/js/timeline.js` 가 창 안에서 *남의* 최대 ID 만 알린다).
+"새로운"은 도착 시각이 아니라 **내가 아직 안 읽음**이라는 뜻이다 — 이미 있던
+남의 과거 메시지를 뒤늦게 처음 읽는 경우도 그 자리에 포함된다.
+
 ⚠️ 발행은 **레코드가 아니다.** append-only 로 적으면 그 사람의 *현재* 커서를
 알기 위해 마지막 read 레코드까지 과거로 스캔해야 한다 — 2주 안 읽은 사람이면
 2주치다. keyset 페이징으로 없앤 전량 스캔이 그대로 되살아난다. 그래서 기반의
@@ -182,10 +203,13 @@ PERSON_ENV = "GITWIRE_CHAT_PERSON"
 # 나빠진다 — `local()` 에서 AttributeError 가 나고, 그것을 삼키는 넓은 except 들이
 # 뱃지를 0 으로 만든다(고치려던 그 증상과 똑같은 화면). 그래서 여기서 **크게**
 # 실패시킨다: 앱이 뜨지 않고, 무엇을 해야 하는지가 메시지에 있다.
-if not hasattr(gitwire, "is_record_id"):  # pragma: no cover — 버전 불일치 방어
+if not hasattr(gitwire, "is_record_id") or not hasattr(
+    gitwire.records, "slug_sender"
+):  # pragma: no cover — 버전 불일치 방어
     raise ImportError(
-        "기반(gitwire)이 너무 낮다 — 읽음 커서 형식 판정(`gitwire.is_record_id`)이 "
-        "없다. `python -m gitwire_chat update` 로 함께 올려라."
+        "기반(gitwire)이 너무 낮다 — 읽음 커서 형식 판정(`gitwire.is_record_id`) "
+        "또는 발신자 슬러그 규칙(`gitwire.records.slug_sender`)이 없다. "
+        "`python -m gitwire_chat update` 로 함께 올려라."
     )
 
 
@@ -216,6 +240,45 @@ def sane_cursor(cursor: Any, *, where: str = "") -> str:
         value,
     )
     return ""
+
+
+def record_sender(record_id: Any) -> str:
+    """레코드 ID 에 **박혀 있는** 발신자 슬러그. ID 가 아니면 빈 문자열.
+
+    ⭐ 왜 ID 에서 꺼내는가 — 뱃지(`unread`)가 "이 레코드는 내가 쓴 것인가"를 알아야
+    하는데, 그 판정을 **레코드 나열만으로** 해야 한다. 봉투(payload blob)를 열면
+    뱃지 하나가 방 안의 메시지 수만큼 blob 을 여는 일이 되고, 방 목록이 상태마다
+    다시 그려지므로(SSE) 그 비용이 유휴 상태에서도 계속 나간다. 다행히 발신자는
+    이미 ID 안에 있다 — 기반이 `make_record_id` 에서 `<타임스탬프>-<발신자>-<난수>`
+    로 박아 넣는다. 그래서 **새 왕복이 하나도 없다.**
+
+    ⚠️ 꺼낸 값은 **슬러그**다 (원본 식별자가 아니다). 기반이 파일명에 안전한
+    형태로 바꿔 넣기 때문이다(`gitwire.records.slug_sender` — '-' 제거·40자 상한).
+    그래서 참가자 파일의 `senders`(원본)와 비교할 때는 **양쪽을 같은 규칙으로**
+    통과시켜야 한다 (`_slug_all`) — 규칙의 주인은 기반이고, 여기서 손으로 다시
+    쓰지 않는다.
+
+    형식 판정도 ID 의 주인이 한다 (`gitwire.is_record_id`) — 통과한 값은 칸이
+    정확히 셋이지만, 판정과 쪼개기가 어긋나는 날을 대비해 개수를 확인한다.
+    """
+    if not gitwire.is_record_id(record_id):
+        return ""
+    name = str(record_id).rsplit("/", 1)[-1]
+    parts = name[: -len(".json")].split("-")
+    if len(parts) != 3:  # pragma: no cover — 형식 판정이 이미 보장한다
+        return ""
+    return parts[1]
+
+
+def _slug_all(senders: Iterable[str]) -> set[str]:
+    """봉투 `sender` 집합을 **ID 에 박히는 형태**로 맞춘다 (빈 값은 버린다).
+
+    비교의 한쪽(`record_sender`)이 이미 슬러그이므로 다른 쪽도 같은 규칙을 통과해야
+    한다. 규칙은 기반이 소유한다 — 여기서 '-' 를 지우고 40자로 자르는 코드를 다시
+    쓰면 상한이 바뀌는 날 두 곳이 어긋나고, 그때 증상은 "내 말이 내 뱃지에 뜬다"로
+    조용히 돌아온다.
+    """
+    return {gitwire.records.slug_sender(s) for s in senders if s}
 
 
 def sane_day(value: Any) -> str:
@@ -697,18 +760,66 @@ class ReadTracker:
 
     # -------------------------------------------------------------- 스냅샷
 
-    def unread(self, *, fresh: bool = False) -> tuple[int, str | None]:
+    def my_senders(self) -> set[str]:
+        """내 봉투 `sender` 들 — **레코드 ID 에 박히는 형태**(슬러그)로.
+
+        ⭐ 근거는 **하나**다: 내 참가자 파일의 `senders`(= 내 설치본 목록, 이
+        모듈의 `ReadCursor.senders`). 카운트 공식의 `p ≠ A` 를 판정하는 그 값을
+        뱃지도 그대로 쓴다 — 작성자 판정 규칙을 두 벌 만들면 "카운트에서는
+        작성자인데 뱃지에서는 남"인 상태가 생긴다 (`static/js/reads.js` 의 같은
+        경고).
+
+        여기에 **지금 이 설치본**(`channel.sender`)을 더한다. 방을 막 열어 아직
+        파일이 없을 때(또는 이 기기가 아직 그 목록에 못 들어갔을 때)도 내 말이
+        내 뱃지에 뜨지 않게 하기 위해서다 — `publish` 가 그 값을 목록에 넣는
+        주체이므로 둘은 같은 사실의 이른 쪽·늦은 쪽이다.
+
+        ⚠️ 비용: 참가자 상태 **내 파일 하나**를 로컬에서 읽는다. 커밋 sha 로
+        캐시된 나열(`ls-tree`) + 작업 사본 파일 읽기이므로 **git 왕복이 0회**다
+        (기반 `_blob_bytes` — 파일 + sha1 대조, subprocess 없음). 읽지 못하면 이
+        설치본 하나로 떨어진다 — 뱃지가 조금 과다해질 수 있고(내 다른 기기의 말이
+        세어진다) 그 방향이 안전측이다.
+        """
+        raw = {str(getattr(self.channel, "sender", "") or "")}
+        try:
+            stored = parse_state(self.channel.read_state(self.key, fresh=False))
+        except Exception as exc:  # noqa: BLE001 — 뱃지가 방 목록을 죽이지 않는다
+            log.debug("내 설치본 목록을 읽지 못했다: %s", exc)
+            stored = None
+        if stored is not None:
+            raw |= set(stored.senders)
+        return _slug_all(raw)
+
+    def unread(
+        self, *, fresh: bool = False, senders: set[str] | None = None
+    ) -> tuple[int, str | None]:
         """(내가 안 읽은 개수, 그 첫 메시지 ID). 방 목록 뱃지의 값이다.
+
+        ⭐ **내 레코드는 세지 않는다.** 뱃지는 "내가 아직 안 읽은 *남의* 말이
+        몇이냐"이고, 내가 보낸 말은 그 정의에 들어가지 않는다. 판정은 레코드 ID 에
+        박힌 발신자(`record_sender`)와 내 설치본 목록(`my_senders`)으로 한다 —
+        카운트 공식의 `p ≠ A` 와 **같은 근거**다.
+
+        ⚠️ 그래서 이 값은 **내 커서를 전진시키지 않고도** 맞는다. 예전에는 반대로
+        했다 — 보낼 때 내 커서를 내 메시지로 올려(`rooms._after_push`) 뱃지를
+        0 으로 만들었는데, 그 전진은 (a) 카운트 공식에 아무 영향이 없고(작성자는
+        분모에서 빠진다) (b) 아카이브 합의도 커서를 안 보며(`consensus_day` 는
+        `archived` 만 본다) (c) 그러면서 **전송마다 참가자 상태 파일을 다시 써
+        커밋·push 를 하나 더 만들었다.** 뱃지가 커서를 안 읽으면 그 왕복이 사라진다.
 
         ⚠️ **git 왕복이 없고 payload blob 도 열지 않는다** (`fresh=False` +
         레코드 **ID 나열**). 그 나열은 커밋 sha 로 캐시되므로 같은 상태를
         되풀이해 세면 **git 호출이 0회**다 — 방 목록이 상태마다 다시 그려지고
         SSE 로도 밀리기 때문에, 이 성질이 없으면 유휴 비용이 방 개수만큼 는다.
+        작성자 판정도 그 성질을 깨지 않는다: 발신자는 **ID 안에** 있고, 내 설치본
+        목록은 참가자 상태 파일 하나를 로컬에서 읽는 것이다 (`my_senders`).
 
-        ⚠️ 참가자 커서는 여기서 읽지 않는다. 뱃지는 **내 것**이고, 남의 커서는
-        방 안 카운트에만 쓰인다 (`view`).
+        ⚠️ 남의 커서는 여기서 읽지 않는다. 뱃지는 **내 것**이고, 남의 커서는
+        방 안 카운트에만 쓰인다 (`view`). `senders` 인자는 이미 참가자 집합을
+        읽은 호출자(`view`)가 같은 사실을 두 번 읽지 않도록 넘겨 주는 자리다.
         """
         cursor = self.local()
+        mine = self.my_senders() if senders is None else senders
         try:
             ids = self.channel.record_ids(fresh=fresh)
         except Exception as exc:  # noqa: BLE001
@@ -718,6 +829,11 @@ class ReadTracker:
         first: str | None = None
         for rid in ids:
             if cursor and rid <= cursor:
+                continue
+            # ⭐ 내가 쓴 말은 내 안 읽음이 아니다 (위 도크). 발신자를 모르는 ID
+            # (형식이 아닌 값)는 남의 것으로 센다 — 과다는 눈에 보이고 사라지지만
+            # 조용한 0 은 아무도 못 알아챈다 (이 모듈의 일관된 안전측 방향).
+            if mine and record_sender(rid) in mine:
                 continue
             if first is None:
                 first = rid
@@ -729,11 +845,19 @@ class ReadTracker:
 
         방 **안**을 그리는 데 필요한 전부다 (뱃지만 필요하면 `unread`).
         """
-        count, first = self.unread(fresh=fresh)
         people = self.participants(fresh=fresh)
         # 내 상태는 **내 파일**에 있다. 이미 나열한 것에서 꺼낸다 — 따로 한 번 더
         # 읽으면 같은 사실을 두 경로로 얻게 되고, 그 둘이 어긋날 자리가 생긴다.
         mine = people.get(self.key)
+        # ⭐ 작성자 판정용 설치본 목록도 **그 나열에서** 꺼낸다 (같은 이유다 —
+        # `unread` 가 스스로 읽으면 같은 파일을 두 번 읽는다).
+        count, first = self.unread(
+            fresh=fresh,
+            senders=_slug_all(
+                {str(getattr(self.channel, "sender", "") or "")}
+                | (set(mine.senders) if mine else set())
+            ),
+        )
         return ReadView(
             me=self.key,
             person=self.person,
