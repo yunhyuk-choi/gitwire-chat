@@ -17,12 +17,13 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     DEL  /api/rooms/<id>                   방 목록에서 제거
     POST /api/repos/plan                   레포 만들기 계획(무엇이 만들어지는지)
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
-    GET  /api/token                        ⭐ 자격증명이 **어디** 있나 (env /
-                                           OS 저장소 / 주소에 박힘 / 없음).
-                                           ⚠️ **값은 절대 싣지 않는다** — 출처만
-    POST /api/token                        붙여넣은 토큰을 OS 자격증명 저장소에
-                                           저장 (`git credential approve`).
-                                           우리 화면에서 온 요청만 받는다 (`csrf.py`)
+    GET  /api/token                        ⭐ 자격증명이 **어디** 있나 — env /
+                                           OS 저장소 / 주소에 박힘 / 없음.
+                                           ⚠️ **값은 싣지 않는다**: 출처만 답한다
+    POST /api/token                        ⭐ 붙여넣은 토큰을 OS 자격증명 저장소에
+                                           저장한다 (`git credential approve`).
+                                           우리 화면에서 온 요청만 받는다
+                                           (`csrf.py`). 응답에도 값은 없다
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기 — 202 `{"queued": true}`.
@@ -645,7 +646,8 @@ def create_app(
         token = str(data.get("token") or "")
         host = str(data.get("host") or "github.com").strip().lower() or "github.com"
         # 토큰 주인 조회. 실패 사유가 "인증"이면 저장하지 않는다.
-        owner, verified, detail = str(data.get("username") or "").strip(), False, ""
+        owner = str(data.get("username") or "").strip()
+        verified, why = False, ""
         if host in forges.GITHUB_HOSTS:
             try:
                 owner = forges.github_login(token) or owner
@@ -653,9 +655,9 @@ def create_app(
             except forges.ForgeError as exc:
                 if exc.code == "auth":
                     return jsonify({
-                        "error": f"{exc}", "code": "auth", "hint": exc.hint,
+                        "error": str(exc), "code": "auth", "hint": exc.hint,
                     }), 400
-                detail = f"{exc} — 토큰 주인을 확인하지 못했다 (저장은 했다)"
+                why = str(exc)
         try:
             saved = tokens.save(token, host=host, username=owner)
         except tokens.SaveError as exc:
@@ -668,7 +670,10 @@ def create_app(
             "saved": True,
             "username": saved,
             "verified": verified,
-            "detail": detail,
+            # 확인을 못 했으면 **그렇다고 말한다** (확인했다고 하지 않는다).
+            # 이 문장은 저장이 끝난 뒤에 만든다 — 저장이 실패했으면 위에서
+            # 이미 돌아갔으므로 "저장은 했다"가 거짓이 될 수 없다.
+            "detail": f"{why} — 토큰 주인은 확인하지 못했다 (저장은 했다)" if why else "",
         }), 201
 
     # ------------------------------------------------------------ SSE

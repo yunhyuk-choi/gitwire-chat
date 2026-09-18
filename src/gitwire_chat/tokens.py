@@ -65,7 +65,7 @@ NONE = "none"          # 없음
 
 #: 사용자에게 필요한 GitHub 토큰 권한.
 #:
-#: 이 앱이 토큰으로 하는 일은 **두 가지뿐**이다:
+#: 이 앱이 토큰으로 부르는 것은 이것뿐이다 (코드에서 확인했다):
 #:   · 채널 레포 clone·push (비공개 레포) → classic ``repo``
 #:   · 레포 생성 (`forges.create_github_repo` — ``POST /user/repos``,
 #:     ``POST /orgs/{조직}/repos``, 둘 다 private) → classic ``repo``
@@ -88,7 +88,7 @@ GITHUB_NOTE = "gitwire-chat"
 
 @dataclass(frozen=True)
 class Discovery:
-    """"자격증명이 어디 있나"의 답. ⚠️ **값이 들어 있지 않다** (모듈 도크)."""
+    """자격증명이 **어디** 있나. ⚠️ 값이 들어 있지 않다 (모듈 도크)."""
 
     source: str = NONE          # ENV | HELPER | URL | NONE
     env_name: str = DEFAULT_ENV
