@@ -30,6 +30,7 @@ export var SAVE_HEADER_VALUE = 'update';
 
 export function createToken(env) {
   var dom = env.dom;
+  var bus = env.bus;
   var api = env.api;
 
   var el = {
@@ -44,6 +45,10 @@ export function createToken(env) {
   };
 
   var state = null;          /* 마지막 탐색 결과 (값은 들어 있지 않다) */
+  /* 지금 보고 있는 방. 탐색에 **방 id 만** 보낸다 — 서버가 그 방의 주소·토큰
+     환경변수를 자기 상태에서 읽는다. 주소를 쿼리로 보내면 거기 박힌 자격증명이
+     **접근 로그에 그대로 찍힌다** (`app.py` `_room_coords`). */
+  var roomId = '';
 
   function showError(message) {
     if (!el.error) { return; }
@@ -90,7 +95,10 @@ export function createToken(env) {
     showError('');
     dom.setText(el.check, '확인 중…');
     el.check.disabled = true;
-    var path = '/api/token' + (fresh ? '?fresh=1' : '');
+    var query = [];
+    if (fresh) { query.push('fresh=1'); }
+    if (roomId) { query.push('room=' + encodeURIComponent(roomId)); }
+    var path = '/api/token' + (query.length ? '?' + query.join('&') : '');
     return api(path)
       .then(render)['catch'](function (err) {
         showError(errText(err));
@@ -149,6 +157,17 @@ export function createToken(env) {
         if (e.preventDefault) { e.preventDefault(); }
         save();
       }
+    });
+
+    /* 방을 바꾸면 그 방 기준으로 다시 봐야 한다 (방마다 다른 토큰 환경변수를
+       쓸 수 있고, 주소에 박힌 것도 방마다 다르다). 여기서 요청을 쏘지는
+       않는다 — 사용자가 누를 때만 나간다. */
+    bus.on('room:switch', function (e) {
+      if (e.id === roomId) { return; }
+      roomId = e.id || '';
+      state = null;
+      dom.hide(el.found);
+      dom.hide(el.form);
     });
   }
 

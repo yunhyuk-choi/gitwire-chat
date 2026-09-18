@@ -19,7 +19,9 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
     GET  /api/token                        ⭐ 자격증명이 **어디** 있나 — env /
                                            OS 저장소 / 주소에 박힘 / 없음.
-                                           ⚠️ **값은 싣지 않는다**: 출처만 답한다
+                                           ⚠️ **값은 싣지 않는다**: 출처만 답한다.
+                                           방은 `room=<id>` 로 가리킨다 (주소를
+                                           쿼리로 받지 않는다 — 접근 로그 유출)
     POST /api/token                        ⭐ 붙여넣은 토큰을 OS 자격증명 저장소에
                                            저장한다 (`git credential approve`).
                                            우리 화면에서 온 요청만 받는다
@@ -595,6 +597,22 @@ def create_app(
             token_seen[key] = got
         return got
 
+    def _room_coords(room_id: str) -> tuple[str, str]:
+        """방 하나의 (토큰 환경변수 이름, 레포 주소).
+
+        ⚠️ **주소는 서버가 자기 상태에서 읽는다** — 화면이 쿼리로 보내지 않는다.
+        사용자가 주소에 자격증명을 박아 둔 경우(`https://나:토큰@호스트/…`)
+        그 주소를 쿼리로 받으면 **접근 로그에 값이 그대로 찍힌다**(실측: werkzeug
+        접근 로그는 쿼리 문자열을 남긴다). 방 id 만 받으면 그 경로가 없다.
+        """
+        if not room_id:
+            return "", ""
+        try:
+            room = manager.get(room_id)
+        except RoomError:
+            return "", ""
+        return room.token_env or "", room.repo_url or ""
+
     def _token_payload(found: tokens.Discovery) -> dict:
         """⚠️ 여기 실리는 것에 **값이 없다** — `Discovery` 가 값을 들고 있지 않다."""
         return {
@@ -608,11 +626,17 @@ def create_app(
 
     @app.get("/api/token")
     def token_state():
-        """자격증명이 **어디** 있나. 상태를 바꾸지 않는다."""
+        """자격증명이 **어디** 있나. 상태를 바꾸지 않는다.
+
+        `room=<id>` 를 주면 그 방의 토큰 환경변수 이름·레포 주소를 서버가 자기
+        상태에서 읽는다 (`_room_coords` — 주소를 쿼리로 받지 않는 이유가 거기
+        있다). 방이 아직 없는 사람(=이 화면의 기본)은 `host` 만 쓴다.
+        """
         args = request.args
+        env_name, repo_url = _room_coords(str(args.get("room") or ""))
         found = _discover(
-            str(args.get("env") or ""),
-            str(args.get("repo_url") or ""),
+            str(args.get("env") or "") or env_name,
+            repo_url,
             str(args.get("host") or ""),
             fresh=str(args.get("fresh") or "") in ("1", "true", "yes"),
         )

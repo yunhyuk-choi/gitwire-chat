@@ -374,6 +374,37 @@ def test_토큰이_없으면_발급_링크를_준다(client, monkeypatch):
     assert "terminal prompts disabled" in body["detail"]
 
 
+def test_주소에_박힌_토큰은_방_id_로만_찾는다(client, manager, monkeypatch):
+    """⚠️ 주소를 **쿼리로 받지 않는다** — 거기 박힌 값이 접근 로그에 찍힌다.
+
+    사용자가 `https://나:토큰@호스트/…` 를 쓴 경우는 실제로 있고, 그 사람에게
+    "토큰이 없다"고 말하면 거짓말이다. 그래서 찾기는 하는데, **주소는 서버가
+    자기 상태(`rooms.json`)에서 읽는다.** 화면은 방 id 만 보낸다.
+    """
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    _no_git(monkeypatch)
+    room = manager.register(f"https://me:{SECRET_TOKEN}@example.invalid/team/room.git")
+
+    body = client.get(f"/api/token?fresh=1&room={room.id}").get_json()
+    assert body["source"] == "url" and body["found"] is True
+    assert body["host"] == "example.invalid"
+    # ⚠️ 응답에는 값이 없다 (주소도 싣지 않는다)
+    assert SECRET_TOKEN not in json.dumps(body, ensure_ascii=False)
+
+    # 쿼리로 주소를 보내도 **무시한다** — 그 경로를 아예 두지 않는다.
+    ignored = client.get(
+        f"/api/token?fresh=1&repo_url=https://me:{SECRET_TOKEN}@example.invalid/x.git"
+    ).get_json()
+    assert ignored["source"] == "none", ignored
+
+
+def test_없는_방_id_는_조용히_무시한다(client, monkeypatch):
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    _no_git(monkeypatch)
+    body = client.get("/api/token?fresh=1&room=없는방").get_json()
+    assert body["source"] == "none"
+
+
 def test_토큰_상태는_한_번만_git_을_부른다(client, monkeypatch):
     """`git credential fill` 은 실측 435ms — 요청마다 부르면 화면이 느려진다."""
     monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
