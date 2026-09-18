@@ -19,7 +19,7 @@ import urllib.parse
 
 import pytest
 
-from gitwire_chat import tokens
+from gitwire_chat import tokens, winspawn
 
 #: 이 파일에서 쓰는 가짜 토큰. 어떤 출력에도 나타나면 안 되는 문자열이다.
 SECRET = "ghp_ThisIsASecretTokenValue1234567890"
@@ -226,6 +226,63 @@ def test_줄바꿈이_섞인_붙여넣기는_거절한다():
         tokens.save(f"{SECRET}\nhost=evil.invalid", runner=run)
     assert caught.value.code == "format"
     assert run.calls == []
+
+
+# ------------------------------------------------- git 호출 그 자체
+
+
+def test_git_호출은_창_없이_대화형_없이_나간다(monkeypatch):
+    """⭐ 이 앱의 실측된 두 사고를 한 번에 겨냥한다.
+
+    (1) 창 — `pythonw` 로 도는 앱이 부른 `git.exe` 가 폴링마다 터미널 창을
+        띄웠다(`winspawn.py` 도크). 그래서 `quiet_kwargs()` 를 그대로 쓴다.
+    (2) 멈춤 — `git credential fill` 은 기본적으로 **물어본다.** 창이 없는
+        프로세스에서 프롬프트가 뜨면 그 프로세스는 영원히 멈춘다.
+    """
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+
+        class Done:
+            returncode, stdout, stderr = 1, "", ""
+
+        return Done()
+
+    monkeypatch.setenv("GIT_ASKPASS", "C:/상속된/askpass.bat")
+    monkeypatch.setenv("SSH_ASKPASS", "/inherited/askpass")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    tokens._run_git(["credential", "fill"], "protocol=https\nhost=github.com\n\n")
+
+    env = seen["kwargs"]["env"]
+    assert env["GIT_TERMINAL_PROMPT"] == "0"      # 터미널로 묻지 않는다
+    assert env["GCM_INTERACTIVE"] == "never"      # GUI helper 도 막는다
+    # 상속된 askpass 헬퍼가 대신 답하면 탐색 결과가 거짓이 된다
+    assert "GIT_ASKPASS" not in env and "SSH_ASKPASS" not in env
+    assert seen["kwargs"]["timeout"] == tokens.TIMEOUT
+    # 창은 띄우지 않는다 — 판정을 여기서 다시 쓰지 않고 그 모듈을 쓴다
+    for key, value in winspawn.quiet_kwargs().items():
+        assert seen["kwargs"][key] == value, key
+
+
+def test_git_이_없거나_멈추면_사유가_남고_예외는_안_난다(monkeypatch):
+    """탐색이 앱을 죽이면 안 된다 — 못 찾은 것으로 떨어진다."""
+    def boom(argv, **kwargs):
+        raise OSError("git 을 찾을 수 없다")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.delenv("GITWIRE_TOKEN", raising=False)
+    got = tokens.discover(host="github.com")
+    assert got.source == tokens.NONE
+    assert "git" in got.detail
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    got = tokens.discover(host="github.com")
+    assert got.source == tokens.NONE and "초" in got.detail
 
 
 # ------------------------------------------------- ⭐ 실제 git 왕복 (격리)
