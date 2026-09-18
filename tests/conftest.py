@@ -90,6 +90,16 @@ class FakeChannel:
         # ⭐ 발행 대기열 — 기반과 같이 **메모리**다. `append()` 는 여기에만 넣고
         # 시각·ID 는 `flush()`(= push)가 정한다 (`gitwire.Channel.append` 도크).
         self.queue: list[gitwire.PendingRecord] = []
+        # ⭐ 기반의 **발행 계약**도 흉내 낸다 — 누가 미느냐가 기본값에 달려 있다.
+        # `autopublish=True`(기반 기본값)면 `append()` 가 그 자리에서 민다(드레인
+        # 루프 — `gitwire.Channel._drain`). 이 앱은 그 자리가 HTTP 요청 스레드라
+        # **끄고** 연다(`rooms._open_channel`). 대역이 기본값을 흉내 내지 않으면
+        # 그 인자가 빠져도 여기 테스트가 전부 통과한다 — 즉 앱이 가장 아프게
+        # 회귀하는 자리를 대역이 가려 준다. 그래서 기본값을 그대로 산다.
+        self.autopublish = bool(kwargs.get("autopublish", True))
+        # 한 커밋의 상한. 기반의 `flush()` 는 **한 회차**라 이만큼만 가져가고,
+        # 되풀이는 호출자 몫이다 (`rooms._flush_room`).
+        self.max_batch = int(kwargs.get("max_batch", gitwire.DEFAULT_MAX_BATCH))
         self.records: list[gitwire.Record] = []
         self.subscribers: list = []
         self.cycle_hooks: list = []
@@ -132,6 +142,11 @@ class FakeChannel:
 
         ⭐ 티켓 타입은 **기반의 진짜 클래스**를 쓴다. 계약을 두 벌 쓰면 한 벌이
         반드시 낡는다 — 대역이 흉내 낼 것은 *언제 settled 되는가*뿐이다.
+
+        ⚠️ `autopublish`(기본 켜짐)면 **이 호출이 민다** — 기반의 드레인 루프
+        규칙 1이다. 기다리지 않는 쪽이므로 전송 실패를 예외로 올리지 않는다
+        (기반도 그렇게 한다 — 올리면 소비자가 "보낼 수 없었다"로 사용자에게
+        말하고 배경 재시도가 조용히 성공한다).
         """
         with self._lock:
             self._seq += 1
@@ -139,6 +154,11 @@ class FakeChannel:
             self.queue.append(ticket)
         if flush:
             self.flush()
+        elif self.autopublish:
+            try:
+                self.flush()
+            except BaseException:  # noqa: BLE001 — 기다리지 않는 쪽에는 안 올린다
+                pass
         return ticket
 
     def flush(self, push_attempts: int = 5) -> list[gitwire.Record]:
@@ -146,6 +166,9 @@ class FakeChannel:
 
         ⚠️ 실패는 대기열을 비우지 않는다 — 그래야 '아직 안 나갔다' 가 대역에서도
         진짜 사실이 된다 (그리고 순서가 유지된다).
+
+        ⚠️ **한 회차다** — 대기열 앞에서 `max_batch` 개까지만 가져간다(기반과 같다).
+        비워질 때까지 되풀이하는 것은 호출자 몫이다 (`rooms._flush_room`).
         """
         self.flushes += 1
         if self.flush_delay:
@@ -153,8 +176,8 @@ class FakeChannel:
         if self.flush_error is not None:
             raise self.flush_error
         with self._lock:
-            batch = list(self.queue)
-            self.queue.clear()
+            batch = list(self.queue[: self.max_batch])
+            del self.queue[: len(batch)]
             made = []
             for item in batch:
                 self._n += 1

@@ -427,6 +427,24 @@ class RoomManager:
             # 똑같은 설치본 식별자(= self.instance)를 쓴다.
             "name": room.name or None,
             "poll_interval": room.poll_interval or self.settings.poll_interval,
+            # ⭐ **부르는 쪽이 밀지 않는다.** 기반의 기본값(`autopublish=True`)은
+            # 드레인 루프이고, 그 규칙 1이 "아무도 밀고 있지 않으면 *부르는 쪽*이
+            # 그 자리에서 민다" 다 (`gitwire.Channel._drain` 도크). 여기서 부르는
+            # 쪽은 **HTTP 요청 스레드**(`send()`)다 — 켜 두면 `POST /messages` 가
+            # 다시 push 를 통째로 기다린다. 실측(로컬 bare 원격, 5회):
+            # **1048~2317ms(중앙값 1790ms)** → 끈 뒤 **2.2~4.0ms**. 예전에 뗀
+            # `flush=True` 가 붙이던 그 시간이 기본값으로 돌아오는 자리다.
+            #
+            # 느린 것만이 아니다. 켜 두면 `append()` 가 자기 레코드를 이미 밀어
+            # 버려서 아웃박스의 `flush()` 가 *나간 레코드*를 받지 못하고, 그러면
+            # `_after_push()` 가 아예 돌지 않는다 → **읽음 커서가 전진하지 않고**
+            # (실측: 내가 보낸 5건 중 3건이 내 뱃지에 안읽음으로 남았다) 남의
+            # 화면에서 내가 *내 말을 안 읽은 사람*으로 세어진다(발행 커서 = "").
+            #
+            # ⚠️ 끄면 **아무도 대신 밀지 않는다** — 기반의 배경 재시도
+            # (`_arm_retry`)도 `autopublish=False` 면 뜨지 않는다. 밀어내기·재시도·
+            # 종료 시 마지막 flush 는 전부 `Outbox` 것이다 (`_flush_room`).
+            "autopublish": False,
         }
         credential = self._credential(room)
         if credential is not None:
@@ -744,12 +762,28 @@ class RoomManager:
         기반의 `flush()` 가 *방금 원격에 착지한 레코드*를 돌려주므로, "내가 보낸
         말이 실제로 나갔다"를 알 수 있는 자리가 여기 하나다. 그래서 읽음 커서
         전진과 로컬 에코도 여기서 한다 (`_after_push`).
+
+        ⭐ **비워질 때까지 돈다.** 기반의 `flush()` 는 *한 회차*다 — 대기열 앞에서
+        `max_batch` 개까지만 가져가고, 되풀이하는 것은 호출자의 일이라고 명시한다
+        (`gitwire.Channel.flush` 도크: "`autopublish=False` 인 호출자는 상한을
+        넘긴 잔여가 남을 수 있음을 알아야 한다"). 한 번만 부르면 그 잔여를 **아무도**
+        밀지 않는다 — 기반의 배경 재시도는 `autopublish=False` 에서 뜨지 않고,
+        아웃박스는 성공한 회차를 보고 `pending` 을 0 으로 내려 `synced` 로 쉰다.
+        즉 "보냈는데 안 나갔고 아무도 안 나갔다고 말하지 않는" 자리가 된다.
+        그래서 상한에 딱 찬 회차 뒤에는 한 번 더 민다 (드레인 루프와 같은 모양).
         """
         channel = self._ready_channel(room_id)
-        made = list(channel.flush())
-        if made:
-            self._after_push(room_id, made)
-        return made
+        limit = getattr(channel, "max_batch", None)
+        made: list = []
+        while True:
+            batch = list(channel.flush())
+            if batch:
+                self._after_push(room_id, batch)
+                made += batch
+            # 상한을 못 채웠으면 대기열이 비었다 = 더 돌 이유가 없다. 상한을 모르는
+            # 기반(대역 등)이면 한 회차로 끝낸다 — 모르는 값으로 무한히 돌지 않는다.
+            if not limit or len(batch) < limit:
+                return made
 
     def _after_push(self, room_id: str, records: list) -> None:
         """레코드가 원격에 **착지했다** — 커서를 올리고 화면에 흘린다.
