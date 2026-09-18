@@ -986,6 +986,25 @@ await test('토큰 저장 실패는 사유와 힌트가 화면에 남는다', as
   assert.ok(err.textContent.indexOf('만료') >= 0, err.textContent);
 });
 
+await test('⭐ 토큰: 요청에 **방 id** 만 실린다 (주소를 쿼리로 보내지 않는다)', async () => {
+  /* 주소에 자격증명이 박혀 있으면 쿼리로 보내는 순간 **서버 접근 로그에 찍힌다**
+     (실측). 그래서 화면은 방 id 만 보내고, 주소는 서버가 자기 상태에서 읽는다. */
+  const { chat, context } = await boot({ routes: { '/api/token': tokenRoute() } });
+  await chat.checkToken(true);
+  const calls = context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0);
+  assert.equal(calls.length, 1, calls.map((c) => c.path).join(' , '));
+  assert.ok(calls[0].path.indexOf('room=r1') >= 0, calls[0].path);
+  assert.ok(calls[0].path.indexOf('repo_url') < 0, '주소를 쿼리로 보냈다: ' + calls[0].path);
+
+  /* 방을 바꾸면 그 방 기준으로 다시 봐야 한다 — 앞선 결과를 버린다. */
+  await chat.switchRoom('r2');
+  assert.equal(chat.tokenState(), null, '방을 바꿨는데 옛 탐색 결과가 남았다');
+  await chat.checkToken(true);
+  const again = context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0);
+  assert.ok(again[again.length - 1].path.indexOf('room=r2') >= 0,
+    again[again.length - 1].path);
+});
+
 await test('토큰: 페이지가 뜰 때 git 을 부르지 않는다 (선택 기능이다)', async () => {
   const { context } = await boot({ routes: { '/api/token': tokenRoute() } });
   assert.equal(context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0).length, 0,
