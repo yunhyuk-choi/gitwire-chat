@@ -198,6 +198,50 @@ def test_보내기가_flush_True_를_쓰지_않는다(manager, fake_opener):
     assert seen == [False]
 
 
+def test_채널을_autopublish_를_끄고_연다(manager, fake_opener):
+    """⭐ **누가 미느냐** — 기반 기본값이면 `append()`(= HTTP 스레드)가 민다.
+
+    기반은 배칭 창을 없애고 드레인 루프로 갔고, 그 규칙 1이 "아무도 밀고 있지
+    않으면 부르는 쪽이 그 자리에서 민다" 다 (`gitwire.Channel._drain`). 기본값
+    `autopublish=True` 를 그대로 쓰면 `POST /messages` 가 다시 push 를 통째로
+    기다린다 — 실측(로컬 bare 원격) 중앙값 **1790ms**. 그리고 아웃박스의
+    `flush()` 가 나간 레코드를 못 받아 **읽음 커서 전진도 멈춘다**
+    (`rooms._after_push`). 그래서 인자 하나를 여기서 못 박는다.
+    """
+    room = manager.register(REPO)
+    channel = manager.channel(room.id)
+    assert channel.kwargs["autopublish"] is False
+
+
+def test_max_batch_를_넘긴_대기분도_남지_않는다(manager, fake_opener):
+    """⭐ 기반의 `flush()` 는 **한 회차**다 — 상한을 넘긴 잔여를 누가 미나.
+
+    `autopublish=False` 면 기반의 배경 재시도가 뜨지 않는다. 그래서 한 회차만
+    부르고 끝내면 잔여를 **아무도** 밀지 않는데, 아웃박스는 성공한 회차를 보고
+    `synced` 로 쉰다 = "안 나갔는데 아무도 안 나갔다고 말하지 않는다".
+
+    ⚠️ **시간도 함께 못 박는다.** 한 회차만 부르면 잔여는 *재시도 백오프*(2초에서
+    시작해 60초까지)를 타고서야 나간다 — 실측: 이 테스트가 0.4초에서 **42초**로
+    늘어난다. 그래서 넉넉하지만 백오프로는 절대 못 지키는 시한을 준다.
+    """
+    room = manager.register(REPO)
+    channel = manager.channel(room.id)
+    channel.max_batch = 2                      # 한 커밋에 2건까지
+    box = manager.outbox(room.id)
+
+    for i in range(5):
+        RoomManager.send(manager, room.id, f"{i}번")
+
+    assert box.wait_idle(5.0), "상한을 넘긴 잔여가 재시도 백오프를 타고 있다"
+    assert channel.unpushed() == [], "상한을 넘긴 대기분이 조용히 남았다"
+    assert [r.payload["text"] for r in channel.records] == [
+        "0번", "1번", "2번", "3번", "4번",
+    ]
+    assert manager.outbox_state(room.id).state == SYNCED
+    # 나간 뒤 처리(읽음 커서)도 **전량**에 대해 돌았다 — 마지막 건까지 올라간다.
+    assert manager.read_view(room.id).cursor == channel.records[-1].id
+
+
 def test_밀어내기_실패는_이벤트로_드러나고_로컬에는_남는다(manager, fake_opener):
     room = manager.register(REPO)
     channel = manager.channel(room.id)
