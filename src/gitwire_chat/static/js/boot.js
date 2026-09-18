@@ -30,6 +30,7 @@ import { createStatusBar } from './statusbar.js';
 import { createRoomList } from './roomlist.js';
 import { createAddRoom } from './addroom.js';
 import { createNewRepo } from './newrepo.js';
+import { createToken } from './token.js';
 import { createComposer } from './composer.js';
 import { createOutbox } from './outbox.js';
 import { createTimeline } from './timeline.js';
@@ -140,6 +141,8 @@ export function createApp(runtime) {
       return modules.addroom ? modules.addroom.fields() : { name: '', tokenEnv: '' };
     };
     modules.newrepo = setup('레포 만들기', createNewRepo);
+    /* 자격증명 — 이 단위가 넘어져도 방 등록·전송은 그대로 돈다 (토큰은 선택이다). */
+    modules.token = setup('토큰', createToken);
     modules.composer = setup('보내기', createComposer);
     modules.outbox = setup('아웃박스', createOutbox);
     modules.search = setup('검색', createSearch);
@@ -205,6 +208,10 @@ export function createApp(runtime) {
     addRoom: function () { return modules.addroom ? modules.addroom.submit() : undefined; },
     planNewRepo: function () { return modules.newrepo ? modules.newrepo.plan() : undefined; },
     createNewRepo: function () { return modules.newrepo ? modules.newrepo.create() : undefined; },
+    /* --- 자격증명 (값은 어디에도 실리지 않는다 — 출처만) --- */
+    checkToken: function (f) { return modules.token ? modules.token.check(f) : undefined; },
+    saveToken: function () { return modules.token ? modules.token.save() : undefined; },
+    tokenState: function () { return modules.token ? modules.token.state() : null; },
     send: function () { return modules.composer ? modules.composer.send() : undefined; },
     outbox: function () { return modules.outbox ? modules.outbox.state() : null; },
     reads: function () { return modules.reads ? modules.reads.model() : null; },

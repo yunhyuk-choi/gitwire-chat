@@ -17,6 +17,15 @@ JSON 만 밀고, 브라우저 JS 가 노드를 만들어 `appendChild` 한다.
     DEL  /api/rooms/<id>                   방 목록에서 제거
     POST /api/repos/plan                   레포 만들기 계획(무엇이 만들어지는지)
     POST /api/repos                        레포 생성 (토큰이 있을 때만, 명시적 확인)
+    GET  /api/token                        ⭐ 자격증명이 **어디** 있나 — env /
+                                           OS 저장소 / 주소에 박힘 / 없음.
+                                           ⚠️ **값은 싣지 않는다**: 출처만 답한다.
+                                           방은 `room=<id>` 로 가리킨다 (주소를
+                                           쿼리로 받지 않는다 — 접근 로그 유출)
+    POST /api/token                        ⭐ 붙여넣은 토큰을 OS 자격증명 저장소에
+                                           저장한다 (`git credential approve`).
+                                           우리 화면에서 온 요청만 받는다
+                                           (`csrf.py`). 응답에도 값은 없다
     GET  /api/rooms/<id>/messages          최근 N건 / before=<메시지ID> 로 그 앞
                                            (응답의 has_more 가 무한 스크롤의 종료 조건)
     POST /api/rooms/<id>/messages          보내기 — 202 `{"queued": true}`.
@@ -55,7 +64,7 @@ from flask import (
     send_from_directory,
 )
 
-from . import assets, csrf, events, forges, updaterun
+from . import assets, csrf, events, forges, tokens, updaterun
 from .config import Settings, load_settings
 from .reads import InvalidCursor
 from .rooms import RoomError, RoomManager, RoomNotReady
@@ -561,6 +570,135 @@ def create_app(
         except forges.ForgeError as exc:
             return jsonify({"error": str(exc), "code": exc.code, "hint": exc.hint}), 400
         return jsonify({"repo": created}), 201
+
+    # -------------------------------- 자격증명 탐색·발급 거들기 (G-3)
+    #
+    # 기반(gitwire)은 자격증명을 **기동 시 한 번** 읽어 들고 쓴다. 못 찾는
+    # 사용자가 실제로 있다(한 번도 push 해 본 적 없음 · 자격증명 관리자가 없는
+    # 환경 · 저장된 것이 만료·취소됨). 그때 git 은 **대화형으로 묻는데** 이 앱은
+    # 창 없이 돌아 물어볼 곳이 없다 → 조용히 멈춘다. 그래서 "있나 · 어디 있나"를
+    # 앱이 먼저 알고 화면에 말한다. 규율·순서는 `tokens.py` 도크.
+
+    #: 탐색 결과 캐시. `git credential fill` 은 실측 435ms 라 요청마다 부르면
+    #: 화면이 느려진다. 자격증명은 "기동 시 한 번 읽는 값"이라는 기반의 성질을
+    #: 그대로 따른다 — 사실이 바뀌는 자리(저장 직후 · 화면이 명시로 다시
+    #: 물을 때)에서만 버린다.
+    token_seen: dict[str, tokens.Discovery] = {}
+
+    def _discover(env_name: str, repo_url: str, host: str, *, fresh: bool):
+        key = "|".join([
+            (env_name or "").strip(), (host or "").strip(), (repo_url or "").strip()
+        ])
+        if fresh:
+            token_seen.pop(key, None)
+        got = token_seen.get(key)
+        if got is None:
+            got = tokens.discover(env_name=env_name, repo_url=repo_url, host=host)
+            token_seen[key] = got
+        return got
+
+    def _room_coords(room_id: str) -> tuple[str, str]:
+        """방 하나의 (토큰 환경변수 이름, 레포 주소).
+
+        ⚠️ **주소는 서버가 자기 상태에서 읽는다** — 화면이 쿼리로 보내지 않는다.
+        사용자가 주소에 자격증명을 박아 둔 경우(`https://나:토큰@호스트/…`)
+        그 주소를 쿼리로 받으면 **접근 로그에 값이 그대로 찍힌다**(실측: werkzeug
+        접근 로그는 쿼리 문자열을 남긴다). 방 id 만 받으면 그 경로가 없다.
+        """
+        if not room_id:
+            return "", ""
+        try:
+            room = manager.get(room_id)
+        except RoomError:
+            return "", ""
+        return room.token_env or "", room.repo_url or ""
+
+    def _token_payload(found: tokens.Discovery) -> dict:
+        """⚠️ 여기 실리는 것에 **값이 없다** — `Discovery` 가 값을 들고 있지 않다."""
+        return {
+            **found.to_json(),
+            "issue": {
+                "link": tokens.issue_link("github"),
+                "scopes": list(tokens.GITHUB_SCOPES),
+                "note": tokens.GITHUB_NOTE,
+            },
+        }
+
+    @app.get("/api/token")
+    def token_state():
+        """자격증명이 **어디** 있나. 상태를 바꾸지 않는다.
+
+        `room=<id>` 를 주면 그 방의 토큰 환경변수 이름·레포 주소를 서버가 자기
+        상태에서 읽는다 (`_room_coords` — 주소를 쿼리로 받지 않는 이유가 거기
+        있다). 방이 아직 없는 사람(=이 화면의 기본)은 `host` 만 쓴다.
+        """
+        args = request.args
+        env_name, repo_url = _room_coords(str(args.get("room") or ""))
+        found = _discover(
+            str(args.get("env") or "") or env_name,
+            repo_url,
+            str(args.get("host") or ""),
+            fresh=str(args.get("fresh") or "") in ("1", "true", "yes"),
+        )
+        return jsonify(_token_payload(found))
+
+    @app.post("/api/token")
+    def token_save():
+        """⚠️ 붙여넣은 토큰을 **사용자의 OS 자격증명 저장소에 쓴다.**
+
+        그래서 둘을 먼저 한다:
+
+        1. **우리 화면에서 온 요청인가** (`csrf.py`). 이 문이 없으면 다른
+           오리진의 페이지가 폼 하나로 사용자의 github.com 자격증명을 쓰레기 값으로
+           덮어쓸 수 있다 — 그 뒤 그 사람의 git 은 전부 인증에 실패한다.
+           갱신 실행과 **같은 문**을 쓴다 (값이 하나로 고정된 shibboleth 이고,
+           동작마다 다른 값을 두면 그 목록이 곧 낡는다).
+        2. **정말 쓸 수 있는 토큰인가** (`forges.github_login` = ``GET /user``).
+           틀린 값을 저장하면 그 사람의 저장소에 **못 쓰는 자격증명**이 남아
+           다음 git 호출이 전부 실패한다 — 저장은 그 자체로 되돌리기 어려운
+           동작이므로 확인이 먼저다. 네트워크가 안 되는 경우는 확인 불가이지
+           틀린 값이 아니므로, 그 사실을 응답에 적고 저장은 진행한다.
+
+        ⚠️ 응답·로그에 토큰이 없다. 저장에 쓴 **이름**(username)만 돌려준다.
+        """
+        reason = csrf.deny_reason(request.headers, request.host)
+        if reason:
+            log.warning("토큰 저장 요청을 거절했다 — %s", reason)
+            return jsonify({"error": reason, "code": "forbidden", "hint": csrf.HINT}), 403
+
+        data = request.get_json(silent=True) or request.form or {}
+        token = str(data.get("token") or "")
+        host = str(data.get("host") or "github.com").strip().lower() or "github.com"
+        # 토큰 주인 조회. 실패 사유가 "인증"이면 저장하지 않는다.
+        owner = str(data.get("username") or "").strip()
+        verified, why = False, ""
+        if host in forges.GITHUB_HOSTS:
+            try:
+                owner = forges.github_login(token) or owner
+                verified = True
+            except forges.ForgeError as exc:
+                if exc.code == "auth":
+                    return jsonify({
+                        "error": str(exc), "code": "auth", "hint": exc.hint,
+                    }), 400
+                why = str(exc)
+        try:
+            saved = tokens.save(token, host=host, username=owner)
+        except tokens.SaveError as exc:
+            return jsonify({"error": str(exc), "code": exc.code, "hint": exc.hint}), 400
+        # 저장으로 사실이 바뀌었다 — 캐시를 통째로 버린다 (키가 여러 벌이다).
+        token_seen.clear()
+        found = _discover("", "", host, fresh=True)
+        return jsonify({
+            **_token_payload(found),
+            "saved": True,
+            "username": saved,
+            "verified": verified,
+            # 확인을 못 했으면 **그렇다고 말한다** (확인했다고 하지 않는다).
+            # 이 문장은 저장이 끝난 뒤에 만든다 — 저장이 실패했으면 위에서
+            # 이미 돌아갔으므로 "저장은 했다"가 거짓이 될 수 없다.
+            "detail": f"{why} — 토큰 주인은 확인하지 못했다 (저장은 했다)" if why else "",
+        }), 201
 
     # ------------------------------------------------------------ SSE
 

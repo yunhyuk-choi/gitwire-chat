@@ -779,6 +779,16 @@ button.primary { background: var(--accent); color: var(--accent-ink); border-col
 .new-repo { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .new-repo-form { margin-top: 6px; }
 .new-repo .row { flex-wrap: wrap; gap: 6px; }
+
+/* 자격증명 거들기 — 「레포 만들기 거들기」와 **같은 규칙**이다. 값을 따로 적지
+   않고 위 선택자에 얹는다: 두 블록이 같은 관용구라는 사실이 CSS 에서도 보여야
+   하고, 한쪽만 손대면 나란히 놓인 두 블록이 어긋난다. 색은 팔레트 토큰뿐이다. */
+.token-help { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.token-form { margin-top: 6px; }
+.token-help .row { flex-wrap: wrap; gap: 6px; }
+/* 붙여넣기 칸은 폼 안의 다른 칸과 같은 폭을 쓴다 (`.field input` 이 이미 100%
+   지만, 이 칸만 `type=password` 라 브라우저 기본 폭이 다르게 잡히는 것을 막는다). */
+.token-form input { width: 100%; }
 a.button {
   display: inline-block;
   padding: 6px 10px;

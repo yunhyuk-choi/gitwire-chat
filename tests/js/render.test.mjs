@@ -849,6 +849,168 @@ await test('레포 만들기(링크): 프리필 링크를 주고, 만들고 오�
     'https://github.com/yunhyuk-choi/our-room.git');
 });
 
+/* -------------------------------------- 자격증명 탐색 · 발급 거들기 (G-3) */
+
+/* ⭐ 여기서 지키는 것은 둘이다.
+   (1) **어디서 찾았는지가 화면에 보인다** — 못 찾는 사용자가 실제로 있고
+       (한 번도 push 안 해 봄 · 자격증명 관리자 없는 환경 · 만료·취소), 그때
+       git 은 대화형으로 묻는데 이 앱은 창 없이 돌아 물어볼 곳이 없다.
+   (2) ⚠️ **값이 화면에 오지 않는다.** 서버가 출처만 내려주고, 붙여넣은 값은
+       POST 본문으로 한 번 지나갈 뿐이며 그 즉시 칸이 비워진다. */
+
+const TOKEN_SECRET = 'ghp_ThisIsASecretTokenValue1234567890';
+
+/* 화면에 있는 **모든** 글자와 속성값을 한 줄로 — "값이 안 보인다"를 눈이 아니라
+   문자열 검색으로 판정한다 (`token-paste` 의 value 까지 훑는다). */
+function screenText(doc) {
+  const parts = [];
+  for (const id of Object.keys(doc.byId)) {
+    const node = doc.byId[id];
+    parts.push(String(node.textContent || ''));
+    parts.push(String(node.value || ''));
+    for (const name of Object.keys(node.attrs || {})) {
+      parts.push(String(node.attrs[name]));
+    }
+  }
+  return parts.join(' | ');
+}
+
+function tokenRoute(over) {
+  return Object.assign({
+    source: 'helper', found: true, host: 'github.com',
+    label: 'OS 자격증명 저장소에서 찾았습니다 (git credential)',
+    env_name: 'GITWIRE_TOKEN', detail: '',
+    issue: {
+      link: 'https://github.com/settings/tokens/new?description=gitwire-chat&scopes=repo',
+      scopes: ['repo'], note: 'gitwire-chat'
+    }
+  }, over || {});
+}
+
+await test('⭐ 토큰: 어디서 찾았는지가 화면에 뜬다 (네 경우 모두)', async () => {
+  const cases = [
+    ['env', tokenRoute({ source: 'env', label: '환경변수 GITWIRE_TOKEN 에서 찾았습니다' }), '환경변수'],
+    ['helper', tokenRoute(), 'OS 자격증명 저장소'],
+    ['url', tokenRoute({ source: 'url', label: '레포 주소에 토큰이 박혀 있습니다' }), '레포 주소'],
+    ['none', tokenRoute({
+      source: 'none', found: false, label: '토큰을 찾지 못했습니다',
+      detail: 'could not read Username: terminal prompts disabled'
+    }), '찾지 못했습니다']
+  ];
+  for (const [name, payload, expected] of cases) {
+    const { doc, chat } = await boot({ routes: { '/api/token': payload } });
+    await chat.checkToken();
+    const found = doc.getElementById('token-found');
+    assert.equal(found.hidden, false, name + ': 출처가 화면에 안 떴다');
+    assert.ok(found.textContent.indexOf(expected) >= 0, name + ': ' + found.textContent);
+    /* 못 찾았으면 왜 못 찾았는지도 함께 (조용한 실패 금지) */
+    if (name === 'none') {
+      assert.ok(found.textContent.indexOf('terminal prompts disabled') >= 0, found.textContent);
+      /* 없는 사람에게만 발급 블록이 저절로 열린다 */
+      assert.equal(doc.getElementById('token-form').hidden, false, '발급 거들기가 안 열렸다');
+    } else {
+      assert.equal(doc.getElementById('token-form').hidden, true,
+        name + ': 토큰이 있는데 발급을 권했다');
+    }
+    /* ⚠️ 값은 어디에도 없다 */
+    assert.ok(screenText(doc).indexOf(TOKEN_SECRET) < 0, name + ': 화면에 값이 있다');
+  }
+});
+
+await test('토큰: 없으면 필요한 스코프만 채워진 발급 링크를 준다', async () => {
+  const { doc, chat } = await boot({
+    routes: {
+      '/api/token': tokenRoute({ source: 'none', found: false, label: '토큰을 찾지 못했습니다' })
+    }
+  });
+  await chat.checkToken();
+  const link = doc.getElementById('token-link');
+  assert.equal(link.hidden, false, '발급 링크가 안 떴다');
+  const href = link.getAttribute('href');
+  assert.ok(href.indexOf('https://github.com/settings/tokens/new?') === 0, href);
+  assert.ok(href.indexOf('scopes=repo') >= 0, href);
+  /* 과한 권한을 요구하지 않는다 */
+  for (const over of ['admin%3Aorg', 'delete_repo', 'workflow', 'gist']) {
+    assert.ok(href.indexOf(over) < 0, '과한 스코프: ' + over);
+  }
+  /* 왜 필요한지 · 어떤 권한인지가 사람 말로 보인다 */
+  assert.ok(doc.getElementById('token-why').textContent.indexOf('repo') >= 0);
+});
+
+await test('⭐ 토큰 저장: 값은 본문으로만 가고, 화면에는 남지 않는다', async () => {
+  const { doc, chat, context } = await boot({
+    routes: {
+      /* GET = 아직 없다 / POST = 저장했다. 응답에 **값은 없다** (서버도 안 싣는다). */
+      '/api/token': (path, init) => (init && init.method === 'POST')
+        ? tokenRoute({ saved: true, username: 'yunhyuk-choi', verified: true })
+        : tokenRoute({ source: 'none', found: false, label: '토큰을 찾지 못했습니다' })
+    }
+  });
+  await chat.checkToken();
+
+  doc.getElementById('token-paste').value = TOKEN_SECRET;
+  await chat.saveToken();
+
+  const posted = context.fetch.calls.filter(
+    (c) => c.path === '/api/token' && c.init.method === 'POST');
+  assert.equal(posted.length, 1, '저장 요청이 안 나갔다');
+  assert.equal(JSON.parse(posted[0].init.body).token, TOKEN_SECRET);
+  /* 저장은 사용자의 자격증명 저장소를 바꾼다 — 우리 화면 표식이 붙는다 */
+  assert.equal(posted[0].init.headers['X-Gitwire-Chat'], 'update');
+
+  /* 값이 화면에 남아 있을 이유가 사라졌다 */
+  assert.equal(doc.getElementById('token-paste').value, '');
+  assert.ok(doc.getElementById('token-found').textContent.indexOf('저장했습니다') >= 0,
+    doc.getElementById('token-found').textContent);
+  assert.ok(screenText(doc).indexOf(TOKEN_SECRET) < 0, '화면에 값이 남았다');
+});
+
+await test('토큰 저장 실패는 사유와 힌트가 화면에 남는다', async () => {
+  const { doc, chat } = await boot({
+    routes: {
+      '/api/token': (path, init) => {
+        if (init && init.method === 'POST') {
+          return { __http: 400, error: 'GitHub 인증에 실패했다 (401)', code: 'auth',
+                   hint: '토큰이 만료됐거나 값이 잘못됐다.' };
+        }
+        return tokenRoute({ source: 'none', found: false, label: '토큰을 찾지 못했습니다' });
+      }
+    }
+  });
+  await chat.checkToken();
+  doc.getElementById('token-paste').value = 'ghp_wrong';
+  await chat.saveToken();
+  const err = doc.getElementById('token-error');
+  assert.equal(err.hidden, false, '사유가 안 보인다');
+  assert.ok(err.textContent.indexOf('인증에 실패') >= 0, err.textContent);
+  assert.ok(err.textContent.indexOf('만료') >= 0, err.textContent);
+});
+
+await test('⭐ 토큰: 요청에 **방 id** 만 실린다 (주소를 쿼리로 보내지 않는다)', async () => {
+  /* 주소에 자격증명이 박혀 있으면 쿼리로 보내는 순간 **서버 접근 로그에 찍힌다**
+     (실측). 그래서 화면은 방 id 만 보내고, 주소는 서버가 자기 상태에서 읽는다. */
+  const { chat, context } = await boot({ routes: { '/api/token': tokenRoute() } });
+  await chat.checkToken(true);
+  const calls = context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0);
+  assert.equal(calls.length, 1, calls.map((c) => c.path).join(' , '));
+  assert.ok(calls[0].path.indexOf('room=r1') >= 0, calls[0].path);
+  assert.ok(calls[0].path.indexOf('repo_url') < 0, '주소를 쿼리로 보냈다: ' + calls[0].path);
+
+  /* 방을 바꾸면 그 방 기준으로 다시 봐야 한다 — 앞선 결과를 버린다. */
+  await chat.switchRoom('r2');
+  assert.equal(chat.tokenState(), null, '방을 바꿨는데 옛 탐색 결과가 남았다');
+  await chat.checkToken(true);
+  const again = context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0);
+  assert.ok(again[again.length - 1].path.indexOf('room=r2') >= 0,
+    again[again.length - 1].path);
+});
+
+await test('토큰: 페이지가 뜰 때 git 을 부르지 않는다 (선택 기능이다)', async () => {
+  const { context } = await boot({ routes: { '/api/token': tokenRoute() } });
+  assert.equal(context.fetch.calls.filter((c) => c.path.indexOf('/api/token') === 0).length, 0,
+    '누르지 않았는데 탐색이 나갔다 — 435ms 왕복이다');
+});
+
 /* ------------------------- 모듈 격리 · 가상화 실패는 결함이다 (주입 실증) */
 
 /* ⭐ 실제로 당한 사고의 축소판.
