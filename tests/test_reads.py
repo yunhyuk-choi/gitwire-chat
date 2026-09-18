@@ -497,6 +497,41 @@ def test_내_다른_기기가_보낸_말도_내_말이다(manager, fake_opener):
     assert manager.read_view(room.id).unread == 1
 
 
+def test_뱃지_경로가_오염_커서_경고를_새로_만들지_않는다(manager, fake_opener, caplog):
+    """⭐ 오염 경고를 줄이려는 변경이 **새 경고 원천**이 되면 안 된다.
+
+    뱃지는 방 목록이 다시 그려질 때마다 도는 자리다. 작성자 판정을 위해 내 참가자
+    파일을 읽게 됐으므로, 거기서 커서 위생을 함께 돌리면 내 파일이 한 번 오염된
+    동안 같은 경고가 로그를 채운다. 그래서 그 경로는 **설치본 목록만** 읽는다
+    (`reads.state_senders`).
+    """
+    room = manager.register(REPO)
+    channel = _channel(fake_opener)
+    manager.timeline(room.id)
+    tracker = manager.reads(room.id)
+    # 옛 버전이 올려 둔 내 오염 커서 (원격에 남아 있는 상태).
+    channel.inject_state(
+        tracker.person,
+        reads_mod.build_value("", [channel.sender]) | {"cursor": "~pending/000004"},
+    )
+    channel.inject({"kind": "msg", "v": 1, "author": "밥", "text": "야"},
+                   sender="bob.host")
+
+    with caplog.at_level("WARNING", logger="gitwire_chat.reads"):
+        for _ in range(5):
+            assert tracker.unread()[0] == 1        # 남의 말 하나 (내 것은 안 센다)
+    dirty = [r for r in caplog.records if "~pending/" in r.getMessage()]
+    assert dirty == [], f"뱃지 경로가 오염 경고를 남겼다 ({len(dirty)}줄)"
+
+    # 그래도 **참가자 목록**을 그릴 때는 여전히 경고한다 — 그 값은 사람이 알아야
+    # 하고, 그쪽은 커서를 실제로 쓰는 자리다 (안전측으로 '커서 없음'으로 떨군다).
+    with caplog.at_level("WARNING", logger="gitwire_chat.reads"):
+        caplog.clear()
+        view = manager.read_view(room.id)
+    assert [p.cursor for p in view.participants if p.key == view.me] == [""]
+    assert any("~pending/" in r.getMessage() for r in caplog.records)
+
+
 def test_레코드_ID_에서_발신자를_꺼낸다(manager, fake_opener):
     """⭐ 작성자 판정이 **왕복을 하나도 늘리지 않는** 근거 (봉투를 안 연다)."""
     room = manager.register(REPO)

@@ -429,6 +429,31 @@ def _state_label(state: Any) -> str:
     return str(getattr(state, "identity", "") or getattr(state, "key", "") or "?")
 
 
+def state_senders(state: Any) -> tuple[str, ...]:
+    """참가자 상태 봉투에서 **설치본 목록만** 꺼낸다 (커서는 보지 않는다).
+
+    ⭐ 왜 `parse_state` 를 쓰지 않는가 — 그것은 커서 위생(`sane_cursor`)을 함께
+    돌리고, 오염된 값을 만나면 **경고를 남긴다.** 뱃지 경로(`ReadTracker.unread`
+    → `my_senders`)는 방 목록이 다시 그려질 때마다 도는 자리라, 거기서 커서를
+    보면 내 파일이 한 번 오염된 동안 같은 경고가 로그를 채운다 (오염 경고를 줄이려
+    한 변경이 새 경고 원천을 만드는 셈이다). 필요한 것은 목록 하나뿐이다.
+
+    ⚠️ 그래도 **목록이 어디 있나**는 여기 한 곳에만 적는다 — `parse_state` 도 이
+    함수를 쓴다. 두 벌이 되면 스키마가 움직이는 날 한 벌이 낡는다.
+
+    절대 던지지 않는다 (남이 쓴 파일이고, 우리보다 새 버전일 수 있다).
+    """
+    value = getattr(state, "value", None)
+    if not isinstance(value, dict):
+        return ()
+    if str(value.get("kind") or CURSOR_KIND) != CURSOR_KIND:
+        return ()
+    senders = value.get("senders")
+    if not isinstance(senders, list):
+        return ()
+    return tuple(sorted({str(s) for s in senders if s}))
+
+
 def parse_state(state: Any) -> ReadCursor | None:
     """기반의 `ParticipantState` → `ReadCursor`. **절대 예외를 던지지 않는다.**
 
@@ -444,15 +469,12 @@ def parse_state(state: Any) -> ReadCursor | None:
     # `~pending/…`)을 그대로 쓰면 그 사람은 "모든 메시지를 읽은 사람"이 되어
     # 카운트에서 조용히 사라진다 — 없음으로 떨궈 안 읽은 것으로 센다.
     cursor = sane_cursor(value.get("cursor"), where=f"참가자 {_state_label(state)}")
-    senders = value.get("senders")
-    if not isinstance(senders, list):
-        senders = []
     when = getattr(state, "updated_at", None)
     return ReadCursor(
         person=str(getattr(state, "identity", "") or getattr(state, "key", "")),
         key=str(getattr(state, "key", "")),
         cursor=str(cursor or ""),
-        senders=tuple(sorted({str(s) for s in senders if s})),
+        senders=state_senders(state),
         # ⭐ 호환의 한쪽 방향: `status` 가 **없는 옛 파일**은 기본값(`활동 중`)으로
         # 읽힌다. 상태를 모르는 사람을 "자리 비움"으로 칠하면, 아직 갱신하지 않은
         # 동료가 전부 조용히 자리를 비운 것처럼 보인다.
@@ -779,15 +801,16 @@ class ReadTracker:
         (기반 `_blob_bytes` — 파일 + sha1 대조, subprocess 없음). 읽지 못하면 이
         설치본 하나로 떨어진다 — 뱃지가 조금 과다해질 수 있고(내 다른 기기의 말이
         세어진다) 그 방향이 안전측이다.
+
+        ⚠️ **커서는 보지 않는다** (`state_senders`, 그 도크). 이 자리는 방 목록이
+        다시 그려질 때마다 도므로, 여기서 커서 위생을 돌리면 내 파일이 한 번
+        오염된 동안 같은 경고가 로그를 채운다.
         """
         raw = {str(getattr(self.channel, "sender", "") or "")}
         try:
-            stored = parse_state(self.channel.read_state(self.key, fresh=False))
+            raw |= set(state_senders(self.channel.read_state(self.key, fresh=False)))
         except Exception as exc:  # noqa: BLE001 — 뱃지가 방 목록을 죽이지 않는다
             log.debug("내 설치본 목록을 읽지 못했다: %s", exc)
-            stored = None
-        if stored is not None:
-            raw |= set(stored.senders)
         return _slug_all(raw)
 
     def unread(
