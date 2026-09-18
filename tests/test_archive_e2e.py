@@ -78,7 +78,7 @@ def party(bare_repo, tmp_path):
         home.mkdir(parents=True, exist_ok=True)
         channel = gitwire.Channel(
             str(bare_repo), home=home, sender=name, consumer="chat",
-            clock=FixedOffsetClock(0.0), batch_window=0.0, auto_archive=False,
+            clock=FixedOffsetClock(0.0), auto_archive=False,
             **kwargs,
         ).open()
         tracker = _reads.ReadTracker(channel, f"{name}@x.io")
@@ -414,7 +414,7 @@ def test_reading_past_messages_still_works_after_the_drop(party, bare_repo):
     # 주말 내내 꺼져 있던 소비자 (커서를 '지금'에 맞춰 둔다)
     reader = gitwire.Channel(
         str(bare_repo), home=b.channel.home, sender="b", consumer="weekend",
-        clock=FixedOffsetClock(0.0), batch_window=0.0, auto_archive=False,
+        clock=FixedOffsetClock(0.0), auto_archive=False,
     ).open()
     try:
         reader.skip_to_now()
