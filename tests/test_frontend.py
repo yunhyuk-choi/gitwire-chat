@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import NO_WINDOW
+
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "src" / "gitwire_chat" / "static"
 APP_JS = STATIC / "app.js"
@@ -38,6 +40,7 @@ def test_모든_모듈의_문법이_유효하다(path: Path):
     result = subprocess.run(
         [node, "--check", str(path)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
 
@@ -71,7 +74,7 @@ def test_stub_DOM_으로_구동해_리렌더가_없음을_확인한다(capsys):
     result = subprocess.run(
         [node, str(RENDER_TEST)],
         cwd=str(ROOT), capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
+        encoding="utf-8", errors="replace", **NO_WINDOW,
     )
     print(result.stdout)
     print(result.stderr)

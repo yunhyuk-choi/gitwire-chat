@@ -48,7 +48,7 @@ from gitwire_chat.config import Settings
 from gitwire_chat.events import EventBus
 from gitwire_chat.rooms import RoomManager
 
-from conftest import RecordingNotifier
+from conftest import NO_WINDOW, RecordingNotifier
 
 #: 브라우저 기동에 주는 시간(초). 헤드리스 첫 실행은 프로필을 만드느라 느리다.
 BROWSER_TIMEOUT = 120
@@ -988,6 +988,7 @@ def open_headless(
         argv, capture_output=True, timeout=BROWSER_TIMEOUT,
         # 브라우저 로그는 OS 로케일을 타므로 디코드를 관대하게 한다.
         text=True, encoding="utf-8", errors="replace",
+        **NO_WINDOW,
     )
     return proc.stdout, proc.stderr
 
@@ -1085,6 +1086,7 @@ def run_until_report(url: str, profile: Path, app, *, seconds: float = 40.0) -> 
     proc = subprocess.Popen(
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
+        **NO_WINDOW,
     )
     reports = app.test_reports
     try:

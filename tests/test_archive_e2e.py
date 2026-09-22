@@ -30,6 +30,8 @@ from gitwire.clock import FixedOffsetClock
 from gitwire_chat import archive as _archive
 from gitwire_chat import reads as _reads
 
+from conftest import NO_WINDOW
+
 DAY = 86400.0
 
 
@@ -78,6 +80,7 @@ def git_bare(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "--git-dir", str(repo), *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        **NO_WINDOW,
     ).stdout
 
 
