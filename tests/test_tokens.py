@@ -21,6 +21,8 @@ import pytest
 
 from gitwire_chat import tokens, winspawn
 
+from conftest import NO_WINDOW
+
 #: 이 파일에서 쓰는 가짜 토큰. 어떤 출력에도 나타나면 안 되는 문자열이다.
 SECRET = "ghp_ThisIsASecretTokenValue1234567890"
 
@@ -339,7 +341,7 @@ def isolated_store(tmp_path, monkeypatch):
     subprocess.run(
         ["git", "config", "--global", "credential.helper",
          f"store --file={store.as_posix()}"],
-        check=True, capture_output=True,
+        check=True, capture_output=True, **NO_WINDOW,
     )
     return store
 

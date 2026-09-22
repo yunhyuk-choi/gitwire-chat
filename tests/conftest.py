@@ -32,8 +32,26 @@ from gitwire_chat.notify import Notifier  # noqa: E402
 from gitwire_chat.outbox import STUCK as OUTBOX_STUCK  # noqa: E402
 from gitwire_chat.rooms import RoomManager  # noqa: E402
 from gitwire_chat import schema  # noqa: E402
+from gitwire_chat import winspawn  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+#: **테스트가 띄우는 자식**에게 물리는 창 억제 플래그 — `**NO_WINDOW` 로 편다.
+#:
+#: 제품은 모든 스폰에 이 판정을 물린다(`winspawn`). 그런데 *테스트 자신*이
+#: 부르는 git·node·브라우저·앱은 제품 코드가 아니어서 그 규율 밖에 있었고,
+#: **콘솔 없는 부모**(분리된 프로세스·`pythonw`) 아래서 스위트를 돌리면
+#: 자식마다 콘솔이 새로 할당되어 터미널 창이 쏟아졌다 — 실측된 고장이다
+#: (창 188개: two_instances 130 · updater 50 · browser_smoke 8).
+#:
+#: 판정을 여기서 다시 쓰지 않는다. 규칙을 두 벌 만들면 한 벌이 뒤처지고,
+#: 뒤처진 그 벌이 창을 띄운다 (`winspawn.py` 모듈 도크와 같은 이유).
+#: Windows 밖에서는 `quiet_kwargs()` 가 빈 dict 이라 아무 인자도 붙지 않는다
+#: — POSIX 에 `creationflags` 를 넘기면 `subprocess` 가 거절한다.
+#:
+#: ⚠️ `DETACHED_PROCESS` 를 섞지 않는다 — 같이 주면 `CREATE_NO_WINDOW` 가
+#: 무시되고 손자가 창을 띄운다 (`winspawn.py` 도크 · `test_winspawn.py`).
+NO_WINDOW = winspawn.quiet_kwargs()
 
 
 @pytest.fixture(autouse=True)
@@ -474,5 +492,6 @@ def bare_repo(tmp_path) -> Path:
         ["git", "init", "--bare", "-b", "main", str(repo)],
         check=True,
         capture_output=True,
+        **NO_WINDOW,
     )
     return repo

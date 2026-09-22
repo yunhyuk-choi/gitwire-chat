@@ -29,6 +29,8 @@ import pytest
 
 from gitwire_chat import autostart, csrf, runstate, updater, updaterun
 
+from conftest import NO_WINDOW
+
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 실제로 앱을 띄워 보는 테스트에 주는 시간(초).
@@ -204,14 +206,13 @@ def test_git_이_아닌_설치본은_명확히_거절한다(monkeypatch):
 def commit_in(repo: Path) -> str:
     """진짜 로컬 레포에 커밋 하나 — `ls-remote` 를 흉내 없이 재려고."""
     work = repo.parent / "work"
-    subprocess.run(["git", "clone", str(repo), str(work)], check=True, capture_output=True)
+    quiet = dict(check=True, capture_output=True, **NO_WINDOW)
+    subprocess.run(["git", "clone", str(repo), str(work)], **quiet)
     (work / "README.md").write_text("안녕\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=work, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "첫 커밋"], cwd=work, check=True, capture_output=True)
-    subprocess.run(["git", "push", "origin", "main"], cwd=work, check=True, capture_output=True)
-    out = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=work, check=True, capture_output=True, text=True
-    )
+    subprocess.run(["git", "add", "-A"], cwd=work, **quiet)
+    subprocess.run(["git", "commit", "-m", "첫 커밋"], cwd=work, **quiet)
+    subprocess.run(["git", "push", "origin", "main"], cwd=work, **quiet)
+    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work, text=True, **quiet)
     return out.stdout.strip()
 
 
@@ -1170,6 +1171,9 @@ def spawn_app(port: int, home: Path, registry: Path, log: Path) -> subprocess.Po
             "--author", "왕복테스트", "--no-notify",
         ],
         stdout=handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
+        # 창 없는 콘솔을 자식 트리 전체에 물린다 — 이 앱은 자기 폴링으로 git 을
+        # 계속 부르므로 여기서 빠지면 앱 자신뿐 아니라 **손자마다** 창이 뜬다.
+        **NO_WINDOW,
     )
     proc._log_handle = handle          # 닫을 때까지 살려 둔다
     return proc

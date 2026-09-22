@@ -9,6 +9,8 @@ import pytest
 
 from gitwire_chat import config
 
+from conftest import NO_WINDOW
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -70,7 +72,7 @@ def test_토큰_값은_저장되지_않는다(tmp_path):
 def _git(*args, cwd=PROJECT_ROOT):
     return subprocess.run(
         ["git", *args], cwd=str(cwd), capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
+        encoding="utf-8", errors="replace", **NO_WINDOW,
     )
 
 

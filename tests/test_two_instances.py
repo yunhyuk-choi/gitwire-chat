@@ -41,7 +41,7 @@ from gitwire_chat.config import Settings
 from gitwire_chat.events import EventBus
 from gitwire_chat.rooms import RoomManager
 
-from conftest import RecordingNotifier
+from conftest import NO_WINDOW, RecordingNotifier
 
 #: 로컬 git 왕복 + 폴 주기를 감안한 여유. 실제로는 훨씬 빨리 끝난다.
 DEADLINE = 60.0
@@ -153,6 +153,7 @@ def _git_bare(bare: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", f"--git-dir={bare}", *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **NO_WINDOW,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout
@@ -443,7 +444,7 @@ def _counts(view: dict, messages: list[dict]) -> list[int]:
     })
     proc = subprocess.run(
         [node, str(COUNT_SCRIPT)], input=payload, capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
+        text=True, encoding="utf-8", errors="replace", **NO_WINDOW,
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)

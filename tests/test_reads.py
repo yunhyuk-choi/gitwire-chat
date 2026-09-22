@@ -43,7 +43,7 @@ from gitwire_chat.config import Settings
 from gitwire_chat.events import EventBus
 from gitwire_chat.rooms import RoomManager
 
-from conftest import ConnectedRoomManager, RecordingNotifier
+from conftest import NO_WINDOW, ConnectedRoomManager, RecordingNotifier
 
 REPO = "https://example.invalid/team/room.git"
 
@@ -281,7 +281,7 @@ def test_형식_판정이_화면과_서버에서_같다():
     proc = subprocess.run(
         [node_bin, "--input-type=module", "-e", script],
         input=json.dumps(samples), capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
+        encoding="utf-8", errors="replace", **NO_WINDOW,
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == [gitwire.is_record_id(x) for x in samples]
@@ -765,6 +765,7 @@ def test_실제_채널에서_커서_파일이_원격까지_간다(real_manager):
     listing = subprocess.run(
         ["git", f"--git-dir={repo}", "ls-tree", "-r", "--name-only", "HEAD"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **NO_WINDOW,
     ).stdout
     want = gitwire.state_path(mgr.person)
     assert want in listing.splitlines(), (want, listing)
